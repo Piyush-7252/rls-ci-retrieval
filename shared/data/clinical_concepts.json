@@ -1,0 +1,881 @@
+{
+  "built_at": "2026-07-26T09:22:21.757106+00:00",
+  "source": "NCIt OBO (ncit.obo) + additional_terms",
+  "groups": {
+    "endpoint": [
+      "orr",
+      "pfs",
+      "os",
+      "dor",
+      "ttf",
+      "safety",
+      "pk",
+      "dose_finding",
+      "mrd",
+      "biomarker"
+    ],
+    "response_criteria": [
+      "response_cr",
+      "response_scr",
+      "response_vgpr",
+      "response_pr",
+      "response_mr",
+      "response_sd",
+      "response_pd"
+    ],
+    "disease": [
+      "disease_mm",
+      "disease_rrmm",
+      "disease_ndmm",
+      "disease_smm"
+    ],
+    "target": [
+      "target_bcma",
+      "target_cd38",
+      "target_gprc5d",
+      "target_cd19",
+      "target_cd20"
+    ],
+    "drug": [
+      "drug_daratumumab",
+      "drug_talquetamab",
+      "drug_teclistamab",
+      "drug_lenalidomide",
+      "drug_bortezomib",
+      "drug_carfilzomib",
+      "drug_pomalidomide",
+      "drug_dexamethasone",
+      "drug_isatuximab"
+    ],
+    "ae_type": [
+      "ae_crs",
+      "ae_icans",
+      "ae_irr",
+      "ae_sae",
+      "ae_teae"
+    ],
+    "lab": [
+      "lab_anc",
+      "lab_hgb",
+      "lab_plt",
+      "lab_ldh",
+      "lab_sflc"
+    ],
+    "stats": [
+      "stats_km",
+      "stats_recist",
+      "stats_ecog",
+      "stats_imwg"
+    ],
+    "role": [
+      "role_pi",
+      "role_ci",
+      "role_si",
+      "role_coordinator",
+      "role_monitor",
+      "role_sponsor"
+    ]
+  },
+  "metadata": {
+    "orr": {
+      "group": "endpoint"
+    },
+    "pfs": {
+      "group": "endpoint"
+    },
+    "os": {
+      "group": "endpoint"
+    },
+    "dor": {
+      "group": "endpoint"
+    },
+    "ttf": {
+      "group": "endpoint"
+    },
+    "safety": {
+      "group": "endpoint"
+    },
+    "pk": {
+      "group": "endpoint"
+    },
+    "dose_finding": {
+      "group": "endpoint"
+    },
+    "mrd": {
+      "group": "endpoint"
+    },
+    "biomarker": {
+      "group": "endpoint"
+    },
+    "response_cr": {
+      "group": "response_criteria"
+    },
+    "response_scr": {
+      "group": "response_criteria"
+    },
+    "response_vgpr": {
+      "group": "response_criteria"
+    },
+    "response_pr": {
+      "group": "response_criteria"
+    },
+    "response_mr": {
+      "group": "response_criteria"
+    },
+    "response_sd": {
+      "group": "response_criteria"
+    },
+    "response_pd": {
+      "group": "response_criteria"
+    },
+    "disease_mm": {
+      "group": "disease",
+      "canonical_name": "multiple myeloma"
+    },
+    "disease_rrmm": {
+      "group": "disease",
+      "canonical_name": "relapsed/refractory multiple myeloma"
+    },
+    "disease_ndmm": {
+      "group": "disease",
+      "canonical_name": "newly diagnosed multiple myeloma"
+    },
+    "disease_smm": {
+      "group": "disease",
+      "canonical_name": "smoldering multiple myeloma"
+    },
+    "target_bcma": {
+      "group": "target"
+    },
+    "target_cd38": {
+      "group": "target"
+    },
+    "target_gprc5d": {
+      "group": "target"
+    },
+    "target_cd19": {
+      "group": "target"
+    },
+    "target_cd20": {
+      "group": "target"
+    },
+    "drug_daratumumab": {
+      "group": "drug",
+      "canonical_name": "daratumumab"
+    },
+    "drug_talquetamab": {
+      "group": "drug",
+      "canonical_name": "talquetamab"
+    },
+    "drug_teclistamab": {
+      "group": "drug",
+      "canonical_name": "teclistamab"
+    },
+    "drug_lenalidomide": {
+      "group": "drug",
+      "canonical_name": "lenalidomide"
+    },
+    "drug_bortezomib": {
+      "group": "drug",
+      "canonical_name": "bortezomib"
+    },
+    "drug_carfilzomib": {
+      "group": "drug",
+      "canonical_name": "carfilzomib"
+    },
+    "drug_pomalidomide": {
+      "group": "drug",
+      "canonical_name": "pomalidomide"
+    },
+    "drug_dexamethasone": {
+      "group": "drug",
+      "canonical_name": "dexamethasone"
+    },
+    "drug_isatuximab": {
+      "group": "drug",
+      "canonical_name": "isatuximab"
+    },
+    "ae_crs": {
+      "group": "ae_type"
+    },
+    "ae_icans": {
+      "group": "ae_type"
+    },
+    "ae_irr": {
+      "group": "ae_type"
+    },
+    "ae_sae": {
+      "group": "ae_type"
+    },
+    "ae_teae": {
+      "group": "ae_type"
+    },
+    "lab_anc": {
+      "group": "lab"
+    },
+    "lab_hgb": {
+      "group": "lab"
+    },
+    "lab_plt": {
+      "group": "lab"
+    },
+    "lab_ldh": {
+      "group": "lab"
+    },
+    "lab_sflc": {
+      "group": "lab"
+    },
+    "stats_km": {
+      "group": "stats"
+    },
+    "stats_recist": {
+      "group": "stats"
+    },
+    "stats_ecog": {
+      "group": "stats"
+    },
+    "stats_imwg": {
+      "group": "stats"
+    },
+    "role_pi": {
+      "group": "role",
+      "canonical_name": "principal investigator"
+    },
+    "role_ci": {
+      "group": "role",
+      "canonical_name": "chief investigator"
+    },
+    "role_si": {
+      "group": "role",
+      "canonical_name": "sub-investigator"
+    },
+    "role_coordinator": {
+      "group": "role",
+      "canonical_name": "study coordinator"
+    },
+    "role_monitor": {
+      "group": "role",
+      "canonical_name": "monitor"
+    },
+    "role_sponsor": {
+      "group": "role",
+      "canonical_name": "sponsor"
+    }
+  },
+  "categories": {
+    "orr": [
+      "best overall response",
+      "continued response rate",
+      "durable response rate",
+      "major hematologic response rate",
+      "mds orr",
+      "mds overall response rate",
+      "myelodysplastic syndrome orr",
+      "myelodysplastic syndrome overall response rate",
+      "objective response rate",
+      "orr",
+      "overall response",
+      "overall response rate",
+      "recist study objective response rate",
+      "response rate",
+      "study objective response rate",
+      "tumor response rate",
+      "tumour response rate"
+    ],
+    "pfs": [
+      "event-free survival",
+      "pfs",
+      "progression free survival",
+      "progression-free survival",
+      "relapse-free survival"
+    ],
+    "os": [
+      "os",
+      "overall survival"
+    ],
+    "dor": [
+      "dor",
+      "duration of remission",
+      "duration of response",
+      "response duration",
+      "time in response"
+    ],
+    "ttf": [
+      "time to best response",
+      "time to first confirmed response",
+      "time to first response",
+      "time to response",
+      "ttf"
+    ],
+    "safety": [
+      "adr",
+      "adverse drug experience",
+      "adverse drug reaction",
+      "adverse drug reaction (adr)",
+      "adverse effect",
+      "adverse event",
+      "adverse event (ae)",
+      "adverse event by cause",
+      "adverse event by ctcae version",
+      "adverse event by report type",
+      "adverse event by severity",
+      "adverse event by type",
+      "adverse event of special interest",
+      "adverse event with no consequence or impact",
+      "adverse events of special interest",
+      "adverse experience",
+      "adverse late effects",
+      "adverse reaction",
+      "adverse_event",
+      "adverseevent",
+      "ae",
+      "ar",
+      "immune related side effect",
+      "immune-mediated adverse event",
+      "immune-mediated adverse reaction",
+      "immune-related adverse event",
+      "irae",
+      "late adverse effect",
+      "late adverse reaction",
+      "late effect",
+      "late effects",
+      "le",
+      "long-term effects secondary to cancer therapy",
+      "neonatal adverse event",
+      "no health consequences or impact",
+      "reactogenicity",
+      "safety profile",
+      "side effect",
+      "side effects",
+      "skin reaction secondary to radiation therapy",
+      "tfr",
+      "tolerability",
+      "toxicity",
+      "tumor flare reaction"
+    ],
+    "pk": [
+      "absorption, distribution, metabolism and excretion",
+      "absorption, distribution, metabolism, and excretion study",
+      "adme",
+      "adme study",
+      "auc",
+      "bioavailability",
+      "clearance",
+      "cmax",
+      "exposure",
+      "half-life",
+      "pharmacokinetic",
+      "pharmacokinetic (pk) study",
+      "pharmacokinetics",
+      "pk",
+      "pk/pd"
+    ],
+    "dose_finding": [
+      "dlt",
+      "dose escalation",
+      "dose expansion",
+      "dose limiting toxicity",
+      "dose-limiting toxicity",
+      "maximum tolerated dose",
+      "mtd",
+      "recommended phase 2 dose",
+      "recommended phase ii dose",
+      "rp2d",
+      "starting dose"
+    ],
+    "mrd": [
+      "detectable residual disease",
+      "measurable residual disease",
+      "minimal residual disease",
+      "mrd",
+      "mrd negative",
+      "mrd negativity",
+      "mrd-negative",
+      "quantifiable measurable residual disease positivity",
+      "quantifiable minimal residual disease positivity",
+      "quantifiable mrd positivity"
+    ],
+    "biomarker": [
+      "bcma expression",
+      "biological marker",
+      "biological markers",
+      "biomarker",
+      "biomarkers",
+      "cd38 expression",
+      "circulating tumor dna",
+      "circulating tumour dna",
+      "ctdna",
+      "genomic marker",
+      "marker",
+      "molecular marker",
+      "pharmacodynamic marker",
+      "predictive biomarker",
+      "signature molecule"
+    ],
+    "response_cr": [
+      "cancer in complete remission(finding)",
+      "cancer-free",
+      "ccr",
+      "chr",
+      "clinical complete remission",
+      "clinical complete response",
+      "complete hematologic remission",
+      "complete hematologic response",
+      "complete measurable residual disease response",
+      "complete minimal residual disease response",
+      "complete mrd response",
+      "complete pathological response",
+      "complete remission",
+      "complete remission in leukemia",
+      "complete remission with partial hematologic recovery",
+      "complete remission with partial hematological recovery",
+      "complete remission without minimal residual disease",
+      "complete remission, ct-based",
+      "complete remission/response",
+      "complete response",
+      "complete response by computed tomography",
+      "complete response in aplastic anemia",
+      "complete response in gvhd",
+      "complete response in solid tumors",
+      "complete response of multiple myeloma or plasma cell leukemia",
+      "complete response with hematologic improvement",
+      "complete response without minimal residual disease",
+      "complete response, ct-based",
+      "continued complete response",
+      "cr",
+      "cr without minimal residual disease",
+      "cr-complete response",
+      "cr-ct",
+      "crh",
+      "crmrd-",
+      "crmrd-negative",
+      "durable complete response",
+      "icr",
+      "irecist complete response",
+      "iwg-mrt myelofibrosis complete remission",
+      "marrow complete remission",
+      "marrow complete response",
+      "marrow cr",
+      "mcr",
+      "minimal residual disease-negative complete remission",
+      "minimal residual disease-negative complete response",
+      "modified ircr",
+      "modified overall immune related response criterion, complete remission",
+      "mrd-negative complete remission",
+      "mrd-negative complete response",
+      "non irecist complete response-non irecist unconfirmed progressive disease",
+      "non-icr/non-iupd",
+      "pathologic complete remission",
+      "pathologic complete response",
+      "pathological complete remission",
+      "pcr",
+      "recist complete response",
+      "scr",
+      "scr-stringent complete response",
+      "stringent complete remission",
+      "stringent complete response"
+    ],
+    "response_scr": [
+      "scr",
+      "stringent complete remission",
+      "stringent complete response"
+    ],
+    "response_vgpr": [
+      "very good partial remission",
+      "very good partial response",
+      "vgpr",
+      "vgpr-very good partial response"
+    ],
+    "response_pr": [
+      "partial remission",
+      "partial response",
+      "pr"
+    ],
+    "response_mr": [
+      "minimal response",
+      "minor response",
+      "mr"
+    ],
+    "response_sd": [
+      "sd",
+      "stable disease"
+    ],
+    "response_pd": [
+      "disease progression",
+      "pd",
+      "progressive disease"
+    ],
+    "disease_mm": [
+      "kahler disease",
+      "mm",
+      "multiple myeloma",
+      "multiple myeloma/plasma cell myeloma",
+      "myeloma",
+      "myeloma, nos",
+      "myeloma, plasma cell, malignant",
+      "myelomatosis",
+      "plasma cell myeloma",
+      "plasma cell myeloma/multiple myeloma"
+    ],
+    "disease_rrmm": [
+      "r/r mm",
+      "relapsed or refractory multiple myeloma",
+      "relapsed refractory multiple myeloma",
+      "relapsed/refractory multiple myeloma",
+      "rrmm"
+    ],
+    "disease_ndmm": [
+      "ndmm",
+      "newly diagnosed mm",
+      "newly diagnosed multiple myeloma",
+      "treatment-naive multiple myeloma"
+    ],
+    "disease_smm": [
+      "asymptomatic myeloma",
+      "asymptomatic plasma cell myeloma",
+      "indolent multiple myeloma",
+      "smm",
+      "smoldering multiple myeloma",
+      "smoldering multiple myeloma/plasma cell myeloma",
+      "smoldering myeloma",
+      "smoldering plasma cell myeloma"
+    ],
+    "target_bcma": [
+      "anti-bcma",
+      "b-cell maturation antigen",
+      "bcma",
+      "bcma-directed",
+      "tnfrsf17"
+    ],
+    "target_cd38": [
+      "anti-cd38",
+      "cd38",
+      "cd38-directed",
+      "cluster of differentiation 38"
+    ],
+    "target_gprc5d": [
+      "anti-gprc5d",
+      "g protein-coupled receptor class c group 5 member d",
+      "gprc5d",
+      "gprc5d-directed"
+    ],
+    "target_cd19": [
+      "anti-cd19",
+      "cd19",
+      "cluster of differentiation 19"
+    ],
+    "target_cd20": [
+      "anti-cd20",
+      "cd20",
+      "cluster of differentiation 20"
+    ],
+    "drug_daratumumab": [
+      "anti-cd38 antibody",
+      "cd38 monoclonal antibody",
+      "dara",
+      "daratumumab",
+      "daratumumab biosimilar hlx15",
+      "daratumumab-fihj",
+      "darzalex",
+      "hlx15",
+      "humax-cd38",
+      "jnj 54767414",
+      "jnj-54767414",
+      "jnj54767414"
+    ],
+    "drug_talquetamab": [
+      "anti-cd3/anti-gprc5d bispecific monoclonal antibody jnj-64407564",
+      "anti-gprc5d",
+      "gprc5d bispecific",
+      "gprc5d x cd3 bispecific antibody jnj-64407564",
+      "gprc5d x cd3 duobody antibody jnj-64407564",
+      "gprc5d/cd3 duobody antibody jnj-64407564",
+      "gprc5d×cd3",
+      "humanized gprc5d x cd3 duobody antibody jnj-64407564",
+      "jnj 64407564",
+      "jnj-64407564",
+      "jnj64407564",
+      "talquetamab",
+      "talquetamab-tgvs",
+      "talvey"
+    ],
+    "drug_teclistamab": [
+      "anti-bcma",
+      "bcma bispecific",
+      "bcma×cd3",
+      "jnj 64007957",
+      "jnj-64007957",
+      "jnj64007957",
+      "teclistamab",
+      "teclistamab-cqyv",
+      "tecvayli"
+    ],
+    "drug_lenalidomide": [
+      "3-(4-amino-1-oxo-1,3-dihydro-2h-isoindol-2-yl)piperidine-2,6-dione",
+      "cc 5013",
+      "cc-5013",
+      "cc5013",
+      "cdc 501",
+      "len",
+      "lenalidomide",
+      "revlimid"
+    ],
+    "drug_bortezomib": [
+      "bort",
+      "bortezomib",
+      "ldp 341",
+      "ldp-341",
+      "ldp341",
+      "mln 341",
+      "mln-341",
+      "mln341",
+      "ps 341",
+      "ps-341",
+      "ps341",
+      "velcade"
+    ],
+    "drug_carfilzomib": [
+      "(2s)-n-((1s)-1-benzyl-2-(((1s)-3-methyl-1-(((2r)-2-methyloxiran-2-yl)carbonyl)butyl)amino)-2-oxoethyl)-4-methyl-2-(((2s)-2-((morpholin-4-ylacetyl)amino)-4-phenylbutanoyl)amino)pentanamide",
+      "carfilnat",
+      "carfilzomib",
+      "cfz",
+      "kyprolis",
+      "pr 171",
+      "pr-171",
+      "pr171"
+    ],
+    "drug_pomalidomide": [
+      "3-amino-n-(2,6-dioxo-3-piperidyl)phthalimide",
+      "4-amino-2-(2,6-dioxo-3-piperidyl)isoindoline-1,3-dione",
+      "4-aminothalidomide",
+      "actimid",
+      "cc 4047",
+      "cc-4047",
+      "cc4047",
+      "imnovid",
+      "poma",
+      "pomalidomide",
+      "pomalyst"
+    ],
+    "drug_dexamethasone": [
+      "(11beta,16alpha)-9-fluoro-11,17,21-trihydroxy-16-methylpregna-1,4-diene-3,20-dione",
+      "1-dehydro-16alpha-methyl-9alpha-fluorohydrocortisone",
+      "16alpha-methyl-9alpha-fluoro-1,4-pregnadiene-11beta,17alpha,21-triol-3,20-dione",
+      "16alpha-methyl-9alpha-fluoro-delta1-hydrocortisone",
+      "16alpha-methyl-9alpha-fluoroprednisolone",
+      "9alpha-fluoro-11beta,17alpha,21-trihydroxy-16alpha-methylpregna-1,4-diene-3,20-dione",
+      "9alpha-fluoro-16alpha- methylprednisolone",
+      "9alpha-fluoro-16alpha-methylprednisolone",
+      "aacidexam",
+      "adexone",
+      "aknichthol dexa",
+      "alba-dex",
+      "alin",
+      "alin depot",
+      "alin oftalmico",
+      "amplidermis",
+      "anemul mono",
+      "auricularum",
+      "auxiloson",
+      "baycadron",
+      "baycuten",
+      "baycuten n",
+      "cortidexason",
+      "cortisumman",
+      "decacort",
+      "decadrol",
+      "decadron",
+      "decadron dp",
+      "decalix",
+      "decameth",
+      "decasone r.p.",
+      "dectancyl",
+      "dekacort",
+      "deltafluorene",
+      "deronil",
+      "desamethasone",
+      "desameton",
+      "dex",
+      "dexa-mamallet",
+      "dexa-rhinosan",
+      "dexa-scheroson",
+      "dexa-sine",
+      "dexacortal",
+      "dexacortin",
+      "dexafarma",
+      "dexafluorene",
+      "dexalocal",
+      "dexamecortin",
+      "dexameth",
+      "dexamethasone",
+      "dexamethasone intensol",
+      "dexamethasonum",
+      "dexamonozon",
+      "dexapos",
+      "dexinoral",
+      "dexone",
+      "dinormon",
+      "dxevo",
+      "fluoro-9alpha methyl-16alpha prednisolone",
+      "fluorodelta",
+      "fortecortin",
+      "gammacorten",
+      "hemady",
+      "hexadecadrol",
+      "hexadrol",
+      "lenadex",
+      "lokalison-f",
+      "loverine",
+      "methylfluorprednisolone",
+      "millicorten",
+      "mymethasone",
+      "orgadrone",
+      "spersadex",
+      "taperdex",
+      "visumetazone",
+      "zodex"
+    ],
+    "drug_isatuximab": [
+      "hu 38sb19",
+      "immunoglobulin g1, anti-(human cd38 antigen) (human-mus musculus monoclonal hu38sb19 heavy chain), disulfide with human-mus musculus monoclonal hu38sb19 light chain, dimer",
+      "isa",
+      "isatuximab",
+      "isatuximab-irfc",
+      "sar 650984",
+      "sar-650984",
+      "sar650984",
+      "sarclisa"
+    ],
+    "ae_crs": [
+      "crs",
+      "cytokine release syndrome",
+      "cytokine storm"
+    ],
+    "ae_icans": [
+      "icans",
+      "iec-associated neurotoxicity syndrome",
+      "immune effector cell associated neurotoxicity syndrome",
+      "immune effector cell encephalopathy",
+      "immune-effector cell-associated neurotoxicity syndrome",
+      "neurotoxicity"
+    ],
+    "ae_irr": [
+      "infusion related reaction",
+      "infusion-related reaction",
+      "irr"
+    ],
+    "ae_sae": [
+      "sae",
+      "serious adverse event",
+      "serious adverse event (sae)"
+    ],
+    "ae_teae": [
+      "teae",
+      "treatment emergent adverse event",
+      "treatment-emergent adverse event"
+    ],
+    "lab_anc": [
+      "absolute neutrophil",
+      "absolute neutrophil count",
+      "anc",
+      "neut",
+      "neutrophils"
+    ],
+    "lab_hgb": [
+      "haemoglobin",
+      "hb",
+      "hemoglobin",
+      "hgb"
+    ],
+    "lab_plt": [
+      "anucleated thrombocytes",
+      "plat",
+      "platelet count",
+      "platelets",
+      "plt",
+      "thrombocyte count"
+    ],
+    "lab_ldh": [
+      "lactate dehydrogenase",
+      "lactic dehydrogenase",
+      "ldh"
+    ],
+    "lab_sflc": [
+      "flc",
+      "free light chain",
+      "kappa free light chain",
+      "lambda free light chain",
+      "serum free light chain",
+      "sflc"
+    ],
+    "stats_km": [
+      "kaplan meier",
+      "kaplan meier survival plot",
+      "kaplan-meier",
+      "kaplan-meier estimator",
+      "km curve",
+      "km estimate"
+    ],
+    "stats_recist": [
+      "recist",
+      "recist 1.0",
+      "recist 1.1",
+      "response evaluation criteria in solid tumors",
+      "response evaluation criteria in solid tumors version 1.0",
+      "response evaluation criteria in solid tumors version 1.1"
+    ],
+    "stats_ecog": [
+      "eastern cooperative oncology group",
+      "eastern cooperative oncology group performance status clinical classification",
+      "ecog",
+      "ecog performance status",
+      "ecog ps",
+      "ecog1"
+    ],
+    "stats_imwg": [
+      "imwg",
+      "imwg criteria",
+      "imwg response criteria",
+      "international myeloma working group"
+    ],
+    "role_pi": [
+      "lead investigator",
+      "pi",
+      "principal investigator",
+      "qualified investigator",
+      "site principal investigator",
+      "study investigator"
+    ],
+    "role_ci": [
+      "chief investigator",
+      "ci",
+      "coordinating investigator",
+      "lead investigator"
+    ],
+    "role_si": [
+      "co-investigator",
+      "coinvestigator",
+      "sub-i",
+      "sub-investigator"
+    ],
+    "role_coordinator": [
+      "clinical research coordinator",
+      "crc",
+      "research coordinator",
+      "site coordinator",
+      "study coordinator"
+    ],
+    "role_monitor": [
+      "clinical monitor",
+      "clinical research associate",
+      "cra",
+      "monitor",
+      "site monitor"
+    ],
+    "role_sponsor": [
+      "sponsor",
+      "sponsor-investigator",
+      "study sponsor"
+    ]
+  }
+}
