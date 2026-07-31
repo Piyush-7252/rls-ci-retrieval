@@ -5,7 +5,7 @@ Build tool: construct drug_graph.json from NCIt OBO + RxNorm + custom aliases.
 Architecture
 ────────────
   NCIt OBO        ──┐
-  RxNorm API      ──┼──► DrugGraphBuilder ──► localfiles/drug_graph.json
+  RxNorm API      ──┼──► DrugGraphBuilder ──► shared/data/drug_graph.json
   drug_aliases.json ──┘
 
   The resulting graph is loaded at Lambda cold-start by shared/drug_identity.py.
@@ -27,7 +27,7 @@ Usage
   # Dry-run (print summary, do not write):
   python tools/build_drug_graph.py --ncit /tmp/ncit_owl/ncit.obo --dry-run
 
-Output schema (localfiles/drug_graph.json)
+Output schema (shared/data/drug_graph.json)
 ──────────────────────────────────────────
   {
     "_meta": { "built": "...", "sources": [...] },
@@ -60,8 +60,8 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 
 _REPO_ROOT    = Path(__file__).resolve().parent.parent
-_ALIASES_PATH = _REPO_ROOT / "localfiles" / "drug_aliases.json"
-_OUT_PATH     = _REPO_ROOT / "localfiles" / "drug_graph.json"
+_ALIASES_PATH = _REPO_ROOT / "shared" / "data" / "drug_aliases.json"
+_OUT_PATH     = _REPO_ROOT / "shared" / "data" / "drug_graph.json"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Seed configuration

@@ -1,0 +1,116 @@
+{
+  "_meta": {
+    "purpose": "Trial-specific aliases and protocol knowledge that NCIt and RxNorm do not model. This is the ONLY place hardcoded drug knowledge lives — NCIt and RxNorm supply the rest.",
+    "note": "All alias keys are lower-cased. Values must match canonical_id keys in drug_graph.json.",
+    "maintained_by": "Clinical data team — update when new trials / regimen abbreviations appear"
+  },
+
+  "aliases": {
+    "_comment_bispecifics": "─── Bispecific antibodies (trial codes / brand names) ───",
+    "tec":             "teclistamab",
+    "tecvayli":        "teclistamab",
+    "jnj-64007957":   "teclistamab",
+    "jnj64007957":    "teclistamab",
+    "jnj 64007957":   "teclistamab",
+
+    "tal":             "talquetamab",
+    "talvey":          "talquetamab",
+    "jnj-64407564":   "talquetamab",
+    "jnj64407564":    "talquetamab",
+    "jnj 64407564":   "talquetamab",
+
+    "pfn-7264":        "elranatamab",
+    "pf-06863135":    "elranatamab",
+    "elrexfio":        "elranatamab",
+
+    "_comment_cd38": "─── Anti-CD38 mAbs ───",
+    "dara":            "daratumumab",
+    "darzalex":        "daratumumab",
+    "darzalex faspro": "daratumumab",
+    "daratumumab hyaluronidase-fihj": "daratumumab",
+
+    "isa":             "isatuximab",
+    "sarclisa":        "isatuximab",
+    "sar650984":       "isatuximab",
+
+    "_comment_pi": "─── Proteasome inhibitors ───",
+    "btz":             "bortezomib",
+    "velcade":         "bortezomib",
+    "ps-341":          "bortezomib",
+
+    "cfz":             "carfilzomib",
+    "kyprolis":        "carfilzomib",
+    "pr-171":          "carfilzomib",
+
+    "_comment_imid": "─── IMiDs / CELMoDs ───",
+    "len":             "lenalidomide",
+    "revlimid":        "lenalidomide",
+    "cc-5013":         "lenalidomide",
+
+    "pom":             "pomalidomide",
+    "pomalyst":        "pomalidomide",
+    "cc-4047":         "pomalidomide",
+
+    "thal":            "thalidomide",
+
+    "cc-220":          "iberdomide",
+    "cc-92480":        "mezigdomide",
+
+    "_comment_steroids": "─── Steroids ───",
+    "dex":             "dexamethasone",
+    "decadron":        "dexamethasone",
+    "pred":            "prednisone",
+
+    "_comment_alkylating": "─── Alkylating agents ───",
+    "cy":              "cyclophosphamide",
+    "mel":             "melphalan",
+
+    "_comment_other": "─── Other agents ───",
+    "elo":             "elotuzumab",
+    "empliciti":       "elotuzumab",
+    "farydak":         "panobinostat",
+    "ven":             "venetoclax",
+    "venclyxto":       "venetoclax",
+    "venclexta":       "venetoclax",
+    "caelyx":          "doxorubicin",
+    "liposomal doxorubicin": "doxorubicin",
+
+    "_comment_cart": "─── BCMA CAR-T ───",
+    "cilta-cel":       "ciltacabtagene_autoleucel",
+    "ciltacel":        "ciltacabtagene_autoleucel",
+    "jnj-68284528":   "ciltacabtagene_autoleucel",
+
+    "ide-cel":         "idecabtagene_vicleucel",
+    "idecel":          "idecabtagene_vicleucel",
+    "bb2121":          "idecabtagene_vicleucel",
+
+    "orva-cel":        "orvacabtagene_autoleucel"
+  },
+
+  "combos": [
+    {"id": "tec-dara",   "pattern": "tec[\\s\\-+]?dara",                           "components": ["teclistamab", "daratumumab"]},
+    {"id": "tal-dara",   "pattern": "tal[\\s\\-+]?dara",                            "components": ["talquetamab", "daratumumab"]},
+    {"id": "tec-pd",     "pattern": "tec[\\s\\-+]?(?:pom[\\s\\-+]?dex|pd(?!\\w))", "components": ["teclistamab", "pomalidomide", "dexamethasone"]},
+    {"id": "tec-ld",     "pattern": "tec[\\s\\-+]?(?:len[\\s\\-+]?dex|ld(?!\\w))|\\btecd\\b", "components": ["teclistamab", "lenalidomide", "dexamethasone"]},
+    {"id": "tal-pd",     "pattern": "tal[\\s\\-+]?(?:pom[\\s\\-+]?dex|pd(?!\\w))", "components": ["talquetamab", "pomalidomide", "dexamethasone"]},
+    {"id": "vrd",        "pattern": "\\bvrd\\b|\\brvd\\b",                          "components": ["bortezomib", "lenalidomide", "dexamethasone"]},
+    {"id": "vcd",        "pattern": "\\bvcd\\b|\\bcvd\\b",                          "components": ["bortezomib", "cyclophosphamide", "dexamethasone"]},
+    {"id": "krd",        "pattern": "\\bkrd\\b|\\brkd\\b",                          "components": ["carfilzomib", "lenalidomide", "dexamethasone"]},
+    {"id": "kpd",        "pattern": "\\bkpd\\b",                                    "components": ["carfilzomib", "pomalidomide", "dexamethasone"]},
+    {"id": "dvrd",       "pattern": "\\bdvrd\\b|dara[\\s\\-+]?vrd",                 "components": ["daratumumab", "bortezomib", "lenalidomide", "dexamethasone"]},
+    {"id": "dvcd",       "pattern": "\\bdvcd\\b|dara[\\s\\-+]?vcd",                 "components": ["daratumumab", "bortezomib", "cyclophosphamide", "dexamethasone"]},
+    {"id": "drd",        "pattern": "\\bdrd\\b|dara[\\s\\-+]?rd",                   "components": ["daratumumab", "lenalidomide", "dexamethasone"]},
+    {"id": "dpd",        "pattern": "\\bdpd\\b|dara[\\s\\-+]?pd(?!\\w)",            "components": ["daratumumab", "pomalidomide", "dexamethasone"]},
+    {"id": "isa-pd",     "pattern": "\\bisa[\\s\\-+]?pd\\b",                        "components": ["isatuximab", "pomalidomide", "dexamethasone"]},
+    {"id": "isa-krd",    "pattern": "\\bisa[\\s\\-+]?krd\\b",                       "components": ["isatuximab", "carfilzomib", "lenalidomide", "dexamethasone"]},
+    {"id": "vmp",        "pattern": "\\bvmp\\b|\\bmpv\\b",                          "components": ["bortezomib", "melphalan", "prednisone"]}
+  ],
+
+  "families": {
+    "_comment": "Cross-family related groupings — same clinical target space, different modality",
+    "bcma_bispecific": {"related": ["bcma_cart"]},
+    "bcma_cart":       {"related": ["bcma_bispecific"]},
+    "imid":            {"related": ["celmod"]},
+    "celmod":          {"related": ["imid"]}
+  }
+}

@@ -1,0 +1,858 @@
+{
+  "_meta": {
+    "built": "2026-07-26T12:33:11.330193+00:00",
+    "sources": [
+      "NCIt OBO (ncit.obo)",
+      "custom aliases"
+    ]
+  },
+  "nodes": {
+    "teclistamab": {
+      "canonical_id": "teclistamab",
+      "display": "Teclistamab",
+      "aliases": [
+        "jnj 64007957",
+        "jnj-64007957",
+        "jnj64007957",
+        "tec",
+        "teclistamab",
+        "teclistamab-cqyv",
+        "tecvayli"
+      ],
+      "ncit_code": "C136823",
+      "rxcui": null,
+      "family": "bcma_bispecific",
+      "target": "BCMA"
+    },
+    "elranatamab": {
+      "canonical_id": "elranatamab",
+      "display": "Elranatamab",
+      "aliases": [
+        "anti-cd3/anti-bcma bispecific antibody pf-06863135",
+        "b-cell maturation antigen-cd3 bispecific antibody pf-06863135",
+        "bcma x cd3 bispecific antibody pf-06863135",
+        "bcma-cd3 bispecific ab pf-06863135",
+        "elranatamab",
+        "elranatamab-bcmm",
+        "elrexfio",
+        "pf 06863135",
+        "pf-06863135",
+        "pf06863135",
+        "pfn-7264",
+        "rn 613",
+        "rn-613",
+        "rn613"
+      ],
+      "ncit_code": "C146860",
+      "rxcui": null,
+      "family": "bcma_bispecific",
+      "target": "BCMA"
+    },
+    "talquetamab": {
+      "canonical_id": "talquetamab",
+      "display": "Talquetamab",
+      "aliases": [
+        "anti-cd3/anti-gprc5d bispecific monoclonal antibody jnj-64407564",
+        "gprc5d x cd3 bispecific antibody jnj-64407564",
+        "gprc5d x cd3 duobody antibody jnj-64407564",
+        "gprc5d/cd3 duobody antibody jnj-64407564",
+        "humanized gprc5d x cd3 duobody antibody jnj-64407564",
+        "jnj 64407564",
+        "jnj-64407564",
+        "jnj64407564",
+        "tal",
+        "talquetamab",
+        "talquetamab-tgvs",
+        "talvey"
+      ],
+      "ncit_code": "C171840",
+      "rxcui": null,
+      "family": "gprc5d_bispecific",
+      "target": "GPRC5D"
+    },
+    "cevostamab": {
+      "canonical_id": "cevostamab",
+      "display": "Cevostamab",
+      "aliases": [
+        "anti-fcrh5 x anti-cd3 bi-specific t-cell engager bfcr4350a",
+        "anti-fcrh5/cd3 bite antibody bfcr4350a",
+        "anti-fcrh5/cd3 tdb bfcr4350a",
+        "bfcr4350a",
+        "cevostamab",
+        "fcrh5/cd3 t cell dependent bispecific antibody bfcr4350a",
+        "fcrh5/cd3 tdb antibody bfcr4350a",
+        "recombinant anti-fcrh5 x anti-cd3 bi-specific t-cell engager bfcr4350a",
+        "ro7187797"
+      ],
+      "ncit_code": "C139549",
+      "rxcui": null,
+      "family": "fcrh5_bispecific",
+      "target": "FcRH5"
+    },
+    "daratumumab": {
+      "canonical_id": "daratumumab",
+      "display": "Daratumumab",
+      "aliases": [
+        "dara",
+        "daratumumab",
+        "daratumumab biosimilar hlx15",
+        "daratumumab hyaluronidase-fihj",
+        "daratumumab-fihj",
+        "darzalex",
+        "darzalex faspro",
+        "hlx15",
+        "humax-cd38",
+        "jnj 54767414",
+        "jnj-54767414",
+        "jnj54767414"
+      ],
+      "ncit_code": "C74007",
+      "rxcui": null,
+      "family": "anti_cd38",
+      "target": "CD38"
+    },
+    "isatuximab": {
+      "canonical_id": "isatuximab",
+      "display": "Isatuximab",
+      "aliases": [
+        "hu 38sb19",
+        "isa",
+        "isatuximab",
+        "isatuximab-irfc",
+        "sar 650984",
+        "sar-650984",
+        "sar650984",
+        "sarclisa"
+      ],
+      "ncit_code": "C90578",
+      "rxcui": null,
+      "family": "anti_cd38",
+      "target": "CD38"
+    },
+    "bortezomib": {
+      "canonical_id": "bortezomib",
+      "display": "Bortezomib",
+      "aliases": [
+        "bortezomib",
+        "btz",
+        "ldp 341",
+        "ldp-341",
+        "ldp341",
+        "mln 341",
+        "mln-341",
+        "mln341",
+        "ps 341",
+        "ps-341",
+        "ps341",
+        "velcade"
+      ],
+      "ncit_code": "C1851",
+      "rxcui": null,
+      "family": "proteasome_inhibitor",
+      "target": "Proteasome"
+    },
+    "carfilzomib": {
+      "canonical_id": "carfilzomib",
+      "display": "Carfilzomib",
+      "aliases": [
+        "carfilnat",
+        "carfilzomib",
+        "cfz",
+        "kyprolis",
+        "pr 171",
+        "pr-171",
+        "pr171"
+      ],
+      "ncit_code": "C52196",
+      "rxcui": null,
+      "family": "proteasome_inhibitor",
+      "target": "Proteasome"
+    },
+    "ixazomib": {
+      "canonical_id": "ixazomib",
+      "display": "Ixazomib",
+      "aliases": [
+        "ixazomib",
+        "mln 2238",
+        "mln-2238",
+        "mln2238",
+        "{(1r)-1-[(2,5-dichlorobenzamido)acetamido]-3-methylbutyl}boronic acid"
+      ],
+      "ncit_code": "C97940",
+      "rxcui": null,
+      "family": "proteasome_inhibitor",
+      "target": "Proteasome"
+    },
+    "thalidomide": {
+      "canonical_id": "thalidomide",
+      "display": "Thalidomide",
+      "aliases": [
+        "suramin",
+        "thal",
+        "thalidomide"
+      ],
+      "ncit_code": "C853",
+      "rxcui": null,
+      "family": "imid",
+      "target": "CRBN"
+    },
+    "lenalidomide": {
+      "canonical_id": "lenalidomide",
+      "display": "Lenalidomide",
+      "aliases": [
+        "3-(4-amino-1-oxo-1,3-dihydro-2h-isoindol-2-yl)piperidine-2,6-dione",
+        "cc 5013",
+        "cc-5013",
+        "cc5013",
+        "cdc 501",
+        "len",
+        "lenalidomide",
+        "revlimid"
+      ],
+      "ncit_code": "C2668",
+      "rxcui": null,
+      "family": "imid",
+      "target": "CRBN"
+    },
+    "pomalidomide": {
+      "canonical_id": "pomalidomide",
+      "display": "Pomalidomide",
+      "aliases": [
+        "3-amino-n-(2,6-dioxo-3-piperidyl)phthalimide",
+        "4-amino-2-(2,6-dioxo-3-piperidyl)isoindoline-1,3-dione",
+        "4-aminothalidomide",
+        "actimid",
+        "cc 4047",
+        "cc-4047",
+        "cc4047",
+        "imnovid",
+        "pom",
+        "pomalidomide",
+        "pomalyst"
+      ],
+      "ncit_code": "C72560",
+      "rxcui": null,
+      "family": "imid",
+      "target": "CRBN"
+    },
+    "iberdomide": {
+      "canonical_id": "iberdomide",
+      "display": "Iberdomide",
+      "aliases": [
+        "cc 220",
+        "cc-220",
+        "iberdomide"
+      ],
+      "ncit_code": "C129048",
+      "rxcui": null,
+      "family": "celmod",
+      "target": "CRBN"
+    },
+    "mezigdomide": {
+      "canonical_id": "mezigdomide",
+      "display": "Mezigdomide",
+      "aliases": [
+        "bms 986348",
+        "bms-986348",
+        "bms986348",
+        "cc 92480",
+        "cc-92480",
+        "cc92480",
+        "celmod cc-92480",
+        "cereblon e3 ligase modulation drug cc-92480",
+        "cereblon e3 ubiquitin ligase modulating agent cc-92480",
+        "cereblon modulator cc-92480",
+        "mezigdomide"
+      ],
+      "ncit_code": "C146660",
+      "rxcui": null,
+      "family": "celmod",
+      "target": "CRBN"
+    },
+    "dexamethasone": {
+      "canonical_id": "dexamethasone",
+      "display": "Dexamethasone",
+      "aliases": [
+        "1-dehydro-16alpha-methyl-9alpha-fluorohydrocortisone",
+        "16alpha-methyl-9alpha-fluoro-1,4-pregnadiene-11beta,17alpha,21-triol-3,20-dione",
+        "16alpha-methyl-9alpha-fluoro-delta1-hydrocortisone",
+        "16alpha-methyl-9alpha-fluoroprednisolone",
+        "9alpha-fluoro-11beta,17alpha,21-trihydroxy-16alpha-methylpregna-1,4-diene-3,20-dione",
+        "9alpha-fluoro-16alpha- methylprednisolone",
+        "9alpha-fluoro-16alpha-methylprednisolone",
+        "aacidexam",
+        "adexone",
+        "aknichthol dexa",
+        "alba-dex",
+        "alin",
+        "alin depot",
+        "alin oftalmico",
+        "amplidermis",
+        "anemul mono",
+        "auricularum",
+        "auxiloson",
+        "baycadron",
+        "baycuten",
+        "baycuten n",
+        "cortidexason",
+        "cortisumman",
+        "decacort",
+        "decadrol",
+        "decadron",
+        "decadron dp",
+        "decalix",
+        "decameth",
+        "decasone r.p.",
+        "dectancyl",
+        "dekacort",
+        "deltafluorene",
+        "deronil",
+        "desamethasone",
+        "desameton",
+        "dex",
+        "dexa-mamallet",
+        "dexa-rhinosan",
+        "dexa-scheroson",
+        "dexa-sine",
+        "dexacortal",
+        "dexacortin",
+        "dexafarma",
+        "dexafluorene",
+        "dexalocal",
+        "dexamecortin",
+        "dexameth",
+        "dexamethasone",
+        "dexamethasone intensol",
+        "dexamethasonum",
+        "dexamonozon",
+        "dexapos",
+        "dexinoral",
+        "dexone",
+        "dinormon",
+        "dxevo",
+        "fluoro-9alpha methyl-16alpha prednisolone",
+        "fluorodelta",
+        "fortecortin",
+        "gammacorten",
+        "hemady",
+        "hexadecadrol",
+        "hexadrol",
+        "lenadex",
+        "lokalison-f",
+        "loverine",
+        "methylfluorprednisolone",
+        "millicorten",
+        "mymethasone",
+        "orgadrone",
+        "spersadex",
+        "taperdex",
+        "visumetazone",
+        "zodex"
+      ],
+      "ncit_code": "C422",
+      "rxcui": null,
+      "family": "steroid",
+      "target": null
+    },
+    "prednisone": {
+      "canonical_id": "prednisone",
+      "display": "Prednisone",
+      "aliases": [
+        ".delta.1-cortisone",
+        "1, 2-dehydrocortisone",
+        "1,2-dehydrocortisone",
+        "17,21-dihydroxypregna-1,4-diene-3,11,20-trione",
+        "adasone",
+        "cortancyl",
+        "dacortin",
+        "decortin",
+        "decortisyl",
+        "decorton",
+        "delta 1-cortisone",
+        "delta-dome",
+        "deltacortene",
+        "deltacortisone",
+        "deltadehydrocortisone",
+        "deltasone",
+        "deltison",
+        "deltra",
+        "econosone",
+        "liquid pred",
+        "lisacort",
+        "meprosona-f",
+        "metacortandracin",
+        "meticorten",
+        "ofisolona",
+        "orasone",
+        "panafcort",
+        "panasol-s",
+        "paracort",
+        "perrigo prednisone",
+        "pred",
+        "predeltin",
+        "predicor",
+        "predicorten",
+        "prednicen-m",
+        "prednicort",
+        "prednidib",
+        "prednilonga",
+        "predniment",
+        "prednisone",
+        "prednisone intensol",
+        "prednisonum",
+        "prednitone",
+        "promifen",
+        "rayos",
+        "servisone",
+        "sk-prednisone",
+        "sterapred"
+      ],
+      "ncit_code": "C770",
+      "rxcui": null,
+      "family": "steroid",
+      "target": null
+    },
+    "cyclophosphamide": {
+      "canonical_id": "cyclophosphamide",
+      "display": "Cyclophosphamide",
+      "aliases": [
+        "1-bis(2-chloroethyl)-amino-1-oxo-2-aza-5-oxaphosphoridin monohydrate",
+        "2-[bis(2-chloroethyl)amino]tetrahydro-2h-1,3,2-oxazaphosphorine 2-oxide monohydrate",
+        "2-[bis(b-chloroethyl)amino]-1-oxa-3-aza-2-phosphacyclohexane-2-oxide monohydrate",
+        "2-[di(chloroethyl)amino]-1-oxa-3-aza-2-phosphacyclohexane 2-oxide monohydrate",
+        "2h-1,3,2-oxazaphosphorine, 2-[bis(2-chloroethyl)amino]tetrahydro-, 2-oxide, monohydrate",
+        "asta b 518",
+        "b 518",
+        "b-518",
+        "b518",
+        "bis(2-chloroethyl)phosphamide cyclic propanolamide ester monohydrate",
+        "bis(2-chloroethyl)phosphoramide cyclic propanolamide ester monohydrate",
+        "carloxan",
+        "ciclofosfamida",
+        "ciclofosfamide",
+        "cicloxal",
+        "clafen",
+        "claphene",
+        "cp monohydrate",
+        "ctx",
+        "cy",
+        "cyclo-cell",
+        "cycloblastin",
+        "cycloblastine",
+        "cyclophospham",
+        "cyclophosphamid monohydrate",
+        "cyclophosphamide",
+        "cyclophosphamide monohydrate",
+        "cyclophosphamidum",
+        "cyclophosphan",
+        "cyclophosphane",
+        "cyclophosphanum",
+        "cyclostin",
+        "cyclostine",
+        "cytophosphan",
+        "cytophosphane",
+        "cytoxan",
+        "fosfaseron",
+        "genoxal",
+        "genuxal",
+        "ledoxina",
+        "mitoxan",
+        "n,n-bis(2-chloroethyl)-n',o-propylenephosphoric acid ester diamide monohydrate",
+        "n,n-bis(2-chloroethyl)-n'-(3-hydroxypropyl)phosphorodiamidic acid intramolecular ester monohydrate",
+        "n,n-bis(2-chloroethyl)tetrahydro-2h-1,3,2-oxazaphosphorin-2-amine 2-oxide monohydrate",
+        "n,n-bis(b-chloroethyl)-n',o-trimethylenephosphoric acid ester diamide monohydrate",
+        "n,n-bis(beta-chloroethyl)-n',o-propylenephosphoric acid ester diamide monohydrate",
+        "n,n-bis(beta-chloroethyl)-n',o-trimethylenephosphoric acid ester diamide monohydrate",
+        "neosar",
+        "revimmune",
+        "syklofosfamid",
+        "wr 138719",
+        "wr- 138719",
+        "wr-138719",
+        "wr138719"
+      ],
+      "ncit_code": "C405",
+      "rxcui": null,
+      "family": "alkylating_agent",
+      "target": null
+    },
+    "melphalan": {
+      "canonical_id": "melphalan",
+      "display": "Melphalan",
+      "aliases": [
+        "4-amino-10-methylfolic acid",
+        "4-amino-4-deoxy-10-methylpteroyl-l-glutamic acid",
+        "abitrexate",
+        "alpha-methopterin",
+        "amethopterin",
+        "brimexate",
+        "cl 14377",
+        "cl-14377",
+        "emtexate",
+        "emthexat",
+        "emthexate",
+        "farmitrexat",
+        "fauldexato",
+        "folex",
+        "folex pfs",
+        "jylamvo",
+        "lantarel",
+        "ledertrexate",
+        "lumexon",
+        "maxtrex",
+        "medsatrexate",
+        "mel",
+        "melphalan",
+        "metex",
+        "methoblastin",
+        "methotrexate",
+        "methotrexate lpf",
+        "methotrexate methylaminopterin",
+        "methotrexatum",
+        "metotrexato",
+        "metrotex",
+        "mexate",
+        "mexate-aq",
+        "mtx",
+        "n-[4-[[(2,4-diamino-6-pteridinyl)methyl]methylamino]benzoyl]-l-glutamic acid",
+        "novatrex",
+        "rheumatrex",
+        "texate",
+        "tremetex",
+        "trexeron",
+        "trixilem",
+        "wr-19039"
+      ],
+      "ncit_code": "C642",
+      "rxcui": null,
+      "family": "alkylating_agent",
+      "target": null
+    },
+    "bendamustine": {
+      "canonical_id": "bendamustine",
+      "display": "Bendamustine",
+      "aliases": [
+        "5-(bis(2-chloroethyl)amino)-1-methyl-2-benzimidazolebutyric acid",
+        "bendamustine",
+        "sdx 105",
+        "sdx-105",
+        "sdx105"
+      ],
+      "ncit_code": "C73261",
+      "rxcui": null,
+      "family": "alkylating_agent",
+      "target": null
+    },
+    "elotuzumab": {
+      "canonical_id": "elotuzumab",
+      "display": "Elotuzumab",
+      "aliases": [
+        "bms 901608",
+        "bms-901608",
+        "bms901608",
+        "elo",
+        "elotuzumab",
+        "empliciti",
+        "huluc-63",
+        "huluc63",
+        "pdl 063",
+        "pdl-063",
+        "pdl063"
+      ],
+      "ncit_code": "C66982",
+      "rxcui": null,
+      "family": "anti_slamf7",
+      "target": "SLAMF7"
+    },
+    "panobinostat": {
+      "canonical_id": "panobinostat",
+      "display": "Panobinostat",
+      "aliases": [
+        "faridak",
+        "farydak",
+        "lbh 589",
+        "lbh-589",
+        "lbh589",
+        "panobinostat"
+      ],
+      "ncit_code": "C66948",
+      "rxcui": null,
+      "family": "hdac_inhibitor",
+      "target": "HDAC"
+    },
+    "venetoclax": {
+      "canonical_id": "venetoclax",
+      "display": "Venetoclax",
+      "aliases": [
+        "abt 199",
+        "abt-0199",
+        "abt-199",
+        "abt199",
+        "gdc 0199",
+        "gdc-0199",
+        "gdc0199",
+        "rg7601",
+        "ven",
+        "venclexta",
+        "venclyxto",
+        "venetoclax"
+      ],
+      "ncit_code": "C103147",
+      "rxcui": null,
+      "family": "bcl2_inhibitor",
+      "target": "BCL-2"
+    },
+    "ciltacabtagene_autoleucel": {
+      "canonical_id": "ciltacabtagene_autoleucel",
+      "display": "Ciltacabtagene Autoleucel",
+      "aliases": [
+        "autologous anti-bcma car-t cells jnj-68284528",
+        "autologous bi-epitope bcma-targeted car t-cells jnj-68284528",
+        "autologous bi-epitope car t-cells jnj-68284528",
+        "carvykti",
+        "cilta-cel",
+        "ciltacabtagene autoleucel",
+        "ciltacabtagene_autoleucel",
+        "ciltacel",
+        "jnj 68284528",
+        "jnj-68284528",
+        "jnj68284528",
+        "lcar b38m",
+        "lcar-b38m",
+        "lcar-b38m-transduced car-t cells jnj-68284528",
+        "lcarb38m"
+      ],
+      "ncit_code": "C148498",
+      "rxcui": null,
+      "family": "bcma_cart",
+      "target": "BCMA"
+    },
+    "idecabtagene_vicleucel": {
+      "canonical_id": "idecabtagene_vicleucel",
+      "display": "Idecabtagene Vicleucel",
+      "aliases": [
+        "abecma",
+        "anti-bcma car t cells bb2121",
+        "anti-bcma-car-transduced t cells bb2121",
+        "bb2121",
+        "bcma-specific car-expressing t lymphocytes bb2121",
+        "ide-cel",
+        "idecabtagene vicleucel",
+        "idecabtagene_vicleucel",
+        "idecel"
+      ],
+      "ncit_code": "C117729",
+      "rxcui": null,
+      "family": "bcma_cart",
+      "target": "BCMA"
+    },
+    "orvacabtagene_autoleucel": {
+      "canonical_id": "orvacabtagene_autoleucel",
+      "display": "Orvacabtagene Autoleucel",
+      "aliases": [
+        "autologous anti-bcma car-t cells jcarh 125",
+        "autologous anti-bcma-car-4-1bb-cd3zeta-expressing cd4+/cd8+ t-lymphocytes jcarh125",
+        "autologous bcma 41bbz car-t cell jcarh-125",
+        "autologous bcma-specific car-t cells jcarh125",
+        "autologous bcma-specific car4-1bb-cd3zeta-expressing cd4+/cd8+ t lymphocytes jcarh 125",
+        "jcarh 125",
+        "jcarh-125",
+        "jcarh125",
+        "orva-cel",
+        "orvacabtagene autoleucel",
+        "orvacabtagene_autoleucel"
+      ],
+      "ncit_code": "C147523",
+      "rxcui": null,
+      "family": "bcma_cart",
+      "target": "BCMA"
+    },
+    "doxorubicin": {
+      "canonical_id": "doxorubicin",
+      "display": "Doxorubicin",
+      "aliases": [
+        "14-hydroxydaunomycin",
+        "adriablastin",
+        "caelyx",
+        "doxorubicin",
+        "hydroxydaunomycin",
+        "hydroxyl daunorubicin",
+        "hydroxyldaunorubicin",
+        "liposomal doxorubicin"
+      ],
+      "ncit_code": "C456",
+      "rxcui": null,
+      "family": "anthracycline",
+      "target": null
+    }
+  },
+  "families": {
+    "bcma_bispecific": {
+      "related": [
+        "bcma_cart"
+      ]
+    },
+    "bcma_cart": {
+      "related": [
+        "bcma_bispecific"
+      ]
+    },
+    "imid": {
+      "related": [
+        "celmod"
+      ]
+    },
+    "celmod": {
+      "related": [
+        "imid"
+      ]
+    }
+  },
+  "combos": [
+    {
+      "id": "tec-dara",
+      "pattern": "tec[\\s\\-+]?dara",
+      "components": [
+        "teclistamab",
+        "daratumumab"
+      ]
+    },
+    {
+      "id": "tal-dara",
+      "pattern": "tal[\\s\\-+]?dara",
+      "components": [
+        "talquetamab",
+        "daratumumab"
+      ]
+    },
+    {
+      "id": "tec-pd",
+      "pattern": "tec[\\s\\-+]?(?:pom[\\s\\-+]?dex|pd(?!\\w))",
+      "components": [
+        "teclistamab",
+        "pomalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "tec-ld",
+      "pattern": "tec[\\s\\-+]?(?:len[\\s\\-+]?dex|ld(?!\\w))|\\btecd\\b",
+      "components": [
+        "teclistamab",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "tal-pd",
+      "pattern": "tal[\\s\\-+]?(?:pom[\\s\\-+]?dex|pd(?!\\w))",
+      "components": [
+        "talquetamab",
+        "pomalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "vrd",
+      "pattern": "\\bvrd\\b|\\brvd\\b",
+      "components": [
+        "bortezomib",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "vcd",
+      "pattern": "\\bvcd\\b|\\bcvd\\b",
+      "components": [
+        "bortezomib",
+        "cyclophosphamide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "krd",
+      "pattern": "\\bkrd\\b|\\brkd\\b",
+      "components": [
+        "carfilzomib",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "kpd",
+      "pattern": "\\bkpd\\b",
+      "components": [
+        "carfilzomib",
+        "pomalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "dvrd",
+      "pattern": "\\bdvrd\\b|dara[\\s\\-+]?vrd",
+      "components": [
+        "daratumumab",
+        "bortezomib",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "dvcd",
+      "pattern": "\\bdvcd\\b|dara[\\s\\-+]?vcd",
+      "components": [
+        "daratumumab",
+        "bortezomib",
+        "cyclophosphamide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "drd",
+      "pattern": "\\bdrd\\b|dara[\\s\\-+]?rd",
+      "components": [
+        "daratumumab",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "dpd",
+      "pattern": "\\bdpd\\b|dara[\\s\\-+]?pd(?!\\w)",
+      "components": [
+        "daratumumab",
+        "pomalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "isa-pd",
+      "pattern": "\\bisa[\\s\\-+]?pd\\b",
+      "components": [
+        "isatuximab",
+        "pomalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "isa-krd",
+      "pattern": "\\bisa[\\s\\-+]?krd\\b",
+      "components": [
+        "isatuximab",
+        "carfilzomib",
+        "lenalidomide",
+        "dexamethasone"
+      ]
+    },
+    {
+      "id": "vmp",
+      "pattern": "\\bvmp\\b|\\bmpv\\b",
+      "components": [
+        "bortezomib",
+        "melphalan",
+        "prednisone"
+      ]
+    }
+  ]
+}

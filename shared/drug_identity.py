@@ -3,7 +3,7 @@ drug_identity.py
 ────────────────
 Canonical drug name resolution and gradient drug-relation classification.
 
-All clinical knowledge lives in   localfiles/drug_graph.json.
+All clinical knowledge lives in   shared/data/drug_graph.json.
 Rebuild the graph with:           python tools/build_drug_graph.py --ncit /tmp/ncit_owl/ncit.obo
 
 Provides:
@@ -60,7 +60,7 @@ DRUG_RELATION_SCORE: dict[DrugRelation, float] = {
 
 # ── Load graph (once at import time) ─────────────────────────────────────────
 
-_GRAPH_PATH = Path(__file__).resolve().parent.parent / "localfiles" / "drug_graph.json"
+_GRAPH_PATH = Path(__file__).resolve().parent / "data" / "drug_graph.json"
 try:
     _GRAPH = json.loads(_GRAPH_PATH.read_text())
 except FileNotFoundError:
