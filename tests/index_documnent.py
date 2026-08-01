@@ -148,33 +148,46 @@ def _load(rel_path: str, alias: str) -> types.ModuleType:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _os_client = None
+_os_client_built_at: float = 0.0
+_OS_CLIENT_TTL = 3000  # 50 min — safely within 1-hour STS token lifetime
 
 
 def _build_os_client():
-    global _os_client
-    if _os_client is not None:
+    global _os_client, _os_client_built_at
+    now = time.monotonic()
+    if _os_client is not None and (now - _os_client_built_at) < _OS_CLIENT_TTL:
         return _os_client
 
-    import boto3
     from opensearchpy import OpenSearch, RequestsHttpConnection
-    from requests_aws4auth import AWS4Auth
 
-    # get_frozen_credentials() resolves STS refreshable credentials fully
-    frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-    awsauth = AWS4Auth(
-        frozen.access_key,
-        frozen.secret_key,
-        AWS_REGION,
-        "es",
-        session_token=frozen.token,
-    )
-    _os_client = OpenSearch(
-        hosts            = [{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-        http_auth        = awsauth,
-        use_ssl          = True,
-        verify_certs     = True,
-        connection_class = RequestsHttpConnection,
-    )
+    if os.environ.get("USE_LOCAL_OPENSEARCH"):
+        # Local Docker OpenSearch — no auth, plain HTTP
+        _os_client = OpenSearch(
+            hosts        = [{"host": "localhost", "port": 9200}],
+            use_ssl      = False,
+            verify_certs = False,
+        )
+    else:
+        import boto3
+        from requests_aws4auth import AWS4Auth
+
+        # Re-resolve credentials every TTL seconds so STS tokens never go stale
+        frozen  = boto3.Session().get_credentials().get_frozen_credentials()
+        awsauth = AWS4Auth(
+            frozen.access_key,
+            frozen.secret_key,
+            AWS_REGION,
+            "es",
+            session_token=frozen.token,
+        )
+        _os_client = OpenSearch(
+            hosts            = [{"host": OPENSEARCH_ENDPOINT, "port": 443}],
+            http_auth        = awsauth,
+            use_ssl          = True,
+            verify_certs     = True,
+            connection_class = RequestsHttpConnection,
+        )
+    _os_client_built_at = now
     return _os_client
 
 
@@ -513,12 +526,19 @@ def main() -> None:
         "--s3-folder", default=None,
         help="Extraction s3_folder key; derives FULL_TABLES_S3_KEY automatically",
     )
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Use local Docker OpenSearch at localhost:9200 instead of AWS (no SigV4 auth)",
+    )
     args = parser.parse_args()
 
     # Apply per-document overrides from CLI (take precedence over env vars)
     global DOCUMENT_ID, FULL_TABLES_S3_KEY, S3_KEY
     if args.document_id:
         DOCUMENT_ID = args.document_id
+    if args.local:
+        os.environ["USE_LOCAL_OPENSEARCH"] = "1"
+        os.environ["OPENSEARCH_ENDPOINT"]  = "localhost"
     if args.s3_folder:
         FULL_TABLES_S3_KEY = (
             f"Patterns Check Run/18/extraction/{args.s3_folder}/full_tables.json"
