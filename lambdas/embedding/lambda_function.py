@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -31,6 +33,15 @@ EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1"))
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000
+
+# Retry config for Bedrock throttling (full-jitter exponential backoff)
+_EMBED_MAX_RETRIES = 8       # outer retries on top of boto3's 4 built-in attempts
+_EMBED_BACKOFF_BASE = 2.0   # seconds
+_EMBED_BACKOFF_CAP  = 60.0  # maximum jitter window (seconds)
+_THROTTLE_CODES = frozenset({
+    "ThrottlingException", "TooManyRequestsException",
+    "ServiceUnavailableException", "RequestLimitExceeded",
+})
 
 # Clinical stopwords — carry no discriminative weight in sparse matching
 _STOPWORDS = frozenset({
@@ -182,14 +193,32 @@ def _process_document(chunk: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _generate_dense_embedding(text: str) -> list[float]:
-    payload  = json.dumps({"inputText": text[:_MAX_INPUT_CHARS]}).encode()
-    response = _get("bedrock-runtime").invoke_model(
-        modelId     = EMBEDDING_MODEL,
-        contentType = "application/json",
-        accept      = "application/json",
-        body        = payload,
-    )
-    return json.loads(response["body"].read())["embedding"]
+    import botocore.exceptions
+    payload = json.dumps({"inputText": text[:_MAX_INPUT_CHARS]}).encode()
+    last_exc: Exception | None = None
+    for attempt in range(_EMBED_MAX_RETRIES):
+        try:
+            response = _get("bedrock-runtime").invoke_model(
+                modelId     = EMBEDDING_MODEL,
+                contentType = "application/json",
+                accept      = "application/json",
+                body        = payload,
+            )
+            return json.loads(response["body"].read())["embedding"]
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in _THROTTLE_CODES:
+                raise
+            last_exc = exc
+            # Full-jitter exponential backoff (AWS recommended pattern)
+            window = min(_EMBED_BACKOFF_CAP, _EMBED_BACKOFF_BASE * (2 ** attempt))
+            delay  = random.uniform(0, window)
+            logger.warning(
+                "[Embedding] throttled attempt=%d/%d code=%s retrying in %.1fs",
+                attempt + 1, _EMBED_MAX_RETRIES, code, delay,
+            )
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
 
 
 def _generate_sparse_embedding(tokens: list[str]) -> dict[str, float]:
