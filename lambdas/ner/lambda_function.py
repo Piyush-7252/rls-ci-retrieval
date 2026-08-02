@@ -364,13 +364,24 @@ def _get_gliner():
     global _gliner_model
     if _gliner_model is None:
         try:
-            import threading, warnings
+            import threading, warnings, shutil, os
             # tqdm >= 4.66 removed _lock as a class-level attribute;
             # huggingface_hub accesses it during model download.
             import tqdm as _tqdm_mod
             if not hasattr(_tqdm_mod.tqdm, "_lock"):
                 _tqdm_mod.tqdm._lock = threading.RLock()
             from gliner import GLiNER
+
+            # If the model was baked into the image at /var/task/models (read-only
+            # at Lambda runtime), copy it to /tmp so HF hub can write lock files.
+            baked = Path("/var/task/models")
+            tmp_cache = Path("/tmp/hf_cache")
+            if baked.exists() and not tmp_cache.exists():
+                logger.info("[NER] copying baked model cache to /tmp")
+                shutil.copytree(str(baked), str(tmp_cache), symlinks=True)
+            if tmp_cache.exists():
+                os.environ["HF_HOME"] = str(tmp_cache)
+
             logger.info("[NER] loading GLiNER: %s", GLINER_MODEL_NAME)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message="Asking to truncate")

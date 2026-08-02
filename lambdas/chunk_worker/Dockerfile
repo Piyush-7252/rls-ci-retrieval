@@ -11,14 +11,13 @@ COPY lambdas/chunk_worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
-# Pre-download GLiNER model into the image so Lambda never needs network access
-# for the model weights. HF_HOME points to a path inside the image that is
-# readable at runtime. HF_HUB_OFFLINE=1 is set at Lambda runtime (not here)
-# to prevent cache-write attempts on the read-only /var/task filesystem.
+# Bake GLiNER model into the image at build time.
+# At Lambda runtime the NER lambda copies this to /tmp (writable) before loading.
+# chmod is in the same RUN step so model files and permissions are ONE layer (not two).
 ENV HF_HOME=/var/task/models
-RUN python3 -c "\
-from gliner import GLiNER; \
-GLiNER.from_pretrained('urchade/gliner_mediumv2.1', cache_dir='/var/task/models')"
+RUN python3 -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_mediumv2.1', cache_dir='/var/task/models')" && \
+    find /var/task/models -type f -exec chmod a+r {} + && \
+    find /var/task/models -type d -exec chmod a+rx {} +
 
 # Copy runtime code
 COPY shared ${LAMBDA_TASK_ROOT}/shared

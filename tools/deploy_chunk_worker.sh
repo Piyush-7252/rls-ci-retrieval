@@ -19,6 +19,7 @@ OPENSEARCH_CI_INDEX="${OPENSEARCH_CI_INDEX:-ci-objects}"
 NER_MODEL="${NER_MODEL:-gliner}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-amazon.titan-embed-text-v2:0}"
 EMBEDDING_MAX_WORKERS="${EMBEDDING_MAX_WORKERS:-8}"
+HF_TOKEN="${HF_TOKEN:-}"
 
 if [[ -z "$ROLE_ARN" ]]; then
   echo "ERROR: ROLE_ARN is required"
@@ -66,11 +67,16 @@ if ! docker buildx inspect >/dev/null 2>&1; then
   docker buildx create --use >/dev/null
 fi
 
+CACHE_IMAGE_URI="${ECR_URI}:buildcache"
+
 docker buildx build \
+  --progress=plain \
   --platform linux/amd64 \
   --provenance=false \
   --sbom=false \
   --push \
+  --cache-from "type=registry,ref=${CACHE_IMAGE_URI}" \
+  --cache-to   "type=registry,ref=${CACHE_IMAGE_URI},mode=max,image-manifest=true,oci-mediatypes=true" \
   -f "$ROOT_DIR/lambdas/chunk_worker/Dockerfile" \
   -t "$IMAGE_URI" \
   -t "$LATEST_IMAGE_URI" \
@@ -98,7 +104,7 @@ retry_lambda_update aws lambda update-function-configuration \
   --function-name "$FUNCTION_NAME" \
   --timeout "$TIMEOUT" \
   --memory-size "$MEMORY_SIZE" \
-  --environment "Variables={OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT},OPENSEARCH_INDEX=${OPENSEARCH_INDEX},SEMANTIC_OBJECTS_INDEX=${SEMANTIC_OBJECTS_INDEX},OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},NER_MODEL=${NER_MODEL},EMBEDDING_MODEL=${EMBEDDING_MODEL},EMBEDDING_MAX_WORKERS=${EMBEDDING_MAX_WORKERS},HF_HOME=/var/task/models,HF_HUB_OFFLINE=1}" \
+  --environment "Variables={OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT},OPENSEARCH_INDEX=${OPENSEARCH_INDEX},SEMANTIC_OBJECTS_INDEX=${SEMANTIC_OBJECTS_INDEX},OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},NER_MODEL=${NER_MODEL},EMBEDDING_MODEL=${EMBEDDING_MODEL},EMBEDDING_MAX_WORKERS=${EMBEDDING_MAX_WORKERS},HF_HOME=/tmp/hf_cache${HF_TOKEN:+,HF_TOKEN=${HF_TOKEN}}}" \
   --region "$AWS_REGION" >/dev/null
 
 wait_for_lambda_update

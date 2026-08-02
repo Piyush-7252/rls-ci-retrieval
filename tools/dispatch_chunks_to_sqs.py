@@ -219,6 +219,8 @@ def main() -> None:
     parser.add_argument("--payload-prefix", default="fanout-payloads")
     parser.add_argument("--page-start", type=int, default=1)
     parser.add_argument("--page-end", type=int, default=0, help="0 means full document")
+    parser.add_argument("--page-batch-size", type=int, default=0,
+                        help="stream dispatch in batches of N pages (0 = all at once)")
     parser.add_argument("--limit", type=int, default=0, help="optional chunk limit for smoke tests")
     parser.add_argument("--dry-run", action="store_true", help="build chunks only; do not send to SQS")
     args = parser.parse_args()
@@ -236,42 +238,69 @@ def main() -> None:
     total_pages = len(doc_structure.get("pages", []))
     page_end = args.page_end if args.page_end > 0 else total_pages
 
-    chunks = _build_chunks(
-        doc_structure=doc_structure,
-        document_id=args.document_id,
-        s3_bucket=args.s3_bucket,
-        s3_key=args.s3_key,
-        page_start=args.page_start,
-        page_end=page_end,
-        max_chunks=args.limit,
-    )
-
-    if args.dry_run:
-        max_payload = 0
-        for chunk in chunks:
-            payload_size = len(json.dumps(chunk).encode())
-            if payload_size > max_payload:
-                max_payload = payload_size
-        print(
-            f"pages={total_pages} chunks_built={len(chunks)} "
-            f"max_chunk_payload_bytes={max_payload}"
-        )
-        return
-
     payload_bucket = args.payload_bucket or args.s3_bucket
     payload_prefix = f"{args.payload_prefix.rstrip('/')}/{args.document_id}"
 
-    sent, offloaded = _send_chunk_messages(
-        sqs=sqs,
-        s3=s3,
-        queue_url=args.queue_url,
-        payload_bucket=payload_bucket,
-        payload_prefix=payload_prefix,
-        document_id=args.document_id,
-        chunks=chunks,
-    )
+    batch_size = args.page_batch_size
+    if batch_size <= 0:
+        # Original behaviour: build all chunks then send
+        ranges = [(args.page_start, page_end)]
+    else:
+        ranges = [
+            (s, min(s + batch_size - 1, page_end))
+            for s in range(args.page_start, page_end + 1, batch_size)
+        ]
 
-    print(f"pages={total_pages} chunks_built={len(chunks)} queued={sent} offloaded_to_s3={offloaded}")
+    total_chunks_built = 0
+    total_sent = 0
+    total_offloaded = 0
+    chunks_remaining = args.limit  # 0 means unlimited
+
+    for batch_start, batch_end in ranges:
+        max_for_batch = chunks_remaining if chunks_remaining > 0 else 0
+        chunks = _build_chunks(
+            doc_structure=doc_structure,
+            document_id=args.document_id,
+            s3_bucket=args.s3_bucket,
+            s3_key=args.s3_key,
+            page_start=batch_start,
+            page_end=batch_end,
+            max_chunks=max_for_batch,
+        )
+        total_chunks_built += len(chunks)
+
+        if args.dry_run:
+            continue
+
+        sent, offloaded = _send_chunk_messages(
+            sqs=sqs,
+            s3=s3,
+            queue_url=args.queue_url,
+            payload_bucket=payload_bucket,
+            payload_prefix=payload_prefix,
+            document_id=args.document_id,
+            chunks=chunks,
+        )
+        total_sent += sent
+        total_offloaded += offloaded
+
+        if batch_size > 0:
+            print(
+                f"batch pages={batch_start}-{batch_end} "
+                f"chunks_built={len(chunks)} queued={sent}",
+                flush=True,
+            )
+
+        if chunks_remaining > 0:
+            chunks_remaining -= len(chunks)
+            if chunks_remaining <= 0:
+                break
+
+    if args.dry_run:
+        print(f"pages={total_pages} chunks_built={total_chunks_built} (dry-run)")
+        return
+
+    print(f"pages={total_pages} chunks_built={total_chunks_built} queued={total_sent} offloaded_to_s3={total_offloaded}")
 
 
 if __name__ == "__main__":

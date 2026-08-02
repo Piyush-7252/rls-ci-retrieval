@@ -4,6 +4,7 @@ import importlib.util
 import json
 import logging
 import os
+import resource
 import sys
 import time
 import types
@@ -83,37 +84,91 @@ def _decode_payload(record_or_event: dict) -> dict:
     return payload
 
 
-def _run_chunk(chunk: dict) -> dict:
+# Requeue if less than this many ms remain in the Lambda invocation.
+_MIN_REMAINING_MS = 60_000
+
+
+def _run_chunk(chunk: dict, context: Any = None) -> dict:
     normalize = _load("normalize", "normalize")
     ner = _load("ner", "ner")
     ontology = _load("ontology", "ontology")
     embedding = _load("embedding", "embedding")
     idx = _load("index", "idx")
 
-    t0 = time.perf_counter()
+    timings: dict[str, float] = {}
+    t_total = time.perf_counter()
 
-    chunk = normalize._process_document(chunk)
-    chunk = ner._process_document(chunk)
-    chunk = ontology._process_document(chunk)
-    chunk = embedding._process_document(chunk)
-    idx._process_document(chunk)
+    def _timed(label: str, fn, *args, **kwargs):
+        t = time.perf_counter()
+        result = fn(*args, **kwargs)
+        timings[label] = round(time.perf_counter() - t, 3)
+        return result
 
-    elapsed = round(time.perf_counter() - t0, 3)
-    objects = len(chunk.get("extraction", {}).get("objects", []))
+    chunk = _timed("normalize", normalize._process_document, chunk)
+    chunk = _timed("ner",       ner._process_document,       chunk)
+    chunk = _timed("ontology",  ontology._process_document,  chunk)
+    chunk = _timed("embedding", embedding._process_document, chunk)
+    _timed("index",     idx._process_document,       chunk)
+
+    elapsed = round(time.perf_counter() - t_total, 3)
+    extraction = chunk.get("extraction", {})
+    obj_list   = extraction.get("objects", [])
+    objects    = len(obj_list)
+    sentences  = sum(
+        sum(1 for s in o.get("display_spans", []) if s.get("type") == "sentence")
+        for o in obj_list
+    )
+    embeddings = sum(1 for o in obj_list if o.get("embedding"))
+    embed_api_calls = (
+        1  # chunk text
+        + (1 if chunk.get("heading_embedding_text") else 0)
+        + embeddings  # one per object
+        + sum(
+            1 for o in obj_list
+            for s in o.get("display_spans", [])
+            if s.get("type") == "sentence" and s.get("embedding")
+        )
+    )
+    pages = chunk.get("page_end", 0) - chunk.get("page_start", 0) + 1
+
+    # Peak RSS in MB (Linux: ru_maxrss is in KB; macOS: bytes — normalise to MB).
+    _rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    import platform
+    rss_mb = round(_rss_raw / 1024 if platform.system() != "Darwin" else _rss_raw / 1_048_576, 1)
+
+    # Warn on unusually long chunks so pathological sections can be identified.
+    _SLOW_CHUNK_THRESHOLD_S = 300
+    log_fn = logger.warning if elapsed > _SLOW_CHUNK_THRESHOLD_S else logger.info
+    log_fn(
+        "[ChunkWorker] stats chunk_id=%s pages=%d objects=%d sentences=%d "
+        "embeddings=%d embed_api_calls=%d rss_mb=%.1f "
+        "normalize=%.3fs ner=%.3fs ontology=%.3fs embedding=%.3fs index=%.3fs total=%.3fs%s",
+        chunk.get("chunk_id"), pages, objects, sentences,
+        embeddings, embed_api_calls, rss_mb,
+        timings.get("normalize", 0), timings.get("ner", 0),
+        timings.get("ontology", 0), timings.get("embedding", 0),
+        timings.get("index", 0), elapsed,
+        " [SLOW]" if elapsed > _SLOW_CHUNK_THRESHOLD_S else "",
+    )
 
     return {
         "ok": True,
         "document_id": chunk.get("document_id"),
         "chunk_id": chunk.get("chunk_id"),
+        "pages": pages,
         "objects": objects,
+        "sentences": sentences,
+        "embeddings": embeddings,
+        "embed_api_calls": embed_api_calls,
         "elapsed_s": elapsed,
+        "timings": timings,
     }
 
 
 def handler(event: dict, context: Any) -> dict:
     # Direct invoke for smoke testing
     if "Records" not in event:
-        result = _run_chunk(_decode_payload(event))
+        result = _run_chunk(_decode_payload(event), context)
         logger.info(
             "[ChunkWorker] done chunk_id=%s elapsed_s=%s",
             result.get("chunk_id"),
@@ -127,9 +182,22 @@ def handler(event: dict, context: Any) -> dict:
 
     for record in event.get("Records", []):
         message_id = record.get("messageId", "")
+
+        # Safety: if Lambda is nearly out of time, requeue rather than timeout.
+        if context is not None:
+            remaining_ms = context.get_remaining_time_in_millis()
+            if remaining_ms < _MIN_REMAINING_MS:
+                logger.warning(
+                    "[ChunkWorker] only %d ms remaining — requeueing message_id=%s",
+                    remaining_ms, message_id,
+                )
+                if message_id:
+                    failures.append({"itemIdentifier": message_id})
+                continue
+
         try:
             chunk = _decode_payload(record)
-            result = _run_chunk(chunk)
+            result = _run_chunk(chunk, context)
             processed += 1
             logger.info(
                 "[ChunkWorker] done chunk_id=%s elapsed_s=%s",
