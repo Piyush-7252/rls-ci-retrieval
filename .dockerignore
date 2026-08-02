@@ -1,0 +1,12 @@
+.git
+.gitignore
+.cache
+localfiles
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.env
+*.ipynb
+search_results

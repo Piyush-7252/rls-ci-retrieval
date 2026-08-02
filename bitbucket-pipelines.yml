@@ -1,0 +1,119 @@
+image: atlassian/default-image:4
+
+definitions:
+  caches:
+    pip-cache: ~/.cache/pip
+    docker-buildkit: ~/.cache/docker-buildkit
+
+  steps:
+    - step: &deploy-chunk-worker
+        name: Build & Deploy rls-ci-chunk-worker
+        runs-on:
+          - self.hosted   # remove this line if using Bitbucket Cloud runners
+        services:
+          - docker
+        caches:
+          - pip-cache
+          - docker-buildkit
+        script:
+          # --- AWS auth ---
+          - export AWS_DEFAULT_REGION="${AWS_REGION:-eu-west-1}"
+          - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          - ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/rls-ci-chunk-worker"
+
+          # --- ECR login ---
+          - aws ecr describe-repositories --repository-names rls-ci-chunk-worker --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1 ||
+            aws ecr create-repository --repository-name rls-ci-chunk-worker --region "$AWS_DEFAULT_REGION" >/dev/null
+          - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" |
+            docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+          # --- Build (BuildKit cache backed by registry) ---
+          - IMAGE_TAG=$(date +%Y%m%d-%H%M%S)
+          - docker buildx create --use --driver docker-container 2>/dev/null || true
+          - |
+            docker buildx build \
+              --platform linux/amd64 \
+              --provenance=false \
+              --sbom=false \
+              --push \
+              --cache-from "type=registry,ref=${ECR_URI}:buildcache" \
+              --cache-to   "type=registry,ref=${ECR_URI}:buildcache,mode=max" \
+              -f lambdas/chunk_worker/Dockerfile \
+              -t "${ECR_URI}:${IMAGE_TAG}" \
+              -t "${ECR_URI}:latest" \
+              .
+
+          # --- Wait for Lambda to be idle then update ---
+          - FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-chunk-worker}"
+          - |
+            wait_lambda() {
+              aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME" --region "$AWS_DEFAULT_REGION" || true
+            }
+          - |
+            retry_update() {
+              for attempt in 1 2 3 4 5; do
+                "$@" && return 0
+                echo "Lambda busy (attempt $attempt/5), waiting..."
+                wait_lambda
+              done
+              echo "ERROR: gave up after 5 attempts"
+              return 1
+            }
+
+          - |
+            if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
+              retry_update aws lambda update-function-code \
+                --function-name "$FUNCTION_NAME" \
+                --image-uri "${ECR_URI}:${IMAGE_TAG}" \
+                --region "$AWS_DEFAULT_REGION" >/dev/null
+            else
+              aws lambda create-function \
+                --function-name "$FUNCTION_NAME" \
+                --package-type Image \
+                --code ImageUri="${ECR_URI}:${IMAGE_TAG}" \
+                --role "$ROLE_ARN" \
+                --timeout "${TIMEOUT:-900}" \
+                --memory-size "${MEMORY_SIZE:-10240}" \
+                --region "$AWS_DEFAULT_REGION" >/dev/null
+            fi
+
+          - wait_lambda
+
+          - |
+            retry_update aws lambda update-function-configuration \
+              --function-name "$FUNCTION_NAME" \
+              --timeout "${TIMEOUT:-900}" \
+              --memory-size "${MEMORY_SIZE:-10240}" \
+              --environment "Variables={
+                OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com},
+                OPENSEARCH_INDEX=${OPENSEARCH_INDEX:-document-chunks},
+                SEMANTIC_OBJECTS_INDEX=${SEMANTIC_OBJECTS_INDEX:-semantic-objects},
+                OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX:-ci-objects},
+                NER_MODEL=${NER_MODEL:-gliner},
+                EMBEDDING_MODEL=${EMBEDDING_MODEL:-amazon.titan-embed-text-v2:0},
+                EMBEDDING_MAX_WORKERS=${EMBEDDING_MAX_WORKERS:-8},
+                HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1},
+                HF_HOME=${HF_HOME:-/var/task/models}
+              }" \
+              --region "$AWS_DEFAULT_REGION" >/dev/null
+
+          - wait_lambda
+          - echo "Deployed $FUNCTION_NAME → ${ECR_URI}:${IMAGE_TAG}"
+
+pipelines:
+  branches:
+    main:
+      - step: *deploy-chunk-worker
+
+  custom:
+    deploy-chunk-worker:
+      - variables:
+          - name: FUNCTION_NAME
+            default: rls-ci-chunk-worker
+          - name: AWS_REGION
+            default: eu-west-1
+          - name: TIMEOUT
+            default: "900"
+          - name: MEMORY_SIZE
+            default: "10240"
+      - step: *deploy-chunk-worker

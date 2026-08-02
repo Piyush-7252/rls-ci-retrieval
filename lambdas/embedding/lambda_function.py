@@ -19,6 +19,7 @@ import json
 import logging
 import os
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ logger.setLevel(logging.INFO)
 
 INDEX_LAMBDA_ARN = os.environ.get("INDEX_LAMBDA_ARN", "")
 EMBEDDING_MODEL  = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
+EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1")))
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000
@@ -126,15 +128,39 @@ def _process_document(chunk: dict) -> dict:
 
     # Per-object and per-sentence embeddings
     objects = chunk.get("extraction", {}).get("objects", [])
-    for obj in objects:
-        if obj.get("text") and not obj.get("embedding"):
-            obj["embedding"] = _generate_dense_embedding(_object_embedding_text(obj))
+    if EMBEDDING_MAX_WORKERS <= 1:
+        for obj in objects:
+            if obj.get("text") and not obj.get("embedding"):
+                obj["embedding"] = _generate_dense_embedding(_object_embedding_text(obj))
 
-        for span in obj.get("display_spans", []):
-            if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
-                span["embedding"] = _generate_dense_embedding(
-                    _sentence_embedding_text(obj, span)
-                )
+            for span in obj.get("display_spans", []):
+                if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
+                    span["embedding"] = _generate_dense_embedding(
+                        _sentence_embedding_text(obj, span)
+                    )
+    else:
+        tasks: list[tuple[str, int, int | None, Any]] = []
+        with ThreadPoolExecutor(max_workers=EMBEDDING_MAX_WORKERS) as pool:
+            for obj_idx, obj in enumerate(objects):
+                if obj.get("text") and not obj.get("embedding"):
+                    fut = pool.submit(_generate_dense_embedding, _object_embedding_text(obj))
+                    tasks.append(("obj", obj_idx, None, fut))
+
+                for span_idx, span in enumerate(obj.get("display_spans", [])):
+                    if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
+                        fut = pool.submit(
+                            _generate_dense_embedding,
+                            _sentence_embedding_text(obj, span),
+                        )
+                        tasks.append(("span", obj_idx, span_idx, fut))
+
+            for kind, obj_idx, span_idx, fut in tasks:
+                embedding = fut.result()
+                if kind == "obj":
+                    objects[obj_idx]["embedding"] = embedding
+                else:
+                    assert span_idx is not None
+                    objects[obj_idx]["display_spans"][span_idx]["embedding"] = embedding
 
     if objects and "extraction" in chunk:
         chunk = {**chunk, "extraction": {**chunk["extraction"], "objects": objects}}
