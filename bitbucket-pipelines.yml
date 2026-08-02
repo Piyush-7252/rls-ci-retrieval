@@ -8,8 +8,6 @@ definitions:
   steps:
     - step: &deploy-chunk-worker
         name: Build & Deploy rls-ci-chunk-worker
-        runs-on:
-          - self.hosted   # remove this line if using Bitbucket Cloud runners
         services:
           - docker
         caches:
@@ -108,6 +106,11 @@ pipelines:
   custom:
     deploy-chunk-worker:
       - variables:
+          # AWS credentials — entered at run time in the Bitbucket UI (never stored in code)
+          - name: AWS_ACCESS_KEY_ID
+          - name: AWS_SECRET_ACCESS_KEY
+          - name: ROLE_ARN
+          # Tunables with sensible defaults
           - name: FUNCTION_NAME
             default: rls-ci-chunk-worker
           - name: AWS_REGION
