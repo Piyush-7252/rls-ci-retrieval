@@ -10,9 +10,16 @@ COPY lambdas/ci_worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
-# Bake GLiNER model into the image at build time.
+# Bake GLiNER model + deberta tokenizer into the image at build time.
+# Do NOT pass cache_dir= to from_pretrained — it conflicts with HF_HOME and produces
+# an incomplete snapshot that fails to load at runtime.
 ENV HF_HOME=/var/task/models
-RUN python3 -c "from gliner import GLiNER; GLiNER.from_pretrained('urchade/gliner_mediumv2.1', cache_dir='/var/task/models')" && \
+RUN python3 -c "\
+from gliner import GLiNER; \
+GLiNER.from_pretrained('urchade/gliner_mediumv2.1'); \
+from transformers import AutoTokenizer; \
+AutoTokenizer.from_pretrained('microsoft/deberta-v3-base'); \
+print('GLiNER + deberta tokenizer baked OK')" && \
     find /var/task/models -type f -exec chmod a+r {} + && \
     find /var/task/models -type d -exec chmod a+rx {} +
 
