@@ -68,6 +68,7 @@ OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 OPENSEARCH_CI_INDEX    = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
+OPENSEARCH_TIMEOUT     = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 BEDROCK_REGION         = os.environ.get("BEDROCK_REGION", AWS_REGION)
 VERIFIER_MODEL         = os.environ.get("VERIFIER_MODEL",
@@ -101,6 +102,7 @@ def _get_os():
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
             http_auth=awsauth, use_ssl=True, verify_certs=True,
             connection_class=RequestsHttpConnection,
+            timeout=OPENSEARCH_TIMEOUT,
         )
     return _os_client
 
