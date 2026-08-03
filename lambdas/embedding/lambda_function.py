@@ -214,8 +214,10 @@ def _generate_dense_embedding(text: str) -> list[float]:
             window = min(_EMBED_BACKOFF_CAP, _EMBED_BACKOFF_BASE * (2 ** attempt))
             delay  = random.uniform(0, window)
             logger.warning(
-                "[Embedding] throttled attempt=%d/%d code=%s retrying in %.1fs",
-                attempt + 1, _EMBED_MAX_RETRIES, code, delay,
+                "[Embedding] throttled attempt=%d/%d code=%s msg=%s retrying in %.1fs",
+                attempt + 1, _EMBED_MAX_RETRIES, code,
+                exc.response.get("Error", {}).get("Message", ""),
+                delay,
             )
             time.sleep(delay)
     raise last_exc  # type: ignore[misc]
