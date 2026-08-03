@@ -71,11 +71,14 @@ def _get_os():
             session_token=frozen.token,
         )
         _os_client = OpenSearch(
-            hosts            = [{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-            http_auth        = awsauth,
-            use_ssl          = True,
-            verify_certs     = True,
-            connection_class = RequestsHttpConnection,
+            hosts              = [{"host": OPENSEARCH_ENDPOINT, "port": 443}],
+            http_auth          = awsauth,
+            use_ssl            = True,
+            verify_certs       = True,
+            connection_class   = RequestsHttpConnection,
+            timeout            = 60,    # raise from 10s default; single chunk can be 17+ writes
+            max_retries        = 3,     # retry transient failures (ConnectionTimeout, 429, 503)
+            retry_on_timeout   = True,  # auto-retry on ConnectionTimeout without SQS requeue
         )
     return _os_client
 
@@ -266,7 +269,7 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             **build_enrichment_fields(obj),
             # ── Display (never embedded) ──────────────────────────────────────
             "page":          obj.get("page", page_start),
-            "bbox":          obj.get("bbox", []),
+            "bbox":          [float(v) for v in obj.get("bbox", [])],
             "display_spans": obj.get("display_spans", []),
         })
 
@@ -361,7 +364,7 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "next_sentence_id":  next_id,
                 # ── Display ───────────────────────────────────────────────────
                 "page":              obj.get("page", page_start),
-                "bbox":              span.get("bbox", obj.get("bbox", [])),
+                "bbox":              [float(v) for v in span.get("bbox", obj.get("bbox", []))],
             })
 
     return docs

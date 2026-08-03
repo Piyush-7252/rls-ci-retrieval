@@ -39,7 +39,14 @@ def _merge_doc_structure(raw: dict) -> dict:
         ds = chunk.get("docStructure", {})
         if not merged_props:
             merged_props = ds.get("properties", {})
-        all_pages.extend(ds.get("pages", []))
+        # Apryse numbers pages locally (1–N per extraction chunk).
+        # Offset by chunk.startPage - 1 to get global document page numbers.
+        offset = chunk.get("startPage", 1) - 1
+        for page in ds.get("pages", []):
+            if offset:
+                local_num = page.get("properties", {}).get("pageNumber", 0)
+                page = {**page, "properties": {**page.get("properties", {}), "pageNumber": local_num + offset}}
+            all_pages.append(page)
     return {"properties": merged_props, "pages": all_pages}
 
 

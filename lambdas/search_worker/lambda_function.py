@@ -103,6 +103,8 @@ def _get_os():
             http_auth=awsauth, use_ssl=True, verify_certs=True,
             connection_class=RequestsHttpConnection,
             timeout=OPENSEARCH_TIMEOUT,
+            max_retries=2,
+            retry_on_timeout=True,
         )
     return _os_client
 

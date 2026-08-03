@@ -42,7 +42,7 @@ def _get_os():
 MAPPING = {
     "settings": {
         "number_of_shards":   1,
-        "number_of_replicas": 1,
+        "number_of_replicas": 0,          # 0 for single-node dev; bump to 1 for multi-node
         "knn":                False,      # set to True when using k-NN plugin
     },
     "mappings": {

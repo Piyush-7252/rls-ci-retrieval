@@ -38,6 +38,9 @@ def _get_os():
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
             http_auth=awsauth, use_ssl=True, verify_certs=True,
             connection_class=RequestsHttpConnection,
+            timeout=30,
+            max_retries=2,
+            retry_on_timeout=True,
         )
     return _os_client
 

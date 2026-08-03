@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,9 +79,14 @@ def invoke_orchestrator(
     skip_rerank: bool,
     skip_verify: bool,
     batch_size: int,
+    ci_workers: int = 5,
+    max_workers: int | None = None,
 ) -> dict:
     """Synchronously invoke the orchestrator Lambda and return its JSON response."""
-    client = boto3.client("lambda", region_name=region)
+    client = boto3.client(
+        "lambda", region_name=region,
+        config=Config(read_timeout=900, connect_timeout=10, retries={"max_attempts": 0}),
+    )
 
     # Pass raw CIs — orchestrator looks them up from ci-objects by id
     payload = {
@@ -89,8 +95,8 @@ def invoke_orchestrator(
         "skip_rerank":  skip_rerank,
         "skip_verify":  skip_verify,
         "batch_size":   batch_size,
-        "ci_workers":   args.ci_workers,
-        **(({"max_workers": args.max_workers}) if args.max_workers else {}),
+        "ci_workers":   ci_workers,
+        **(({"max_workers": max_workers}) if max_workers else {}),
     }
 
     log.info("Invoking %s with %d CIs (document=%s)...", function, len(cis), document_id)
@@ -190,6 +196,8 @@ def main() -> None:
         skip_rerank = args.skip_rerank,
         skip_verify = args.skip_verify,
         batch_size  = args.batch_size,
+        ci_workers  = args.ci_workers,
+        max_workers = args.max_workers,
     )
 
     # If orchestrator wrote to S3, download it
