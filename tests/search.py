@@ -181,6 +181,9 @@ def _build_os_client():
         use_ssl          = True,
         verify_certs     = True,
         connection_class = RequestsHttpConnection,
+        timeout          = 60,
+        max_retries      = 2,
+        retry_on_timeout = True,
     )
     return _os_client
 
