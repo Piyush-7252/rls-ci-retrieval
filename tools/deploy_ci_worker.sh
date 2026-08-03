@@ -24,7 +24,8 @@ IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
 LATEST_TAG="${LATEST_TAG:-latest}"
 ROLE_ARN="${ROLE_ARN:-}"
 TIMEOUT="${TIMEOUT:-300}"
-MEMORY_SIZE="${MEMORY_SIZE:-8192}"
+MEMORY_SIZE="${MEMORY_SIZE:-10240}"
+EPHEMERAL_STORAGE="${EPHEMERAL_STORAGE:-10240}"   # MB — GLiNER model copy needs ~1.5 GB /tmp
 
 OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com}"
 OPENSEARCH_CI_INDEX="${OPENSEARCH_CI_INDEX:-ci-objects}"
@@ -107,6 +108,7 @@ else
     --role "$ROLE_ARN" \
     --timeout "$TIMEOUT" \
     --memory-size "$MEMORY_SIZE" \
+    --ephemeral-storage "{\"Size\": ${EPHEMERAL_STORAGE}}" \
     --region "$AWS_REGION" >/dev/null
 fi
 
@@ -116,6 +118,7 @@ retry_lambda_update aws lambda update-function-configuration \
   --function-name "$FUNCTION_NAME" \
   --timeout "$TIMEOUT" \
   --memory-size "$MEMORY_SIZE" \
+  --ephemeral-storage "{\"Size\": ${EPHEMERAL_STORAGE}}" \
   --environment "Variables={OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT},OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},NER_MODEL=${NER_MODEL},EMBEDDING_MODEL=${EMBEDDING_MODEL},EMBEDDING_MAX_WORKERS=${EMBEDDING_MAX_WORKERS},HF_HOME=/tmp/hf_cache${HF_TOKEN:+,HF_TOKEN=${HF_TOKEN}}}" \
   --region "$AWS_REGION" >/dev/null
 
