@@ -92,19 +92,7 @@ def _process(req: dict) -> dict:
     candidates  = req.get("candidates", [])
     document_id = req.get("document_id")
 
-    # Batch-fetch all primary chunk docs in one mget (vs N individual GETs)
-    _chunk_cache: dict[str, dict] = {}
-    chunk_ids = [c["chunk_id"] for c in candidates if "chunk_id" in c]
-    if chunk_ids:
-        try:
-            mget_resp = _get_os().mget(index=OPENSEARCH_INDEX, body={"ids": chunk_ids})
-            for doc in mget_resp.get("docs", []):
-                if doc.get("found"):
-                    _chunk_cache[doc["_id"]] = doc.get("_source", {})
-        except Exception as exc:
-            logger.warning("[Context Expander] mget failed, falling back per-doc: %s", exc)
-
-    expanded = [_expand(cand, document_id, _chunk_cache) for cand in candidates]
+    expanded = [_expand(cand, document_id) for cand in candidates]
 
     return {
         **req,
@@ -112,14 +100,13 @@ def _process(req: dict) -> dict:
     }
 
 
-def _expand(candidate: dict, document_id: str | None,
-            chunk_cache: dict | None = None) -> dict:
+def _expand(candidate: dict, document_id: str | None) -> dict:
     chunk_id   = candidate["chunk_id"]
     page_start = candidate.get("page_start", 0)
     page_end   = candidate.get("page_end",   0)
 
-    # Use pre-fetched mget cache when available; fall back to individual GET
-    chunk_doc    = (chunk_cache.get(chunk_id) if chunk_cache else None) or _fetch_chunk(chunk_id)
+    # Fetch the chunk's raw text (for broad LLM context)
+    chunk_doc    = _fetch_chunk(chunk_id)
     current_text = chunk_doc.get("raw_text", "")
 
     # If candidate came from semantic-objects index it already has the matched object

@@ -89,6 +89,8 @@ def invoke_orchestrator(
         "skip_rerank":  skip_rerank,
         "skip_verify":  skip_verify,
         "batch_size":   batch_size,
+        "ci_workers":   args.ci_workers,
+        **(({"max_workers": args.max_workers}) if args.max_workers else {}),
     }
 
     log.info("Invoking %s with %d CIs (document=%s)...", function, len(cis), document_id)
@@ -161,6 +163,10 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=50)
     ap.add_argument("--skip-rerank",  action="store_true")
     ap.add_argument("--skip-verify",  action="store_true")
+    ap.add_argument("--ci-workers",   type=int, default=5,
+                    help="Max CIs processed in parallel per worker Lambda (throttles OpenSearch)")
+    ap.add_argument("--max-workers",  type=int, default=None,
+                    help="Max concurrent worker Lambda invocations (default: all batches)")
     ap.add_argument("--results-bucket", default=DEFAULT_RESULTS_BUCKET)
     ap.add_argument("--results-prefix", default=DEFAULT_RESULTS_PREFIX)
     ap.add_argument("--out-dir",    type=Path, default=RESULTS_DIR)

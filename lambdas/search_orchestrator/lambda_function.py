@@ -78,6 +78,9 @@ DOCUMENT_ASSETS_PATH = os.environ.get(
 )
 RESULTS_BUCKET  = os.environ.get("RESULTS_BUCKET", "")
 RESULTS_PREFIX  = os.environ.get("RESULTS_PREFIX", "search-results")
+# Max CIs processed in parallel within a single worker Lambda.
+# Keep low on small OpenSearch clusters (2 search threads) to avoid 429s.
+SEARCH_CI_WORKERS = int(os.environ.get("SEARCH_CI_WORKERS", "5"))
 
 _DEFAULT_BATCH_SIZE = 50
 
@@ -223,6 +226,7 @@ def handler(event: dict, context: Any) -> dict:
     batch_size  = int(event.get("batch_size",  _DEFAULT_BATCH_SIZE))
     skip_rerank = bool(event.get("skip_rerank", False))
     skip_verify = bool(event.get("skip_verify",  False))
+    ci_workers  = int(event.get("ci_workers", SEARCH_CI_WORKERS))
 
     logger.info("[Orchestrator] start search_id=%s doc=%s cis=%d batch_size=%d",
                 search_id, document_id, len(raw_cis), batch_size)
@@ -258,7 +262,7 @@ def handler(event: dict, context: Any) -> dict:
             "document_context": doc_context,
             "skip_rerank":      skip_rerank,
             "skip_verify":      skip_verify,
-            "workers":          len(batch),
+            "workers":          min(len(batch), ci_workers),
         }
         for idx, batch in enumerate(batches)
     ]

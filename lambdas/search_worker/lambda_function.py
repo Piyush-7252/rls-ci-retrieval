@@ -307,7 +307,7 @@ def _s2_retrieve(req: dict) -> dict:
         return strat, result, round(time.perf_counter() - t0, 3)
 
     valid = [s for s in strategies if s in RETRIEVER_MAP]
-    with ThreadPoolExecutor(max_workers=len(valid) or 1) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(valid), 4) or 1) as pool:
         for strat, result, elapsed in [f.result() for f in
                                         [pool.submit(_run, s) for s in valid]]:
             timings[strat] = elapsed
