@@ -150,7 +150,20 @@ def _get_ce_model():
     if _ce_model is None:
         with _ce_model_lock:
             if _ce_model is None:   # re-check inside lock
+                import os, shutil
+                from pathlib import Path
                 from sentence_transformers import CrossEncoder
+                # Model is baked into /var/task/models at image build time
+                # (read-only at Lambda runtime).  Copy to /tmp so HF hub can
+                # write lock files — same pattern as the NER lambda for GLiNER.
+                baked     = Path(os.environ.get("HF_HOME", "/var/task/models"))
+                tmp_cache = Path("/tmp/hf_cache")
+                if baked.exists() and not tmp_cache.exists():
+                    logger.info("[Reranker] copying baked model cache to /tmp")
+                    shutil.copytree(str(baked), str(tmp_cache), symlinks=True)
+                if tmp_cache.exists():
+                    os.environ["HF_HOME"]                   = str(tmp_cache)
+                    os.environ["SENTENCE_TRANSFORMERS_HOME"] = str(tmp_cache)
                 logger.info("[Reranker] loading cross-encoder model: %s", CE_MODEL_NAME)
                 _ce_model = CrossEncoder(CE_MODEL_NAME)
                 logger.info("[Reranker] model loaded")

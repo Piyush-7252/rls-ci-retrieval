@@ -6,6 +6,9 @@ on:
     paths:
       - "lambdas/chunk_worker/**"
       - "lambdas/ci_worker/**"
+      - "lambdas/search_worker/**"
+      - "lambdas/search_orchestrator/**"
+      - "lambdas/search/**"
       - "lambdas/ner/**"
       - "lambdas/normalize/**"
       - "lambdas/embedding/**"
@@ -25,21 +28,29 @@ on:
           - all
           - chunk_worker
           - ci_worker
+          - search_worker
+          - search_orchestrator
 
 # ── Path-change detection ─────────────────────────────────────────────────────
 # The `changes` job decides which workers need rebuilding.
-# Both workers share ner/normalize/embedding/ontology/index/shared —
-# a change to any of those triggers both deploys simultaneously.
-# A change only to lambdas/chunk_worker/** triggers only the chunk deploy.
-# A change only to lambdas/ci_worker/**   triggers only the CI deploy.
-# workflow_dispatch lets you force-deploy one or both manually.
+#
+#   chunk_worker      — triggered by its own folder + all shared pipeline stages
+#   ci_worker         — triggered by its own folder + all shared pipeline stages
+#   search_worker     — triggered by its own folder + lambdas/search/** (sub-lambdas
+#                       loaded in-process) + shared/**
+#   search_orchestrator — triggered by its own folder + shared/**
+#
+# A change to lambdas/ner/** or shared/** triggers chunk_worker + ci_worker + search_worker.
+# workflow_dispatch lets you force-deploy any single lambda or all.
 jobs:
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      chunk_worker: ${{ steps.filter.outputs.chunk_worker }}
-      ci_worker:    ${{ steps.filter.outputs.ci_worker }}
+      chunk_worker:        ${{ steps.filter.outputs.chunk_worker }}
+      ci_worker:           ${{ steps.filter.outputs.ci_worker }}
+      search_worker:       ${{ steps.filter.outputs.search_worker }}
+      search_orchestrator: ${{ steps.filter.outputs.search_orchestrator }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -65,6 +76,15 @@ jobs:
               - 'lambdas/index/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
+            search_worker:
+              - 'lambdas/search_worker/**'
+              - 'lambdas/search/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            search_orchestrator:
+              - 'lambdas/search_orchestrator/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
 
   # ── chunk_worker ─────────────────────────────────────────────────────────────
   deploy-chunk-worker:
@@ -83,15 +103,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            eu-west-1
-
       - uses: docker/setup-buildx-action@v3
-
       - name: Deploy
         env:
           ROLE_ARN:  ${{ secrets.ROLE_ARN }}
@@ -117,15 +134,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            eu-west-1
-
       - uses: docker/setup-buildx-action@v3
-
       - name: Deploy
         env:
           ROLE_ARN:  ${{ secrets.ROLE_ARN }}
@@ -133,3 +147,70 @@ jobs:
         run: |
           chmod +x tools/deploy_ci_worker.sh
           tools/deploy_ci_worker.sh
+
+  # ── search_worker ─────────────────────────────────────────────────────────────
+  deploy-search-worker:
+    name: Deploy search_worker (rls-search-worker)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.search_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search_worker'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-search-worker
+      ECR_REPO:      rls-search-worker
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
+        run: |
+          chmod +x tools/deploy_search_worker.sh
+          tools/deploy_search_worker.sh
+
+  # ── search_orchestrator ───────────────────────────────────────────────────────
+  # Runs AFTER search_worker so it can pick up its ARN automatically.
+  deploy-search-orchestrator:
+    name: Deploy search_orchestrator (rls-search-orchestrator)
+    needs: [changes, deploy-search-worker]
+    # Run if: search_orchestrator paths changed OR search_worker was just deployed
+    # (orchestrator needs the latest worker ARN in its env).
+    # Also honour manual workflow_dispatch target.
+    if: |
+      !failure() && !cancelled() &&
+      (
+        (github.event_name == 'push' && (needs.changes.outputs.search_orchestrator == 'true' || needs.changes.outputs.search_worker == 'true')) ||
+        (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search_orchestrator'))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-search-orchestrator
+      ECR_REPO:      rls-search-orchestrator
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
+        run: |
+          chmod +x tools/deploy_search_orchestrator.sh
+          tools/deploy_search_orchestrator.sh
