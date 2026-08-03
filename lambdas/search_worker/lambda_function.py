@@ -55,7 +55,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+_task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
+if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
+    ROOT = Path(_task_root_env)
+else:
+    ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

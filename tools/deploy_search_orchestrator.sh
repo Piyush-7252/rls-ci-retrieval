@@ -28,6 +28,8 @@ MEMORY_SIZE="${MEMORY_SIZE:-1024}"
 
 OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com}"
 OPENSEARCH_CI_INDEX="${OPENSEARCH_CI_INDEX:-ci-objects}"
+RESULTS_BUCKET="${RESULTS_BUCKET:-rls-file-bucket-eu}"
+RESULTS_PREFIX="${RESULTS_PREFIX:-search-results}"
 
 # Resolve WORKER_LAMBDA_ARN automatically if not provided.
 WORKER_LAMBDA_NAME="${WORKER_LAMBDA_NAME:-rls-search-worker}"
@@ -128,7 +130,7 @@ retry_lambda_update aws lambda update-function-configuration \
   --function-name "$FUNCTION_NAME" \
   --timeout "$TIMEOUT" \
   --memory-size "$MEMORY_SIZE" \
-  --environment "Variables={OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT},OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},WORKER_LAMBDA_ARN=${WORKER_LAMBDA_ARN}}" \
+  --environment "Variables={OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT},OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},WORKER_LAMBDA_ARN=${WORKER_LAMBDA_ARN},RESULTS_BUCKET=${RESULTS_BUCKET},RESULTS_PREFIX=${RESULTS_PREFIX}}" \
   --region "$AWS_REGION" >/dev/null
 
 wait_for_lambda_update
@@ -137,3 +139,4 @@ echo ""
 echo "Deployed ${FUNCTION_NAME}"
 echo "Image:         ${IMAGE_URI}"
 echo "Worker ARN:    ${WORKER_LAMBDA_ARN}"
+echo "Results S3:    s3://${RESULTS_BUCKET}/${RESULTS_PREFIX}/"

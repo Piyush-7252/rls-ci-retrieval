@@ -38,6 +38,8 @@ Env vars
   EMBEDDING_MODEL         — Bedrock embedding model for CI lookup fallback
   AWS_REGION
   DOCUMENT_ASSETS_PATH    — local path to document_assets.json (optional)
+  RESULTS_BUCKET          — S3 bucket to write full result JSON (required for Lambda invoke)
+  RESULTS_PREFIX          — S3 key prefix (default: search-results)
 """
 
 from __future__ import annotations
@@ -56,7 +58,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+_task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
+if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
+    ROOT = Path(_task_root_env)
+else:
+    ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -70,6 +76,8 @@ DOCUMENT_ASSETS_PATH = os.environ.get(
     "DOCUMENT_ASSETS_PATH",
     str(ROOT / "localfiles" / "assets" / "document_assets.json"),
 )
+RESULTS_BUCKET  = os.environ.get("RESULTS_BUCKET", "")
+RESULTS_PREFIX  = os.environ.get("RESULTS_PREFIX", "search-results")
 
 _DEFAULT_BATCH_SIZE = 50
 
@@ -283,12 +291,11 @@ def handler(event: dict, context: Any) -> dict:
     wall_time = round(time.perf_counter() - t0, 3)
     stage_wall = _merge_stage_walls(all_walls)
 
+    total_hits = sum(len(r.get("final_hits", [])) for r in flat_results)
     logger.info("[Orchestrator] done search_id=%s wall=%.1fs cis=%d hits=%d errors=%d",
-                search_id, wall_time, len(flat_results),
-                sum(len(r.get("final_hits", [])) for r in flat_results),
-                len(errors))
+                search_id, wall_time, len(flat_results), total_hits, len(errors))
 
-    return {
+    response = {
         "search_id":   search_id,
         "document_id": document_id,
         "n_cis":       len(enriched),
@@ -298,3 +305,31 @@ def handler(event: dict, context: Any) -> dict:
         "wall_time":   wall_time,
         **({"errors": errors} if errors else {}),
     }
+
+    # ── Write full results to S3 (payload is too large for Lambda response) ──
+    if RESULTS_BUCKET:
+        import datetime
+        ts      = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        s3_key  = f"{RESULTS_PREFIX}/{ts}_{search_id}_{document_id}.json"
+        body    = json.dumps(response, default=str).encode()
+        _get("s3").put_object(
+            Bucket      = RESULTS_BUCKET,
+            Key         = s3_key,
+            Body        = body,
+            ContentType = "application/json",
+        )
+        logger.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
+                    RESULTS_BUCKET, s3_key, len(body))
+        # Return lightweight summary + pointer instead of 13MB payload
+        return {
+            "search_id":   search_id,
+            "document_id": document_id,
+            "n_cis":       len(enriched),
+            "total_hits":  total_hits,
+            "wall_time":   wall_time,
+            "s3_bucket":   RESULTS_BUCKET,
+            "s3_key":      s3_key,
+            **({"errors": errors} if errors else {}),
+        }
+
+    return response
