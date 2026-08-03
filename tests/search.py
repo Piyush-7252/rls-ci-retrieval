@@ -525,31 +525,41 @@ def run_search(
           f"strategies={classification.get('strategies')}  "
           f"reason={classification.get('reason')}  ({_timings['classifier']:.2f}s)")
 
-    # ── Stage 2: Retrieve (each selected retriever runs sequentially) ─────────
+    # ── Stage 2: Retrieve (parallel — all retrievers run concurrently) ────────
     strategies           = classification.get("strategies", list(RETRIEVER_MAP.keys()))
     retriever_results:   list[dict] = []
     _retriever_timings:  dict[str, float] = {}
 
+    # Pre-load + inject OS before spawning threads (avoids module-cache races)
+    _strat_mods: dict[str, Any] = {}
     for strategy in strategies:
         if strategy not in RETRIEVER_MAP:
             continue
-        mod_path = RETRIEVER_MAP[strategy]
-        mod      = _load(mod_path, f"search_{strategy}")
+        mod = _load(RETRIEVER_MAP[strategy], f"search_{strategy}")
         _inject_os(mod)
-        _t0      = time.perf_counter()
-        result   = mod._process(req)
-        _retriever_timings[strategy] = round(time.perf_counter() - _t0, 3)
-        n_hits   = len(result.get("hits", []))
-        print(f"  → {strategy:10s}: {n_hits} hits  ({_retriever_timings[strategy]:.2f}s)")
-        if verbose and n_hits:
-            for h in result["hits"][:3]:
-                print(f"      chunk={h['chunk_id']}  score={h['score']:.3f}  "
-                      f"pages={h.get('page_start')}-{h.get('page_end')}")
-        retriever_results.append(result)
+        _strat_mods[strategy] = mod
+
+    def _run_retriever(strat: str) -> tuple[str, dict, float]:
+        _t0 = time.perf_counter()
+        result = _strat_mods[strat]._process(req)
+        return strat, result, round(time.perf_counter() - _t0, 3)
+
+    with ThreadPoolExecutor(max_workers=len(_strat_mods)) as _pool:
+        for strat, result, elapsed in [f.result() for f in
+                                        as_completed(_pool.submit(_run_retriever, s)
+                                                     for s in _strat_mods)]:
+            _retriever_timings[strat] = elapsed
+            n_hits = len(result.get("hits", []))
+            print(f"  → {strat:10s}: {n_hits} hits  ({elapsed:.2f}s)")
+            if verbose and n_hits:
+                for h in result["hits"][:3]:
+                    print(f"      chunk={h['chunk_id']}  score={h['score']:.3f}  "
+                          f"pages={h.get('page_start')}-{h.get('page_end')}")
+            retriever_results.append(result)
 
     req["retriever_results"] = retriever_results
     _timings["retrievers"] = _retriever_timings
-    _timings["retrievers_total"] = round(sum(_retriever_timings.values()), 3)
+    _timings["retrievers_total"] = round(max(_retriever_timings.values(), default=0), 3)
 
     # ── Stage 3: Aggregate ───────────────────────────────────────────────────
     _t0        = time.perf_counter()

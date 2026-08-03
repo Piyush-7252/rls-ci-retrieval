@@ -113,7 +113,7 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
 
 
 def _literal_search(ci_text: str, norm_text: str, document_id: str | None) -> list[dict]:
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
 
     body = {
         "size": TOP_K,

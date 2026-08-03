@@ -207,7 +207,7 @@ def _build_fact_query(
     if not usable:
         return None
 
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
     should_clauses: list[dict] = []
 
     # One clause per value, per slot — not joined
@@ -286,7 +286,7 @@ def _build_relation_query(ci_relations: list[dict], document_id: str | None) -> 
     if not ci_relations:
         return None
 
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
     per_relation_clauses: list[dict] = []
 
     for rel in ci_relations:

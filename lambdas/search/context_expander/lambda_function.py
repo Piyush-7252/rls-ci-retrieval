@@ -92,7 +92,19 @@ def _process(req: dict) -> dict:
     candidates  = req.get("candidates", [])
     document_id = req.get("document_id")
 
-    expanded = [_expand(cand, document_id) for cand in candidates]
+    # Batch-fetch all primary chunk docs in one mget (vs N individual GETs)
+    _chunk_cache: dict[str, dict] = {}
+    chunk_ids = [c["chunk_id"] for c in candidates if "chunk_id" in c]
+    if chunk_ids:
+        try:
+            mget_resp = _get_os().mget(index=OPENSEARCH_INDEX, body={"ids": chunk_ids})
+            for doc in mget_resp.get("docs", []):
+                if doc.get("found"):
+                    _chunk_cache[doc["_id"]] = doc.get("_source", {})
+        except Exception as exc:
+            logger.warning("[Context Expander] mget failed, falling back per-doc: %s", exc)
+
+    expanded = [_expand(cand, document_id, _chunk_cache) for cand in candidates]
 
     return {
         **req,
@@ -100,13 +112,14 @@ def _process(req: dict) -> dict:
     }
 
 
-def _expand(candidate: dict, document_id: str | None) -> dict:
+def _expand(candidate: dict, document_id: str | None,
+            chunk_cache: dict | None = None) -> dict:
     chunk_id   = candidate["chunk_id"]
     page_start = candidate.get("page_start", 0)
     page_end   = candidate.get("page_end",   0)
 
-    # Fetch the chunk's raw text (for broad LLM context)
-    chunk_doc    = _fetch_chunk(chunk_id)
+    # Use pre-fetched mget cache when available; fall back to individual GET
+    chunk_doc    = (chunk_cache.get(chunk_id) if chunk_cache else None) or _fetch_chunk(chunk_id)
     current_text = chunk_doc.get("raw_text", "")
 
     # If candidate came from semantic-objects index it already has the matched object
@@ -197,7 +210,7 @@ def _fetch_chunk_by_idx(document_id: str | None, chunk_idx: int) -> str:
     body = {
         "size": 1,
         "query": {"bool": {"filter": [
-            {"term": {"document_id": document_id}},
+            {"term": {"document_id.keyword": document_id}},
             {"term": {"chunk_idx":   chunk_idx}},
         ]}},
         "_source": ["raw_text"],
@@ -230,7 +243,7 @@ def _fetch_context_objects(
     if center_pos is not None:
         # Primary: global_position range (document-wide, crosses chunk boundaries)
         filter_clauses: list[dict] = [
-            {"term":  {"document_id": document_id}},
+            {"term":  {"document_id.keyword": document_id}},
             {"range": {"global_position": {"gte": center_pos - window,
                                             "lte": center_pos + window}}},
         ]
@@ -277,7 +290,7 @@ def _fetch_neighbor(
     if not document_id:
         return ""
 
-    filter_clauses: list[dict] = [{"term": {"document_id": document_id}}]
+    filter_clauses: list[dict] = [{"term": {"document_id.keyword": document_id}}]
     if page_start is not None:
         filter_clauses.append({"term": {"page_start": page_start}})
     if page_end is not None:

@@ -103,7 +103,7 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None) -
     Search semantic-objects index by body dense_vector.
     Returns hits with full matched_object metadata.
     """
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
 
     body = {
         "size": FETCH_SIZE,
@@ -210,7 +210,7 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     """
     if not ci_embedding:
         return []
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
     body = {
         "size": FETCH_SIZE,
         "query": {"bool": {
@@ -264,7 +264,7 @@ def _vector_search_chunks(ci_embedding: list[float], document_id: str | None) ->
     Fallback: search document-chunks for broad recall.
     Returns hits WITHOUT matched_object (context_expander handles those).
     """
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
 
     body = {
         "size": FETCH_SIZE,

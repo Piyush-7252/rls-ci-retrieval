@@ -93,7 +93,7 @@ def _regex_search(
     document_id: str | None,
 ) -> list[dict]:
     """Fetch all chunks and apply Python regex to raw_text."""
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
 
     body = {
         "size": FETCH_SIZE,

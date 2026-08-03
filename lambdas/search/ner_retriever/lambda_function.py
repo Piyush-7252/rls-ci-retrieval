@@ -74,7 +74,7 @@ def _process(req: dict) -> dict:
 
 
 def _ner_search(entity_texts: list[str], document_id: str | None) -> list[dict]:
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
 
     # Search for chunks whose entity list overlaps with CI entity texts
     should_clauses = [
