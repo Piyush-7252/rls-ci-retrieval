@@ -15,10 +15,10 @@ NEW format : localfiles/search_results/run18/{doc_id}.json  (search_test.py outp
              ALL hit types are included (not just final)
 
 Verdict mapping (new -> compare column):
-  YES    -> TRUE_POSITIVE
-  MAYBE  -> UNCERTAIN
-  NO     -> FALSE_POSITIVE
-  SKIP   -> SKIPPED
+  YES / DIRECT / SUPPORTING / RELATED* -> TRUE_POSITIVE
+  MAYBE                                 -> UNCERTAIN
+  NO                                    -> FALSE_POSITIVE
+  SKIP                                  -> SKIPPED
 
 Usage (single pair):
   python tools/compare_results.py --old localfiles/old-ecs/10990_.../current.json \
@@ -54,10 +54,17 @@ CONFIG    = ROOT / "localfiles" / "full_tables.json"
 # ---------------------------------------------------------------------------
 
 _VERDICT_MAP = {
-    "YES":   "TRUE_POSITIVE",
-    "MAYBE": "UNCERTAIN",
-    "NO":    "FALSE_POSITIVE",
-    "SKIP":  "SKIPPED",
+    # LLM verifier verdicts
+    "YES":       "TRUE_POSITIVE",
+    "MAYBE":     "UNCERTAIN",
+    "NO":        "FALSE_POSITIVE",
+    "SKIP":      "SKIPPED",
+    # evidence_type values that can appear in verdict field
+    "DIRECT":          "TRUE_POSITIVE",
+    "SUPPORTING":      "TRUE_POSITIVE",
+    "RELATED":         "TRUE_POSITIVE",
+    "RELATED_PROTOCOL":"TRUE_POSITIVE",
+    "INDIRECT":        "TRUE_POSITIVE",
 }
 
 
