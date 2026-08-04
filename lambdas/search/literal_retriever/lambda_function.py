@@ -142,8 +142,10 @@ def _literal_search(ci_text: str, norm_text: str, document_id: str | None) -> li
                             }
                         }
                     },
-                    # Fuzzy match for OCR errors / typos
-                    {
+                    # Fuzzy match for OCR errors / typos (short CI texts only —
+                    # long texts expand to thousands of term variations and hit
+                    # OpenSearch's 1024 maxClauseCount limit).
+                    *([{
                         "match": {
                             "raw_text": {
                                 "query":     ci_text,
@@ -151,7 +153,7 @@ def _literal_search(ci_text: str, norm_text: str, document_id: str | None) -> li
                                 "boost":     1.0,
                             }
                         }
-                    },
+                    }] if len(ci_text) <= 50 else []),
                 ],
                 "minimum_should_match": 1,
             }
