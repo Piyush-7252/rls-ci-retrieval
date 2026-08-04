@@ -195,6 +195,7 @@ def handler(event: dict, context: Any) -> dict:
                     failures.append({"itemIdentifier": message_id})
                 continue
 
+        chunk = None
         try:
             chunk = _decode_payload(record)
             result = _run_chunk(chunk, context)
@@ -205,7 +206,11 @@ def handler(event: dict, context: Any) -> dict:
                 result.get("elapsed_s"),
             )
         except Exception as exc:
-            logger.exception("[ChunkWorker] failed message_id=%s error=%s", message_id, exc)
+            chunk_id = chunk.get("chunk_id", "?") if chunk else "?"
+            logger.exception(
+                "[ChunkWorker] failed message_id=%s chunk_id=%s error=%s",
+                message_id, chunk_id, exc,
+            )
             if message_id:
                 failures.append({"itemIdentifier": message_id})
 
