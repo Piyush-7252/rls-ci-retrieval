@@ -111,8 +111,7 @@ def _hit_strategy(hit: dict) -> str:
 
 def _hit_text(hit: dict) -> str:
     """Best text snippet."""
-    return ((hit.get("match_span") or hit.get("context_sentence") or
-             hit.get("text") or "")[:300].replace("\n", " "))
+    return (hit.get("text") or "").replace("\n", " ")
 
 
 def _load_new(path: Path) -> list[dict]:
@@ -148,10 +147,12 @@ def _load_new(path: Path) -> list[dict]:
                 "confidence":   hit.get("confidence", ""),
                 "strategy":     _hit_strategy(hit),
                 "text":         _hit_text(hit),
-                "verdict":      verdict_mapped,
-                "reason":       reason[:300].replace("\n", " "),
-                "hit_category": hit_cat,          # final/rejected/skipped
-                "evidence_type": hit.get("evidence_type", ""),
+                "verdict":          verdict_mapped,
+                "reason":           reason[:300].replace("\n", " "),
+                "hit_category":     hit_cat,          # final/rejected/skipped
+                "evidence_type":    hit.get("evidence_type", ""),
+                "match_span":       (hit.get("match_span") or "").replace("\n", " "),
+                "context_sentence": (hit.get("context_sentence") or "").replace("\n", " "),
             })
     return rows
 
@@ -226,6 +227,8 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
                 "new_claude_verdict": n.get("verdict", ""),
                 "new_claude_reason":  n.get("reason", ""),
                 "new_text":           n.get("text", ""),
+                "new_match_span":     n.get("match_span", ""),
+                "context_sentence": n.get("context_sentence", ""),
             })
     return out
 
@@ -240,7 +243,7 @@ FIELDNAMES = [
     "new_confidence", "new_strategy",
     "new_hit_category", "new_evidence_type",
     "new_claude_verdict", "new_claude_reason",
-    "new_text",
+    "new_text", "new_match_span", "context_sentence",
 ]
 
 
