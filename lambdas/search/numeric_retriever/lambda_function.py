@@ -166,11 +166,11 @@ def _build_structured_query(si: dict, document_id: str | None) -> dict | None:
 
     filter_clauses: list[dict] = []
     if document_id:
-        filter_clauses.append({"term": {"document_id.keyword": document_id}})
+        filter_clauses.append({"term": {"document_id": document_id}})
 
     # Type gate: eliminates every object of the wrong statistical kind.
     # "dose level 8" has no statistical_identity.type="sample_size" -> filtered out.
-    filter_clauses.append({"term": {"statistical_identity.type": si_type}})
+    filter_clauses.append({"term": {"statistical_identity.type.keyword": si_type}})
 
     # Value filters: exact match on the numeric value(s).
     if si_type == "confidence_interval":
@@ -245,7 +245,7 @@ def _build_token_query(si: dict, ci_text: str, document_id: str | None) -> dict 
     Token-based must query: require the key numeric tokens to appear in text.
     Fallback for documents indexed before statistical_identity was added.
     """
-    filter_clauses: list[dict] = [{"term": {"document_id.keyword": document_id}}] if document_id else []
+    filter_clauses: list[dict] = [{"term": {"document_id": document_id}}] if document_id else []
     must: list[dict] = []
 
     lower = si.get("lower_ci")

@@ -242,7 +242,7 @@ def _msearch_by_idx(document_id: str, idx_list: list[int]) -> dict[int, str]:
         body.append({
             "size": 1,
             "query": {"bool": {"filter": [
-                {"term": {"document_id.keyword": document_id}},
+                {"term": {"document_id": document_id}},
                 {"term": {"chunk_idx": idx}},
             ]}},
             "_source": ["raw_text"],
@@ -277,7 +277,7 @@ def _msearch_context_objects(
             body.append({
                 "size": CONTEXT_WINDOW * 2 + 1,
                 "query": {"bool": {"filter": [
-                    {"term":  {"document_id.keyword": document_id}},
+                    {"term":  {"document_id": document_id}},
                     {"range": {"global_position": {
                         "gte": center_pos - CONTEXT_WINDOW,
                         "lte": center_pos + CONTEXT_WINDOW,
@@ -315,7 +315,7 @@ def _fetch_chunk_by_idx(document_id: str | None, chunk_idx: int) -> str:
     body = {
         "size": 1,
         "query": {"bool": {"filter": [
-            {"term": {"document_id.keyword": document_id}},
+            {"term": {"document_id": document_id}},
             {"term": {"chunk_idx":   chunk_idx}},
         ]}},
         "_source": ["raw_text"],
@@ -348,7 +348,7 @@ def _fetch_context_objects(
     if center_pos is not None:
         # Primary: global_position range (document-wide, crosses chunk boundaries)
         filter_clauses: list[dict] = [
-            {"term":  {"document_id.keyword": document_id}},
+            {"term":  {"document_id": document_id}},
             {"range": {"global_position": {"gte": center_pos - window,
                                             "lte": center_pos + window}}},
         ]
@@ -395,7 +395,7 @@ def _fetch_neighbor(
     if not document_id:
         return ""
 
-    filter_clauses: list[dict] = [{"term": {"document_id.keyword": document_id}}]
+    filter_clauses: list[dict] = [{"term": {"document_id": document_id}}]
     if page_start is not None:
         filter_clauses.append({"term": {"page_start": page_start}})
     if page_end is not None:

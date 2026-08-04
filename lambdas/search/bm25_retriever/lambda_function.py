@@ -89,7 +89,7 @@ def _process(req: dict) -> dict:
 
 def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | None) -> list[dict]:
     """BM25 search against semantic-objects index."""
-    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {
@@ -150,7 +150,7 @@ def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | N
 
 def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | None) -> list[dict]:
     """BM25 fallback against document-chunks for broad recall."""
-    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {

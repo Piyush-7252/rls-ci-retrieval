@@ -96,7 +96,7 @@ def _process(req: dict) -> dict:
 
 
 def _ontology_search(terms: list[str], document_id: str | None) -> list[dict]:
-    filter_clause = [{"term": {"document_id.keyword": document_id}}] if document_id else []
+    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
 
     # One match clause per term — any match counts
     should_clauses = [
