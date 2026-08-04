@@ -538,11 +538,16 @@ def _merge(retriever_results: list[dict]) -> list[dict]:
             if score > entry["_per_scores"].get(retriever, 0.0):
                 entry["_per_scores"][retriever] = score
 
+            # matched_object: accept the first one we see (covers filter-only
+            # retrievers like numeric/regex whose score is always 0.0);
+            # only overwrite when a strictly higher-scored hit comes in.
+            if matched_obj:
+                if entry["matched_object"] is None or score > entry["_best_score"]:
+                    entry["matched_object"] = matched_obj
+
             if score > entry["_best_score"]:
                 entry["max_score"]   = score
                 entry["_best_score"] = score
-                if matched_obj:
-                    entry["matched_object"] = matched_obj
 
     candidates = list(clusters.values())
     for c in candidates:
