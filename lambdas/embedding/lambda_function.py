@@ -29,7 +29,7 @@ logger.setLevel(logging.INFO)
 
 INDEX_LAMBDA_ARN = os.environ.get("INDEX_LAMBDA_ARN", "")
 EMBEDDING_MODEL  = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
-EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1")))
+EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "8")))
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000
@@ -41,6 +41,7 @@ _EMBED_BACKOFF_CAP  = 60.0  # maximum jitter window (seconds)
 _THROTTLE_CODES = frozenset({
     "ThrottlingException", "TooManyRequestsException",
     "ServiceUnavailableException", "RequestLimitExceeded",
+    "ModelErrorException",   # Bedrock transient 500 — retry recommended by AWS
 })
 
 # Clinical stopwords — carry no discriminative weight in sparse matching
@@ -127,51 +128,43 @@ def _process_ci(ci: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _process_document(chunk: dict) -> dict:
-    text                 = chunk["normalization"]["normalized_text"]
-    tokens               = chunk["normalization"]["tokens"]
-    dense_vector         = _generate_dense_embedding(text)
-
-    # Optional heading-only embedding for heading-intent retrieval lane
-    heading_text         = chunk.get("heading_embedding_text", "")
-    heading_dense_vector = _generate_dense_embedding(heading_text) if heading_text else []
-
+    text    = chunk["normalization"]["normalized_text"]
+    tokens  = chunk["normalization"]["tokens"]
+    heading_text = chunk.get("heading_embedding_text", "")
     sparse_vector = _generate_sparse_embedding(tokens)
 
-    # Per-object and per-sentence embeddings
+    # Submit ALL embeddings (chunk + heading + objects + sentences) in parallel
     objects = chunk.get("extraction", {}).get("objects", [])
-    if EMBEDDING_MAX_WORKERS <= 1:
-        for obj in objects:
+
+    # task tag: ("chunk"|"heading"|"obj"|"span", obj_idx, span_idx, future)
+    tasks: list[tuple[str, int, int | None, Any]] = []
+    with ThreadPoolExecutor(max_workers=EMBEDDING_MAX_WORKERS) as pool:
+        chunk_fut   = pool.submit(_generate_dense_embedding, text)
+        heading_fut = pool.submit(_generate_dense_embedding, heading_text) if heading_text else None
+
+        for obj_idx, obj in enumerate(objects):
             if obj.get("text") and not obj.get("embedding"):
-                obj["embedding"] = _generate_dense_embedding(_object_embedding_text(obj))
+                fut = pool.submit(_generate_dense_embedding, _object_embedding_text(obj))
+                tasks.append(("obj", obj_idx, None, fut))
 
-            for span in obj.get("display_spans", []):
+            for span_idx, span in enumerate(obj.get("display_spans", [])):
                 if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
-                    span["embedding"] = _generate_dense_embedding(
-                        _sentence_embedding_text(obj, span)
+                    fut = pool.submit(
+                        _generate_dense_embedding,
+                        _sentence_embedding_text(obj, span),
                     )
-    else:
-        tasks: list[tuple[str, int, int | None, Any]] = []
-        with ThreadPoolExecutor(max_workers=EMBEDDING_MAX_WORKERS) as pool:
-            for obj_idx, obj in enumerate(objects):
-                if obj.get("text") and not obj.get("embedding"):
-                    fut = pool.submit(_generate_dense_embedding, _object_embedding_text(obj))
-                    tasks.append(("obj", obj_idx, None, fut))
+                    tasks.append(("span", obj_idx, span_idx, fut))
 
-                for span_idx, span in enumerate(obj.get("display_spans", [])):
-                    if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
-                        fut = pool.submit(
-                            _generate_dense_embedding,
-                            _sentence_embedding_text(obj, span),
-                        )
-                        tasks.append(("span", obj_idx, span_idx, fut))
+        dense_vector         = chunk_fut.result()
+        heading_dense_vector = heading_fut.result() if heading_fut else []
 
-            for kind, obj_idx, span_idx, fut in tasks:
-                embedding = fut.result()
-                if kind == "obj":
-                    objects[obj_idx]["embedding"] = embedding
-                else:
-                    assert span_idx is not None
-                    objects[obj_idx]["display_spans"][span_idx]["embedding"] = embedding
+        for kind, obj_idx, span_idx, fut in tasks:
+            embedding = fut.result()
+            if kind == "obj":
+                objects[obj_idx]["embedding"] = embedding
+            else:
+                assert span_idx is not None
+                objects[obj_idx]["display_spans"][span_idx]["embedding"] = embedding
 
     if objects and "extraction" in chunk:
         chunk = {**chunk, "extraction": {**chunk["extraction"], "objects": objects}}

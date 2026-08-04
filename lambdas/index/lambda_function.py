@@ -167,13 +167,29 @@ def _process_document(chunk: dict) -> dict:
     obj_docs  = _build_object_docs(chunk)
     sent_docs = _build_sentence_docs(chunk)
 
-    _get_os().index(index=OPENSEARCH_INDEX, id=chunk["chunk_id"], body=chunk_doc)
-
+    # Build one bulk body: chunk → objects → sentences (single HTTPS round-trip)
+    bulk_body: list[dict | str] = []
+    bulk_body.append({"index": {"_index": OPENSEARCH_INDEX, "_id": chunk["chunk_id"]}})
+    bulk_body.append(chunk_doc)
     for doc in obj_docs:
-        _get_os().index(index=SEMANTIC_OBJECTS_INDEX, id=doc["object_id"], body=doc)
-
+        bulk_body.append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}})
+        bulk_body.append(doc)
     for doc in sent_docs:
-        _get_os().index(index=SEMANTIC_OBJECTS_INDEX, id=doc["object_id"], body=doc)
+        bulk_body.append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}})
+        bulk_body.append(doc)
+
+    resp = _get_os().bulk(body=bulk_body)
+    if resp.get("errors"):
+        failed = [
+            item for item in resp.get("items", [])
+            if item.get("index", {}).get("error")
+        ]
+        logger.error(
+            "[Index document] bulk errors chunk_id=%s failed_docs=%d first_error=%s",
+            chunk["chunk_id"], len(failed),
+            failed[0]["index"]["error"] if failed else "?",
+        )
+        raise RuntimeError(f"Bulk index failed for {len(failed)} docs in {chunk['chunk_id']}")
 
     logger.info(
         "[Index document] chunk_id=%s chunk=1 objects=%d sentences=%d",

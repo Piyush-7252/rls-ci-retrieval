@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import importlib.util
 import json
 import sys
@@ -30,6 +31,30 @@ def _load(rel_path: str, alias: str) -> types.ModuleType:
     spec.loader.exec_module(mod)
     _loaded[alias] = mod
     return mod
+
+
+# ---------------------------------------------------------------------------
+# Chunk cache helpers
+# ---------------------------------------------------------------------------
+
+def _chunks_cache_path(cache_dir: Path, document_id: str, page_start: int, page_end: int) -> Path:
+    return cache_dir / document_id / "chunks" / f"chunks_{page_start}_{page_end}.json.gz"
+
+
+def _load_cached_chunks(path: Path) -> list[dict] | None:
+    if not path.exists():
+        return None
+    print(f"  [chunk-cache] loading from {path}", flush=True)
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _save_cached_chunks(path: Path, chunks: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as fh:
+        json.dump(chunks, fh)
+    size_mb = path.stat().st_size / 1024 / 1024
+    print(f"  [chunk-cache] saved {len(chunks)} chunks → {path} ({size_mb:.1f} MB)", flush=True)
 
 
 def _merge_doc_structure(raw: dict) -> dict:
@@ -216,9 +241,9 @@ def _send_chunk_messages(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build section-aware chunks and enqueue to SQS")
     parser.add_argument("--document-id", required=True)
-    parser.add_argument("--s3-bucket", required=True)
-    parser.add_argument("--s3-key", required=True, help="Source PDF key for metadata")
-    parser.add_argument("--full-tables-key", required=True)
+    parser.add_argument("--s3-bucket", default="", help="S3 bucket (not required when --cache-path exists locally)")
+    parser.add_argument("--s3-key", default="", help="Source PDF key for metadata")
+    parser.add_argument("--full-tables-key", default="", help="S3 key for full_tables.json (not required when --cache-path exists locally)")
     parser.add_argument("--queue-url", default="")
     parser.add_argument("--region", default="eu-west-1")
     parser.add_argument("--cache-path", default="")
@@ -230,16 +255,27 @@ def main() -> None:
                         help="stream dispatch in batches of N pages (0 = all at once)")
     parser.add_argument("--limit", type=int, default=0, help="optional chunk limit for smoke tests")
     parser.add_argument("--dry-run", action="store_true", help="build chunks only; do not send to SQS")
+    parser.add_argument("--chunks-cache-dir", default=".cache",
+                        help="Root dir for chunk cache (default: .cache)")
+    parser.add_argument("--no-chunk-cache", action="store_true",
+                        help="Ignore existing chunk cache and always rebuild")
     args = parser.parse_args()
 
     if not args.dry_run and not args.queue_url:
         raise SystemExit("--queue-url is required unless --dry-run is set")
 
+    cache_path = Path(args.cache_path) if args.cache_path else None
+    using_local_cache = cache_path and cache_path.exists()
+
+    if not using_local_cache and not args.s3_bucket:
+        raise SystemExit("--s3-bucket is required unless a local --cache-path exists")
+    if not using_local_cache and not args.full_tables_key:
+        raise SystemExit("--full-tables-key is required unless a local --cache-path exists")
+
     session = boto3.Session(region_name=args.region)
-    s3 = session.client("s3")
+    s3  = session.client("s3")
     sqs = session.client("sqs")
 
-    cache_path = Path(args.cache_path) if args.cache_path else None
     doc_structure = _load_doc_structure(s3, args.s3_bucket, args.full_tables_key, cache_path)
 
     total_pages = len(doc_structure.get("pages", []))
@@ -262,18 +298,31 @@ def main() -> None:
     total_sent = 0
     total_offloaded = 0
     chunks_remaining = args.limit  # 0 means unlimited
+    chunks_cache_dir = Path(args.chunks_cache_dir)
 
     for batch_start, batch_end in ranges:
         max_for_batch = chunks_remaining if chunks_remaining > 0 else 0
-        chunks = _build_chunks(
-            doc_structure=doc_structure,
-            document_id=args.document_id,
-            s3_bucket=args.s3_bucket,
-            s3_key=args.s3_key,
-            page_start=batch_start,
-            page_end=batch_end,
-            max_chunks=max_for_batch,
-        )
+
+        # Try chunk cache first (skip when --no-chunk-cache or limit is active)
+        ccache_path = _chunks_cache_path(chunks_cache_dir, args.document_id, batch_start, batch_end)
+        chunks = None
+        if not args.no_chunk_cache and max_for_batch == 0:
+            chunks = _load_cached_chunks(ccache_path)
+
+        if chunks is None:
+            chunks = _build_chunks(
+                doc_structure=doc_structure,
+                document_id=args.document_id,
+                s3_bucket=args.s3_bucket,
+                s3_key=args.s3_key,
+                page_start=batch_start,
+                page_end=batch_end,
+                max_chunks=max_for_batch,
+            )
+            # Save to chunk cache (only when full range, no limit)
+            if not args.no_chunk_cache and max_for_batch == 0:
+                _save_cached_chunks(ccache_path, chunks)
+
         total_chunks_built += len(chunks)
 
         if args.dry_run:
