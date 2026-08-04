@@ -29,7 +29,7 @@ logger.setLevel(logging.INFO)
 
 INDEX_LAMBDA_ARN = os.environ.get("INDEX_LAMBDA_ARN", "")
 EMBEDDING_MODEL  = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
-EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "8")))
+EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1")))
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000

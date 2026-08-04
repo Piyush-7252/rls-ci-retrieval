@@ -39,6 +39,7 @@ def tail_errors(output_path: Path, interval: int) -> None:
     # start from "now"
     start_ms = int(time.time() * 1000)
     seen_event_ids: set[str] = set()
+    stream_chunk_id: dict[str, str] = {}  # stream → last known chunk_id
 
     error_counts: dict[str, int] = {}   # error_type → count
     total_errors = 0
@@ -80,13 +81,21 @@ def tail_errors(output_path: Path, interval: int) -> None:
                     ts_label_ = ts_label(evt["timestamp"])
                     stream   = evt.get("logStreamName", "?")
 
-                    # Parse chunk_id from log line if present
-                    chunk_id = "unknown"
+                    # Parse chunk_id from log line if present;
+                    # fall back to last known chunk_id for this stream
+                    # (traceback continuation lines don't repeat chunk_id)
+                    chunk_id = None
                     for part in msg.split():
                         if part.startswith("chunk_id="):
                             chunk_id = part[len("chunk_id="):]
+                            break
                         elif "chunk_id=" in part:
                             chunk_id = part.split("chunk_id=", 1)[1].split()[0]
+                            break
+                    if chunk_id:
+                        stream_chunk_id[stream] = chunk_id
+                    else:
+                        chunk_id = stream_chunk_id.get(stream, "unknown")
 
                     # Classify error type
                     error_type = "UNKNOWN"
