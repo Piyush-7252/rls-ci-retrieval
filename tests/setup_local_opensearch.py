@@ -31,7 +31,7 @@ def _get_os() -> OpenSearch:
 
 # Fully dynamic — no field mappings, let OpenSearch infer everything.
 # This matches AWS behaviour where document-chunks was auto-created.
-_SETTINGS = {"number_of_shards": 1, "number_of_replicas": 0}
+_SETTINGS = {"number_of_shards": 1, "number_of_replicas": 0, "refresh_interval": "30s"}
 
 INDICES = ["document-chunks", "semantic-objects", "ci-objects"]
 

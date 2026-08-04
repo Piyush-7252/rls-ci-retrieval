@@ -161,10 +161,19 @@ def _load_new(path: Path) -> list[dict]:
 # Grouping
 # ---------------------------------------------------------------------------
 
+def _ci_text_key(r: dict) -> str:
+    """Normalised CI text — used as the stable cross-system match key.
+
+    Old ECS and new search can have different ci_id values for the same CI,
+    so we match on lowercased, whitespace-collapsed CI reference text instead.
+    """
+    return " ".join((r.get("ci_reference") or "").lower().split())
+
+
 def _group(rows: list[dict]) -> dict:
     grouped: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        key = (r["ci_id"], r["page_num"])
+        key = (_ci_text_key(r), r["page_num"])
         grouped[key].append(r)
     for key in grouped:
         grouped[key].sort(
@@ -184,12 +193,12 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
 
     all_keys = sorted(
         set(old_grp) | set(new_grp),
-        key=lambda k: (k[0].zfill(10), str(k[1]).zfill(6)),
+        key=lambda k: (k[0], str(k[1]).zfill(6)),
     )
 
     out = []
     for key in all_keys:
-        ci_id, page_num = key
+        ci_text_key, page_num = key
         old_matches = old_grp.get(key, [])
         new_matches = new_grp.get(key, [])
 
@@ -206,11 +215,16 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
             n = new_matches[i] if i < len(new_matches) else {}
 
             # ci_reference: prefer whichever side has it
-            ci_ref = (o or n).get("ci_reference", "")
+            ci_ref  = (o or n).get("ci_reference", "")
             ci_type = (o or n).get("ci_type", "")
+            # Keep each side's own ci_id (they differ across systems)
+            old_ci_id = o.get("ci_id", "")
+            new_ci_id = n.get("ci_id", "")
 
             out.append({
-                "ci_id":              ci_id,
+                "ci_id":              old_ci_id or new_ci_id,   # for backwards compat
+                "old_ci_id":          old_ci_id,
+                "new_ci_id":          new_ci_id,
                 "ci_reference":       ci_ref,
                 "ci_type":            ci_type,
                 "page_num":           page_num,
@@ -238,7 +252,8 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 FIELDNAMES = [
-    "ci_id", "ci_reference", "ci_type", "page_num", "status",
+    "ci_id", "old_ci_id", "new_ci_id",
+    "ci_reference", "ci_type", "page_num", "status",
     "old_confidence", "old_strategy", "old_text",
     "new_confidence", "new_strategy",
     "new_hit_category", "new_evidence_type",
