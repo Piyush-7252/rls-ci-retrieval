@@ -1,5 +1,5 @@
 """
-batch_search_run19.py — Run search for all run20 doc/CI combinations sequentially.
+batch_search_run19.py — Run search for all run19 doc/CI combinations sequentially.
 
 Groups:
   Group A: 12 docs  × ahmedCis.json          (34 CIs)
@@ -7,7 +7,7 @@ Groups:
   Group C:  4 docs  × random.json             (11 CIs)
   Group D:  1 doc   × ahmedFalseNumaricCis.json (13 CIs)
 
-Output: localfiles/search_results/run20/{timestamp}_{ci_stem}_{doc_id}.json
+Output: localfiles/search_results/run19/{timestamp}_{ci_stem}_{doc_id}.json
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-OUTPUT_DIR = ROOT / "localfiles" / "search_results" / "run20"
+OUTPUT_DIR = ROOT / "localfiles" / "search_results" / "run19"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 WORKERS = 10
@@ -59,7 +59,7 @@ def main() -> None:
     passed = 0
     failed: list[str] = []
 
-    print(f"[{datetime.now():%H:%M:%S}] Starting run20 — {total} combinations")
+    print(f"[{datetime.now():%H:%M:%S}] Starting run19 — {total} combinations")
     print(f"  Output dir : {OUTPUT_DIR}")
     print(f"  Workers    : {WORKERS}")
     print()
