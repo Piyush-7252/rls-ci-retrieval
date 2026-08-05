@@ -47,6 +47,18 @@ MAPPING = {
         "refresh_interval":   "30s",      # reduce refresh overhead during bulk indexing
     },
     "mappings": {
+        # ── Safety net: any NEW string field added to _build_object_docs or
+        # _build_sentence_docs in the future defaults to keyword, not text.
+        # This prevents the auto-inference bug that caused document_id to be
+        # mapped as text in document-chunks when that index was first created.
+        "dynamic_templates": [
+            {
+                "strings_as_keyword": {
+                    "match_mapping_type": "string",
+                    "mapping": {"type": "keyword"},
+                }
+            }
+        ],
         "properties": {
             # ── RETRIEVAL — searched, ranked, embedded ─────────────────────
             "object_id":         {"type": "keyword"},
@@ -69,6 +81,15 @@ MAPPING = {
             "section_number":    {"type": "keyword"},
             "section_depth":     {"type": "integer"},
             "section_level":     {"type": "integer"},
+            "section_category":  {"type": "keyword"},   # broad section bucket (e.g. "efficacy")
+            "heading_path":      {"type": "keyword"},   # full heading breadcrumb
+            "semantic_path":     {"type": "keyword"},   # normalised semantic breadcrumb
+            "section_confidence": {"type": "float"},
+            "document_position": {"type": "integer"},   # document-global ordinal
+            "chunk_idx":         {"type": "integer"},
+            "parent_chunk_idx":  {"type": "integer"},
+            "prev_chunk_idx":    {"type": "integer"},
+            "next_chunk_idx":    {"type": "integer"},
             "category":          {"type": "keyword"},
             "boost_weight":      {"type": "float"},
             "indexable":         {"type": "boolean"},
@@ -77,6 +98,10 @@ MAPPING = {
             "next_object_pos":   {"type": "integer"},
             # Stored as float array; change to "knn_vector" when k-NN plugin is ready
             "dense_vector": {
+                "type":  "float",
+                "index": False,
+            },
+            "heading_dense_vector": {
                 "type":  "float",
                 "index": False,
             },
@@ -95,7 +120,43 @@ MAPPING = {
                     "document_end":   {"type": "integer"},
                 }
             },
-            # ── DISPLAY — UI rendering / PDF annotation only, never embedded
+
+            # ── ClinicalObject enrichment fields (shared/opensearch_enrichment.py) ─
+            # Structural classification
+            "study_context":       {"type": "keyword"},
+            "statement_type":      {"type": "keyword"},
+            "object_subtype":      {"type": "keyword"},
+            "modality":            {"type": "keyword"},
+            # Keyword arrays
+            "inherited_slots":     {"type": "keyword"},
+            "negated_slots":       {"type": "keyword"},
+            # Complex dicts — stored in _source; sub-fields auto-mapped on first write.
+            # dynamic_templates ensures any string sub-field defaults to keyword.
+            "facts":               {"type": "object"},
+            "own_facts":           {"type": "object"},
+            "effective_facts":     {"type": "object"},
+            "slot_provenance":     {"type": "object"},
+            "study_hierarchy":     {"type": "object"},
+            "clinical_identity":   {"type": "object"},
+            "clinical_relations":  {"type": "object"},
+            "treatment_identity":  {"type": "object"},
+            "endpoint_identity":   {"type": "object"},
+            "population_identity": {"type": "object"},
+            "temporal_context":    {"type": "object"},
+            "clinical_signature":  {"type": "object"},
+            "statistical_identity": {"type": "object"},
+
+            # ── Sentence-specific fields (type="sentence" docs only) ───────────
+            "parent_object_id":    {"type": "keyword"},
+            "char_start":          {"type": "integer"},
+            "char_end":            {"type": "integer"},
+            "prev_sentence_id":    {"type": "keyword"},
+            "next_sentence_id":    {"type": "keyword"},
+            "paragraph_text":      {"type": "text", "analyzer": "english"},
+            "prev_sentence_text":  {"type": "text", "analyzer": "english"},
+            "next_sentence_text":  {"type": "text", "analyzer": "english"},
+
+            # ── DISPLAY — UI rendering / PDF annotation only, never embedded ──
             "page":  {"type": "integer"},
             "bbox":  {"type": "float", "index": False},
             "display_spans": {
