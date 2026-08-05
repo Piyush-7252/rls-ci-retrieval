@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +86,72 @@ def _get_os():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bulk helper with HTTP-level retry + full-jitter backoff
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BULK_MAX_RETRIES  = 3
+_BULK_BACKOFF_BASE = 2.0
+_BULK_BACKOFF_CAP  = 30.0
+_OS_RETRY_STATUSES = frozenset({429, 503, 502, 504})
+
+
+def _bulk_with_retry(bulk_body: list, chunk_id: str) -> tuple[dict, int]:
+    """
+    Execute a bulk request with full-jitter exponential backoff on HTTP errors.
+
+    Returns (response, http_retries) — http_retries is the number of extra
+    attempts made due to HTTP-level errors (0 = succeeded on first try).
+    """
+    import opensearchpy.exceptions as _osx
+    last_exc: Exception | None = None
+    for attempt in range(_BULK_MAX_RETRIES):
+        try:
+            return _get_os().bulk(body=bulk_body), attempt
+        except (_osx.ConnectionTimeout, _osx.ConnectionError) as exc:
+            last_exc = exc
+        except _osx.TransportError as exc:
+            if exc.status_code not in _OS_RETRY_STATUSES:
+                raise
+            last_exc = exc
+        window = min(_BULK_BACKOFF_CAP, _BULK_BACKOFF_BASE * (2 ** attempt))
+        delay  = random.uniform(0, window)
+        logger.warning(
+            "[Index] bulk HTTP error chunk_id=%s attempt=%d/%d error=%s retrying_in=%.1fs",
+            chunk_id, attempt + 1, _BULK_MAX_RETRIES, last_exc, delay,
+        )
+        time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+def _index_with_retry(index: str, doc_id: str, body: dict, chunk_id: str) -> int:
+    """
+    Single-document index with the same full-jitter backoff used for bulk.
+
+    Returns http_retries (0 = succeeded on first try).
+    """
+    import opensearchpy.exceptions as _osx
+    last_exc: Exception | None = None
+    for attempt in range(_BULK_MAX_RETRIES):
+        try:
+            _get_os().index(index=index, id=doc_id, body=body)
+            return attempt
+        except (_osx.ConnectionTimeout, _osx.ConnectionError) as exc:
+            last_exc = exc
+        except _osx.TransportError as exc:
+            if exc.status_code not in _OS_RETRY_STATUSES:
+                raise
+            last_exc = exc
+        window = min(_BULK_BACKOFF_CAP, _BULK_BACKOFF_BASE * (2 ** attempt))
+        delay  = random.uniform(0, window)
+        logger.warning(
+            "[Index] single-doc HTTP error chunk_id=%s attempt=%d/%d error=%s retrying_in=%.1fs",
+            chunk_id, attempt + 1, _BULK_MAX_RETRIES, last_exc, delay,
+        )
+        time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -118,8 +186,11 @@ def handler(event: dict, context: Any) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _process_ci(ci: dict) -> dict:
-    doc = _build_ci_doc(ci)
-    _get_os().index(index=OPENSEARCH_CI_INDEX, id=str(ci["id"]), body=doc)
+    doc        = _build_ci_doc(ci)
+    ci_id_str  = str(ci["id"])
+    http_retries = _index_with_retry(OPENSEARCH_CI_INDEX, ci_id_str, doc, chunk_id=f"ci-{ci_id_str}")
+    if http_retries:
+        logger.warning("[Index] CI indexed after %d retries ci_id=%s", http_retries, ci_id_str)
     return {"stored": True, "ci_id": ci["id"]}
 
 
@@ -163,41 +234,114 @@ def _build_ci_doc(ci: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _process_document(chunk: dict) -> dict:
+    chunk_id    = chunk["chunk_id"]
+    document_id = chunk["document_id"]
+
     chunk_doc = _build_chunk_doc(chunk)
     obj_docs  = _build_object_docs(chunk)
     sent_docs = _build_sentence_docs(chunk)
 
-    # Build one bulk body: chunk → objects → sentences (single HTTPS round-trip)
-    bulk_body: list[dict | str] = []
-    bulk_body.append({"index": {"_index": OPENSEARCH_INDEX, "_id": chunk["chunk_id"]}})
-    bulk_body.append(chunk_doc)
-    for doc in obj_docs:
-        bulk_body.append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}})
-        bulk_body.append(doc)
-    for doc in sent_docs:
-        bulk_body.append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}})
-        bulk_body.append(doc)
+    # ── object size stats ─────────────────────────────────────────────────────
+    obj_chars = [len(d.get("text", "")) for d in obj_docs]
+    avg_obj_chars = int(sum(obj_chars) / max(len(obj_chars), 1))
+    max_obj_chars = max(obj_chars) if obj_chars else 0
 
-    resp = _get_os().bulk(body=bulk_body)
-    if resp.get("errors"):
-        failed = [
-            item for item in resp.get("items", [])
-            if item.get("index", {}).get("error")
-        ]
-        logger.error(
-            "[Index document] bulk errors chunk_id=%s failed_docs=%d first_error=%s",
-            chunk["chunk_id"], len(failed),
-            failed[0]["index"]["error"] if failed else "?",
-        )
-        raise RuntimeError(f"Bulk index failed for {len(failed)} docs in {chunk['chunk_id']}")
+    # Build one bulk body: chunk → objects → sentences (single HTTPS round-trip).
+    # Pre-serialize every item exactly once: the same bytes are used for both
+    # size accounting AND the wire payload.  opensearch-py passes str items
+    # through verbatim (no re-serialisation), so this guarantees exactly one
+    # json.dumps call per document — no double serialisation anywhere.
+    bulk_body: list[str]  = []
+    bulk_ids:  list[str]  = []   # _id per (action, doc) pair — for retry reconstruction
+    bulk_size_bytes: int  = 0
+
+    def _append(action: dict, doc: dict) -> None:
+        nonlocal bulk_size_bytes
+        action_s = json.dumps(action)
+        doc_s    = json.dumps(doc)
+        bulk_body.append(action_s)
+        bulk_body.append(doc_s)
+        bulk_ids.append(action["index"]["_id"])
+        bulk_size_bytes += len(action_s.encode()) + len(doc_s.encode())
+
+    _append({"index": {"_index": OPENSEARCH_INDEX, "_id": chunk_id}}, chunk_doc)
+    for doc in obj_docs:
+        _append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}}, doc)
+    for doc in sent_docs:
+        _append({"index": {"_index": SEMANTIC_OBJECTS_INDEX, "_id": doc["object_id"]}}, doc)
+
+    bulk_docs    = 1 + len(obj_docs) + len(sent_docs)
+    bulk_size_mb = bulk_size_bytes / (1024 * 1024)
+
+    t0                    = time.monotonic()
+    resp, http_retries    = _bulk_with_retry(bulk_body, chunk_id)
+    bulk_latency          = time.monotonic() - t0
+    partial_doc_retries   = 0
+    docs_per_sec  = bulk_docs        / max(bulk_latency, 0.001)
+    obj_per_sec   = len(obj_docs)    / max(bulk_latency, 0.001)
+    sent_per_sec  = len(sent_docs)   / max(bulk_latency, 0.001)
+
+    failed_items = [
+        item for item in resp.get("items", [])
+        if item.get("index", {}).get("error")
+    ] if resp.get("errors") else []
+
+    # ── retry failed docs only (don't re-send successful ones) ───────────────
+    if failed_items:
+        failed_ids = {
+            item["index"]["_id"]
+            for item in failed_items
+        }
+        # bulk_body contains pre-serialised strings; use parallel bulk_ids to
+        # identify which (action, doc) pairs belong to failed documents without
+        # parsing the strings back.
+        retry_body: list[str] = []
+        for idx, doc_id in enumerate(bulk_ids):
+            if doc_id in failed_ids:
+                retry_body.append(bulk_body[idx * 2])
+                retry_body.append(bulk_body[idx * 2 + 1])
+
+        if retry_body:
+            logger.warning(
+                "[Index] retrying failed docs chunk_id=%s failed=%d",
+                chunk_id, len(failed_items),
+            )
+            partial_doc_retries = len(failed_items)
+            t1                   = time.monotonic()
+            retry_resp, _hr      = _bulk_with_retry(retry_body, chunk_id)
+            http_retries        += _hr
+            retry_latency        = time.monotonic() - t1
+            still_failed = [
+                item for item in retry_resp.get("items", [])
+                if item.get("index", {}).get("error")
+            ] if retry_resp.get("errors") else []
+
+            if still_failed:
+                logger.error(
+                    "[Index] bulk retry still failing chunk_id=%s failed=%d first_error=%s",
+                    chunk_id, len(still_failed),
+                    still_failed[0]["index"]["error"],
+                )
+                raise RuntimeError(
+                    f"Bulk index failed for {len(still_failed)} docs in {chunk_id}"
+                )
+            failed_items = []   # retry succeeded
 
     logger.info(
-        "[Index document] chunk_id=%s chunk=1 objects=%d sentences=%d",
-        chunk["chunk_id"], len(obj_docs), len(sent_docs),
+        "[IndexSummary] chunk=%s doc=%s bulk_docs=%d chunk_docs=1 objects=%d sentences=%d "
+        "bulk_size_mb=%.2f bulk_latency=%.3fs docs_per_sec=%.1f "
+        "obj_per_sec=%.1f sent_per_sec=%.1f "
+        "avg_obj_chars=%d max_obj_chars=%d "
+        "http_retries=%d partial_doc_retries=%d failed=%d",
+        chunk_id, document_id, bulk_docs, len(obj_docs), len(sent_docs),
+        bulk_size_mb, bulk_latency, docs_per_sec,
+        obj_per_sec, sent_per_sec,
+        avg_obj_chars, max_obj_chars,
+        http_retries, partial_doc_retries, len(failed_items),
     )
     return {
         "indexed":           True,
-        "document_id":       chunk["document_id"],
+        "document_id":       document_id,
         "chunk_id":          chunk["chunk_id"],
         "objects_indexed":   len(obj_docs),
         "sentences_indexed": len(sent_docs),

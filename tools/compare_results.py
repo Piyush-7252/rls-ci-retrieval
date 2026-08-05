@@ -188,43 +188,52 @@ def _group(rows: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
-    old_grp = _group(old_rows)
-    new_grp = _group(new_rows)
+    # Split new hits: only final hits drive BOTH / NEW ONLY status.
+    # rejected + skipped are used only to enrich OLD ONLY rows with the
+    # Claude verdict/reason that explains why the hit was not promoted.
+    final_rows     = [r for r in new_rows if r.get("hit_category") == "final"]
+    non_final_rows = [r for r in new_rows if r.get("hit_category") != "final"]
 
+    old_grp       = _group(old_rows)
+    new_final_grp = _group(final_rows)
+    new_dropped_grp = _group(non_final_rows)   # rejected + skipped
+
+    # Universe: old hits + new final hits only
     all_keys = sorted(
-        set(old_grp) | set(new_grp),
+        set(old_grp) | set(new_final_grp),
         key=lambda k: (k[0], str(k[1]).zfill(6)),
     )
 
     out = []
     for key in all_keys:
         ci_text_key, page_num = key
-        old_matches = old_grp.get(key, [])
-        new_matches = new_grp.get(key, [])
+        old_matches   = old_grp.get(key, [])
+        final_matches = new_final_grp.get(key, [])
 
-        if old_matches and new_matches:
+        if old_matches and final_matches:
             status = "BOTH"
         elif old_matches:
             status = "OLD ONLY"
         else:
             status = "NEW ONLY"
 
+        # For OLD ONLY rows: try to find a dropped (rejected/skipped) hit to
+        # show the Claude reason why this CI×page didn't make it to final.
+        dropped_matches = new_dropped_grp.get(key, []) if status == "OLD ONLY" else []
+
+        new_matches = final_matches if final_matches else dropped_matches
         max_len = max(len(old_matches), len(new_matches), 1)
+
         for i in range(max_len):
             o = old_matches[i] if i < len(old_matches) else {}
             n = new_matches[i] if i < len(new_matches) else {}
 
-            # ci_reference: prefer whichever side has it
             ci_ref  = (o or n).get("ci_reference", "")
             ci_type = (o or n).get("ci_type", "")
-            # Keep each side's own ci_id (they differ across systems)
-            old_ci_id = o.get("ci_id", "")
-            new_ci_id = n.get("ci_id", "")
 
             out.append({
-                "ci_id":              old_ci_id or new_ci_id,   # for backwards compat
-                "old_ci_id":          old_ci_id,
-                "new_ci_id":          new_ci_id,
+                "ci_id":              o.get("ci_id") or n.get("ci_id", ""),
+
                 "ci_reference":       ci_ref,
                 "ci_type":            ci_type,
                 "page_num":           page_num,
@@ -233,16 +242,17 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
                 "old_confidence":     o.get("confidence", ""),
                 "old_strategy":       o.get("strategy", ""),
                 "old_text":           o.get("text", ""),
-                # New
+                # New — populated for final hits (BOTH/NEW ONLY) and for
+                # dropped hits that match an OLD ONLY row
                 "new_confidence":     n.get("confidence", ""),
                 "new_strategy":       n.get("strategy", ""),
-                "new_hit_category":   n.get("hit_category", ""),
+                "new_hit_category":   n.get("hit_category", ""),   # final/rejected/skipped
                 "new_evidence_type":  n.get("evidence_type", ""),
                 "new_claude_verdict": n.get("verdict", ""),
                 "new_claude_reason":  n.get("reason", ""),
                 "new_text":           n.get("text", ""),
                 "new_match_span":     n.get("match_span", ""),
-                "context_sentence": n.get("context_sentence", ""),
+                "context_sentence":   n.get("context_sentence", ""),
             })
     return out
 
@@ -252,8 +262,7 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 FIELDNAMES = [
-    "ci_id", "old_ci_id", "new_ci_id",
-    "ci_reference", "ci_type", "page_num", "status",
+    "ci_id", "ci_reference", "ci_type", "page_num", "status",
     "old_confidence", "old_strategy", "old_text",
     "new_confidence", "new_strategy",
     "new_hit_category", "new_evidence_type",
@@ -267,35 +276,37 @@ FIELDNAMES = [
 # ---------------------------------------------------------------------------
 
 def _summary(old_rows, new_rows, output_rows, doc_label=""):
-    old_grp = _group(old_rows)
-    new_grp = _group(new_rows)
-    old_keys = set(old_grp)
-    new_keys = set(new_grp)
+    final_rows = [r for r in new_rows if r.get("hit_category") == "final"]
 
-    only_old = old_keys - new_keys
-    only_new = new_keys - old_keys
-    both     = old_keys & new_keys
+    old_grp       = _group(old_rows)
+    new_final_grp = _group(final_rows)
+    old_keys   = set(old_grp)
+    final_keys = set(new_final_grp)
 
-    tp = sum(1 for r in new_rows if r.get("verdict") == "TRUE_POSITIVE")
-    fp = sum(1 for r in new_rows if r.get("verdict") == "FALSE_POSITIVE")
-    uc = sum(1 for r in new_rows if r.get("verdict") == "UNCERTAIN")
+    only_old = old_keys - final_keys
+    only_new = final_keys - old_keys
+    both     = old_keys & final_keys
+
+    tp = sum(1 for r in final_rows if r.get("verdict") == "TRUE_POSITIVE")
+    fp = sum(1 for r in final_rows if r.get("verdict") == "FALSE_POSITIVE")
+    uc = sum(1 for r in final_rows if r.get("verdict") == "UNCERTAIN")
 
     label = f"  [{doc_label}]  " if doc_label else ""
     print(f"\n{'='*60}")
     print(f"  COMPARISON SUMMARY{label}")
     print(f"{'='*60}")
     print(f"  Old matches        : {len(old_rows):>5}  ({len(old_keys)} unique CI×page)")
-    print(f"  New hits (all)     : {len(new_rows):>5}  ({len(new_keys)} unique CI×page)")
+    print(f"  New final hits     : {len(final_rows):>5}  ({len(final_keys)} unique CI×page)")
     print(f"  In BOTH            : {len(both):>5}")
-    print(f"  OLD ONLY (dropped) : {len(only_old):>5}")
+    print(f"  OLD ONLY (missed)  : {len(only_old):>5}")
     print(f"  NEW ONLY (added)   : {len(only_new):>5}")
-    print(f"  New verdicts  TP={tp}  FP={fp}  UC={uc}")
+    print(f"  New final verdicts : TP={tp}  FP={fp}  UC={uc}")
 
     by_cat = defaultdict(int)
     for r in new_rows:
         by_cat[r.get("hit_category", "?")] += 1
     cats = "  ".join(f"{k}={v}" for k, v in sorted(by_cat.items()))
-    print(f"  New hit types      : {cats}")
+    print(f"  All new hit types  : {cats}")
     print(f"{'='*60}")
 
 
