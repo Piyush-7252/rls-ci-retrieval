@@ -105,6 +105,7 @@ def _parse_chunk_summary(line: str) -> dict | None:
         "extra_attempts":      _int("bedrock_extra_attempts"),
         "total_backoff_ms":    _int("total_backoff_ms"),
         "embedding_time_s":    _float("embedding_time"),
+        "cold_start":          kv.get("cold_start", "False").lower() == "true",
     }
 
 
@@ -126,6 +127,7 @@ def _aggregate(summaries: list[dict]) -> dict[str, dict]:
         "objects_per_chunk": [],   # per-chunk object count
         "throttled_chunks":  0,    # chunks with ≥1 throttle event
         "slowest_chunks":    [],   # [(embedding_time_s, chunk_id), ...] — keep top-10
+        "cold_start_chunks": 0,   # chunks that were cold starts
     })
 
     for s in summaries:
@@ -143,6 +145,8 @@ def _aggregate(summaries: list[dict]) -> dict[str, dict]:
         d["objects_per_chunk"].append(s["objects"])
         if s["bedrock_throttles"] > 0:
             d["throttled_chunks"] += 1
+        if s["cold_start"]:
+            d["cold_start_chunks"] += 1
         import heapq
         heapq.nlargest  # ensure available
         d["slowest_chunks"].append((s["embedding_time_s"], s["chunk"]))
@@ -231,6 +235,7 @@ def _print_doc_summary(doc_id: str, d: dict) -> None:
     print(f"{'─'*W}")
     print(f"  Throttle events       : {d['throttle_events']:>10,}   ({throttle_pct:.1f}% of calls)")
     print(f"  Throttled chunks      : {d['throttled_chunks']:>10,}   ({throttled_chunk_pct:.1f}% of chunks)")
+    print(f"  Cold-start chunks     : {d['cold_start_chunks']:>10,}")
     print(f"  Extra attempts        : {d['extra_attempts']:>10,}")
     print(f"  Avg attempts/call     : {avg_attempts:>10.2f}")
     print(f"  Total backoff         : {_fmt_ms(d['total_backoff_ms']):>10}   (backoff share {backoff_share:.1f}% of embed time)")

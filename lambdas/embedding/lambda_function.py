@@ -48,6 +48,11 @@ _THROTTLE_CODES = frozenset({
     "ModelErrorException",   # Bedrock transient 500 — retry recommended by AWS
 })
 
+# Cold-start flag — True only for the first invocation in this execution environment.
+# Reset to False after the first handler() call so subsequent warm invocations are
+# distinguishable in logs without any external tooling.
+_COLD_START: bool = True
+
 # Clinical stopwords — carry no discriminative weight in sparse matching
 _STOPWORDS = frozenset({
     "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
@@ -112,6 +117,10 @@ def _get(service: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
+    global _COLD_START
+    cold_start  = _COLD_START
+    _COLD_START = False
+
     source_type = event.get("source_type", "document")
 
     if source_type == "ci":
@@ -129,7 +138,7 @@ def handler(event: dict, context: Any) -> dict:
         chunk_id = event.get("chunk_id", "unknown")
         logger.info("[Embedding] start source=document chunk_id=%s model=%s", chunk_id, EMBEDDING_MODEL)
         try:
-            result = _process_document(event, lambda_ctx=context)
+            result = _process_document(event, lambda_ctx=context, cold_start=cold_start)
         except Exception as exc:
             logger.error("[Embedding] failed source=document chunk_id=%s error=%s", chunk_id, exc)
             raise
@@ -175,7 +184,7 @@ def _process_ci(ci: dict) -> dict:
 # Document path
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _process_document(chunk: dict, *, lambda_ctx: Any = None) -> dict:
+def _process_document(chunk: dict, *, lambda_ctx: Any = None, cold_start: bool = False) -> dict:
     text         = chunk["normalization"]["normalized_text"]
     tokens       = chunk["normalization"]["tokens"]
     heading_text = chunk.get("heading_embedding_text", "")
@@ -193,6 +202,14 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None) -> dict:
     n_objects = sum(1 for obj in objects if obj.get("text") and not obj.get("embedding"))
     # chunk + optional heading + objects + sentences
     n_embed_requests = 1 + (1 if heading_text else 0) + n_objects + n_sentences
+
+    # Bug guard: lambda_ctx must be present on the document path.
+    # If it's None here, the invocation wiring has changed — log loudly.
+    if lambda_ctx is None:
+        logger.error(
+            "[BUG] Missing lambda_ctx for document embedding doc=%s chunk=%s",
+            doc_id, chunk_id,
+        )
 
     stats = _EmbedStats()
     t_chunk_start = time.monotonic()
@@ -237,11 +254,11 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None) -> dict:
         "[ChunkSummary] chunk=%s doc=%s objects=%d sentences=%d "
         "embed_requests=%d bedrock_calls=%d bedrock_success=%d "
         "bedrock_throttles=%d bedrock_extra_attempts=%d total_backoff_ms=%d "
-        "avg_attempts_per_call=%s throttle_rate=%s embedding_time=%.3fs",
+        "avg_attempts_per_call=%s throttle_rate=%s embedding_time=%.3fs cold_start=%s",
         chunk_id, doc_id, n_objects, n_sentences,
         n_embed_requests, stats.calls, stats.success,
         stats.throttles, stats.extra_attempts, stats.total_backoff_ms,
-        avg_attempts, throttle_rate, embedding_time,
+        avg_attempts, throttle_rate, embedding_time, cold_start,
     )
 
     if objects and "extraction" in chunk:
@@ -279,7 +296,7 @@ def _generate_dense_embedding(
     for attempt in range(_EMBED_MAX_RETRIES):
         t0            = time.monotonic()
         ts            = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        remaining_ms  = lambda_ctx.get_remaining_time_in_millis() if lambda_ctx else -1
+        remaining_ms  = lambda_ctx.get_remaining_time_in_millis() if lambda_ctx is not None else None
         if stats is not None:
             stats.enter()   # track only while invoke_model is in-flight
         local_threads = stats.active if stats is not None else -1
@@ -299,7 +316,7 @@ def _generate_dense_embedding(
                 logger.info(
                     "[BedrockEmbedding] ts=%s doc=%s chunk=%s request_id=%s attempt=%d/%d "
                     "status=SUCCESS latency_ms=%d vectors=%d "
-                    "remaining_lambda_ms=%d local_embedding_threads=%d",
+                    "remaining_lambda_ms=%s local_embedding_threads=%d",
                     ts, doc_id, chunk_id, request_id, attempt + 1, _EMBED_MAX_RETRIES,
                     latency_ms, len(result), remaining_ms, local_threads,
                 )
@@ -324,7 +341,7 @@ def _generate_dense_embedding(
             logger.warning(
                 "[BedrockEmbedding] ts=%s doc=%s chunk=%s request_id=%s attempt=%d/%d "
                 "status=THROTTLED error=%s msg=%s latency_ms=%d retry_after_ms=%d "
-                "remaining_lambda_ms=%d local_embedding_threads=%d",
+                "remaining_lambda_ms=%s local_embedding_threads=%d",
                 ts, doc_id, chunk_id, request_id, attempt + 1, _EMBED_MAX_RETRIES,
                 code, msg, latency_ms, delay_ms, remaining_ms, local_threads,
             )
