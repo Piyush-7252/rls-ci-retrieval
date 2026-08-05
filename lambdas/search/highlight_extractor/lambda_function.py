@@ -304,6 +304,23 @@ def _process(req: dict) -> dict:
 
         # literal_matches are stored at the cluster (cand) level by the aggregator.
         lit  = cand.get("literal_matches", [])
+        # Safety: if the selected object is a sentence that doesn't contain the
+        # literal match text, promote to a context_object that does.  This guards
+        # against stale candidates where context_expander chose on type priority
+        # alone before literal-aware object selection was introduced.
+        if lit and matched_obj.get("type") == "sentence":
+            primary_lit = (lit[0].get("text") or "").lower()
+            if primary_lit and primary_lit not in (matched_obj.get("text") or "").lower():
+                for ctx_obj in cand.get("context_objects", []):
+                    if primary_lit in (ctx_obj.get("text") or "").lower():
+                        logger.debug(
+                            "[HighlightExtractor] literal mismatch on sentence — "
+                            "promoted to %s object_id=%s search_id=%s",
+                            ctx_obj.get("type"), ctx_obj.get("object_id"),
+                            req.get("search_id"),
+                        )
+                        matched_obj = ctx_obj
+                        break
         # Always pick the best context sentence via the scorer registry.
         best = _pick_best_span(ci_text, ci_meta, matched_obj)
 

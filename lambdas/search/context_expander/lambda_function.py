@@ -190,10 +190,24 @@ def _expand(
     context_objects = ctx_cache.get((chunk_id, center_pos), [])
 
     if matched_obj is None and context_objects:
-        matched_obj = max(
-            context_objects,
-            key=lambda o: _OBJECT_TYPE_PRIORITY.get(o.get("type", ""), 0),
-        )
+        lit_texts = [lm["text"].lower()
+                     for lm in candidate.get("literal_matches", [])
+                     if lm.get("text")]
+        if lit_texts:
+            # Prefer the object whose text contains the literal match.
+            # Among objects that contain the match, prefer the most specific
+            # type (sentence > paragraph) so the UI highlights the tightest span.
+            # Fall back to type-priority ordering when no object contains the match.
+            def _lit_key(o: dict) -> tuple:
+                obj_lower = (o.get("text") or "").lower()
+                return (int(any(lt in obj_lower for lt in lit_texts)),
+                        _OBJECT_TYPE_PRIORITY.get(o.get("type", ""), 0))
+            matched_obj = max(context_objects, key=_lit_key)
+        else:
+            matched_obj = max(
+                context_objects,
+                key=lambda o: _OBJECT_TYPE_PRIORITY.get(o.get("type", ""), 0),
+            )
 
     context_quality = {
         "parent":    bool(parent_text),
