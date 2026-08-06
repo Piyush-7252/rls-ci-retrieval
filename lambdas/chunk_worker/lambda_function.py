@@ -203,7 +203,7 @@ def handler(event: dict, context: Any) -> dict:
             if sent_ts_str:
                 chunk["_queue_wait_ms"] = int(time.time() * 1000) - int(sent_ts_str)
             if context is not None:
-                chunk["_memory_limit_mb"] = getattr(context, "memory_limit_in_mb", 0)
+                chunk["_memory_limit_mb"] = int(getattr(context, "memory_limit_in_mb", 0) or 0)
             result = _run_chunk(chunk, context)
             processed += 1
             logger.info(

@@ -269,8 +269,8 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None, cold_start: bool =
     bedrock_lat_p95_ms = _lat_pct(95)
     bedrock_lat_max_ms = _lat[-1] if _lat else 0
 
-    queue_wait_ms   = chunk.get("_queue_wait_ms", -1)
-    memory_limit_mb = chunk.get("_memory_limit_mb", 0) or getattr(lambda_ctx, "memory_limit_in_mb", 0)
+    queue_wait_ms   = int(chunk.get("_queue_wait_ms", -1))
+    memory_limit_mb = int(chunk.get("_memory_limit_mb", 0) or getattr(lambda_ctx, "memory_limit_in_mb", 0) or 0)
 
     logger.info(
         "[ChunkSummary] chunk=%s doc=%s objects=%d sentences=%d "
