@@ -228,6 +228,21 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
             o = old_matches[i] if i < len(old_matches) else {}
             n = new_matches[i] if i < len(new_matches) else {}
 
+            # Per-row status: for BOTH groups, extra old rows that have no
+            # corresponding new final row should be OLD ONLY (not BOTH with
+            # empty new columns).  OLD ONLY / NEW ONLY groups keep their
+            # group status regardless — n may be a dropped hit used only for
+            # enrichment display, not an independent match.
+            if status == "BOTH":
+                if o and n:
+                    row_status = "BOTH"
+                elif o:
+                    row_status = "OLD ONLY"
+                else:
+                    row_status = "NEW ONLY"
+            else:
+                row_status = status
+
             ci_ref  = (o or n).get("ci_reference", "")
             ci_type = (o or n).get("ci_type", "")
 
@@ -237,7 +252,7 @@ def _compare(old_rows: list[dict], new_rows: list[dict]) -> list[dict]:
                 "ci_reference":       ci_ref,
                 "ci_type":            ci_type,
                 "page_num":           page_num,
-                "status":             status,
+                "status":             row_status,
                 # Old
                 "old_confidence":     o.get("confidence", ""),
                 "old_strategy":       o.get("strategy", ""),
