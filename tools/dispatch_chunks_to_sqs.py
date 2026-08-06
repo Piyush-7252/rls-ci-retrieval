@@ -259,30 +259,57 @@ def main() -> None:
                         help="Root dir for chunk cache (default: .cache)")
     parser.add_argument("--no-chunk-cache", action="store_true",
                         help="Ignore existing chunk cache and always rebuild")
+    parser.add_argument("--suffix", default="",
+                        help="Suffix appended to document_id for chunk building/indexing; "
+                             "S3 and full-tables lookups still use the original document_id")
     args = parser.parse_args()
+    effective_document_id = args.document_id + (args.suffix or "")
 
     if not args.dry_run and not args.queue_url:
         raise SystemExit("--queue-url is required unless --dry-run is set")
 
     cache_path = Path(args.cache_path) if args.cache_path else None
     using_local_cache = cache_path and cache_path.exists()
+    chunks_cache_dir = Path(args.chunks_cache_dir)
 
-    if not using_local_cache and not args.s3_bucket:
-        raise SystemExit("--s3-bucket is required unless a local --cache-path exists")
-    if not using_local_cache and not args.full_tables_key:
-        raise SystemExit("--full-tables-key is required unless a local --cache-path exists")
+    # If chunk cache files already exist for this doc, skip all S3 calls
+    import re as _re
+    doc_chunks_dir = chunks_cache_dir / args.document_id / "chunks"
+    chunk_cache_exists = (
+        not args.no_chunk_cache
+        and args.limit == 0
+        and doc_chunks_dir.exists()
+        and any(doc_chunks_dir.glob("chunks_*.json.gz"))
+    )
+
+    if not chunk_cache_exists:
+        if not using_local_cache and not args.s3_bucket:
+            raise SystemExit("--s3-bucket is required unless a local --cache-path exists")
+        if not using_local_cache and not args.full_tables_key:
+            raise SystemExit("--full-tables-key is required unless a local --cache-path exists")
 
     session = boto3.Session(region_name=args.region)
     s3  = session.client("s3")
     sqs = session.client("sqs")
 
-    doc_structure = _load_doc_structure(s3, args.s3_bucket, args.full_tables_key, cache_path)
+    if chunk_cache_exists:
+        # Infer total_pages from cache filename — no doc_structure or S3 needed
+        inferred_ends = [
+            int(m.group(2))
+            for cf in doc_chunks_dir.glob("chunks_*.json.gz")
+            if (m := _re.match(r"chunks_(\d+)_(\d+)\.json\.gz$", cf.name))
+        ]
+        total_pages = max(inferred_ends) if inferred_ends else 0
+        doc_structure: dict = {}
+        print(f"  [chunk-cache] hit for {args.document_id} — skipping S3 (pages≈{total_pages})", flush=True)
+    else:
+        doc_structure = _load_doc_structure(s3, args.s3_bucket, args.full_tables_key, cache_path)
+        total_pages = len(doc_structure.get("pages", []))
 
-    total_pages = len(doc_structure.get("pages", []))
     page_end = args.page_end if args.page_end > 0 else total_pages
 
     payload_bucket = args.payload_bucket or args.s3_bucket
-    payload_prefix = f"{args.payload_prefix.rstrip('/')}/{args.document_id}"
+    payload_prefix = f"{args.payload_prefix.rstrip('/')}/{effective_document_id}"
 
     batch_size = args.page_batch_size
     if batch_size <= 0:
@@ -298,21 +325,38 @@ def main() -> None:
     total_sent = 0
     total_offloaded = 0
     chunks_remaining = args.limit  # 0 means unlimited
-    chunks_cache_dir = Path(args.chunks_cache_dir)
 
     for batch_start, batch_end in ranges:
         max_for_batch = chunks_remaining if chunks_remaining > 0 else 0
 
         # Try chunk cache first (skip when --no-chunk-cache or limit is active)
-        ccache_path = _chunks_cache_path(chunks_cache_dir, args.document_id, batch_start, batch_end)
+        ccache_path = _chunks_cache_path(chunks_cache_dir, effective_document_id, batch_start, batch_end)
         chunks = None
         if not args.no_chunk_cache and max_for_batch == 0:
             chunks = _load_cached_chunks(ccache_path)
+            # Fallback: load original cache and patch document_id / chunk_ids in-memory
+            if chunks is None and args.suffix:
+                orig_ccache = _chunks_cache_path(chunks_cache_dir, args.document_id, batch_start, batch_end)
+                orig_chunks = _load_cached_chunks(orig_ccache)
+                if orig_chunks is not None:
+                    chunks = [
+                        {
+                            **c,
+                            "document_id": effective_document_id,
+                            "chunk_id": (
+                                effective_document_id + c["chunk_id"][len(args.document_id):]
+                                if c.get("chunk_id", "").startswith(args.document_id)
+                                else c.get("chunk_id", "")
+                            ),
+                        }
+                        for c in orig_chunks
+                    ]
+                    print(f"  [chunk-cache] patched {len(chunks)} chunks from original (suffix={args.suffix!r})", flush=True)
 
         if chunks is None:
             chunks = _build_chunks(
                 doc_structure=doc_structure,
-                document_id=args.document_id,
+                document_id=effective_document_id,
                 s3_bucket=args.s3_bucket,
                 s3_key=args.s3_key,
                 page_start=batch_start,
@@ -334,7 +378,7 @@ def main() -> None:
             queue_url=args.queue_url,
             payload_bucket=payload_bucket,
             payload_prefix=payload_prefix,
-            document_id=args.document_id,
+            document_id=effective_document_id,
             chunks=chunks,
         )
         total_sent += sent
