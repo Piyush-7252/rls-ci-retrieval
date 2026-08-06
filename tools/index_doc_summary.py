@@ -142,6 +142,8 @@ def _aggregate(summaries: list[dict]) -> dict[str, dict]:
         "slowest_chunks":      [],
         # largest payloads [(size_mb, chunk_id)]
         "largest_chunks":      [],
+        "min_ts_ms":           float("inf"),  # earliest CloudWatch event timestamp (ms)
+        "max_ts_ms":           0,             # latest  CloudWatch event timestamp (ms)
     })
 
     for s in summaries:
@@ -171,6 +173,9 @@ def _aggregate(summaries: list[dict]) -> dict[str, dict]:
         d["slowest_chunks"] = sorted(d["slowest_chunks"], reverse=True)[:10]
         d["largest_chunks"].append((s["bulk_size_mb"], s["chunk"]))
         d["largest_chunks"] = sorted(d["largest_chunks"], reverse=True)[:10]
+        if s.get("_log_ts"):
+            d["min_ts_ms"] = min(d["min_ts_ms"], s["_log_ts"])
+            d["max_ts_ms"] = max(d["max_ts_ms"], s["_log_ts"])
 
     return dict(docs)
 
@@ -185,6 +190,17 @@ def _pct(values: list[float], p: float) -> float:
     idx = (p / 100) * (len(sv) - 1)
     lo, hi = int(idx), min(int(idx) + 1, len(sv) - 1)
     return sv[lo] + (sv[hi] - sv[lo]) * (idx - lo)
+
+
+def _fmt_s(s: float) -> str:
+    """Format seconds as human-readable duration."""
+    if s < 60:
+        return f"{s:.1f}s"
+    m, rem = divmod(s, 60)
+    if m < 60:
+        return f"{int(m)}m {int(rem)}s"
+    h, m = divmod(m, 60)
+    return f"{int(h)}h {int(m)}m"
 
 
 def _histogram(values: list[float], buckets: list[tuple[float, float, str]], width: int = 28) -> str:
@@ -222,6 +238,11 @@ def _print_doc_summary(doc_id: str, d: dict) -> None:
     p95_latency   = _pct(d["latency_per_chunk"], 95)
     p99_latency   = _pct(d["latency_per_chunk"], 99)
 
+    wall_clock_s  = (d.get("max_ts_ms", 0) - d.get("min_ts_ms", float("inf"))) / 1000.0
+    if d.get("min_ts_ms", float("inf")) >= float("inf") or wall_clock_s <= 0:
+        wall_clock_s = d["total_latency_s"]   # fallback: no timestamps available
+    parallelism   = d["total_latency_s"] / max(wall_clock_s, 1)
+
     avg_size_mb   = d["total_size_mb"] / chunks
     p95_size_mb   = _pct(d["size_per_chunk"], 95)
     max_size_mb   = max(d["size_per_chunk"]) if d["size_per_chunk"] else 0.0
@@ -246,7 +267,9 @@ def _print_doc_summary(doc_id: str, d: dict) -> None:
     print(f"  P95 payload / chunk   : {p95_size_mb:>9.2f} MB")
     print(f"  Max payload / chunk   : {max_size_mb:>9.2f} MB")
     print(f"{'─'*W}")
-    print(f"  Total index time      : {d['total_latency_s']:>9.1f}  s")
+    print(f"  Wall-clock ingestion  : {_fmt_s(wall_clock_s):>10}")
+    print(f"  Aggregate worker time : {d['total_latency_s']:>9.1f}  s")
+    print(f"  Bulk share of wall-clk: {100 * d['total_latency_s'] / max(wall_clock_s, 1):>9.1f}  %")
     print(f"  Bulk latency  avg     : {avg_latency:>9.3f}  s")
     print(f"  Bulk latency  P50     : {p50_latency:>9.3f}  s")
     print(f"  Bulk latency  P95     : {p95_latency:>9.3f}  s")

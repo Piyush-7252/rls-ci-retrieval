@@ -76,20 +76,26 @@ class _EmbedStats:
         self.extra_attempts  = 0   # sum of extra attempts beyond the first (attempt index)
         self.total_backoff_ms = 0  # total wall-clock ms spent in throttle backoff sleeps
         self.active          = 0   # Bedrock requests currently in-flight (not sleeping)
+        self.peak_active     = 0   # high-water mark of concurrent in-flight requests
+        self.latency_ms_samples: list[int] = []  # per-call Bedrock round-trip ms
 
     def enter(self) -> None:           # call immediately before invoke_model
         with self._lock:
             self.active += 1
+            if self.active > self.peak_active:
+                self.peak_active = self.active
 
     def exit_active(self) -> None:     # call immediately after invoke_model returns/throws
         with self._lock:
             self.active -= 1
 
-    def record_success(self, attempt: int) -> None:
+    def record_success(self, attempt: int, latency_ms: int = 0) -> None:
         with self._lock:
             self.calls          += 1
             self.success        += 1
             self.extra_attempts += attempt
+            if latency_ms > 0:
+                self.latency_ms_samples.append(latency_ms)
 
     def record_call_failure(self, attempt: int) -> None:
         with self._lock:
@@ -250,15 +256,35 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None, cold_start: bool =
     embedding_time = time.monotonic() - t_chunk_start
     throttle_rate  = f"{100*stats.throttles/max(stats.calls,1):.1f}%"
     avg_attempts   = f"{1 + stats.extra_attempts/max(stats.calls,1):.2f}"
+
+    # Bedrock latency percentiles across successful calls this chunk
+    _lat = sorted(stats.latency_ms_samples)
+    def _lat_pct(p: float) -> int:
+        if not _lat:
+            return 0
+        idx = (p / 100) * (len(_lat) - 1)
+        lo, hi = int(idx), min(int(idx) + 1, len(_lat) - 1)
+        return int(_lat[lo] + (_lat[hi] - _lat[lo]) * (idx - lo))
+    bedrock_lat_avg_ms = int(sum(_lat) / len(_lat)) if _lat else 0
+    bedrock_lat_p95_ms = _lat_pct(95)
+    bedrock_lat_max_ms = _lat[-1] if _lat else 0
+
+    queue_wait_ms   = chunk.get("_queue_wait_ms", -1)
+    memory_limit_mb = chunk.get("_memory_limit_mb", 0) or getattr(lambda_ctx, "memory_limit_in_mb", 0)
+
     logger.info(
         "[ChunkSummary] chunk=%s doc=%s objects=%d sentences=%d "
         "embed_requests=%d bedrock_calls=%d bedrock_success=%d "
         "bedrock_throttles=%d bedrock_extra_attempts=%d total_backoff_ms=%d "
-        "avg_attempts_per_call=%s throttle_rate=%s embedding_time=%.3fs cold_start=%s",
+        "avg_attempts_per_call=%s throttle_rate=%s embedding_time=%.3fs cold_start=%s "
+        "bedrock_lat_avg_ms=%d bedrock_lat_p95_ms=%d bedrock_lat_max_ms=%d "
+        "peak_inflight=%d max_workers=%d memory_limit_mb=%d queue_wait_ms=%d",
         chunk_id, doc_id, n_objects, n_sentences,
         n_embed_requests, stats.calls, stats.success,
         stats.throttles, stats.extra_attempts, stats.total_backoff_ms,
         avg_attempts, throttle_rate, embedding_time, cold_start,
+        bedrock_lat_avg_ms, bedrock_lat_p95_ms, bedrock_lat_max_ms,
+        stats.peak_active, EMBEDDING_MAX_WORKERS, memory_limit_mb, queue_wait_ms,
     )
 
     if objects and "extraction" in chunk:
@@ -311,7 +337,7 @@ def _generate_dense_embedding(
             result     = json.loads(response["body"].read())["embedding"]
             if stats is not None:
                 stats.exit_active()
-                stats.record_success(attempt)
+                stats.record_success(attempt, latency_ms=latency_ms)
             if EMBEDDING_DEBUG:
                 logger.info(
                     "[BedrockEmbedding] ts=%s doc=%s chunk=%s request_id=%s attempt=%d/%d "

@@ -107,7 +107,7 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
     chunk = _timed("normalize", normalize._process_document, chunk)
     chunk = _timed("ner",       ner._process_document,       chunk)
     chunk = _timed("ontology",  ontology._process_document,  chunk)
-    chunk = _timed("embedding", embedding._process_document, chunk)
+    chunk = _timed("embedding", embedding._process_document, chunk, lambda_ctx=context)
     _timed("index",     idx._process_document,       chunk)
 
     elapsed = round(time.perf_counter() - t_total, 3)
@@ -198,6 +198,12 @@ def handler(event: dict, context: Any) -> dict:
         chunk = None
         try:
             chunk = _decode_payload(record)
+            # Stamp queue wait time and memory limit for observability
+            sent_ts_str = record.get("attributes", {}).get("SentTimestamp")
+            if sent_ts_str:
+                chunk["_queue_wait_ms"] = int(time.time() * 1000) - int(sent_ts_str)
+            if context is not None:
+                chunk["_memory_limit_mb"] = getattr(context, "memory_limit_in_mb", 0)
             result = _run_chunk(chunk, context)
             processed += 1
             logger.info(
