@@ -376,8 +376,42 @@ def _print_stage_timing(stage_wall: dict[str, float], all_results: list[dict],
     print(f"{'═' * 46}")
 
 
+def _retrieval_origin_summary(all_results: list[dict]) -> dict[str, int]:
+    """Count final hits by retrieval_origin across all CIs.
+
+    Each key is  '<retrievers>/<retrieved_unit>'  e.g. 'vector/chunk', 'vector/paragraph',
+    'bm25+literal/sentence'.  Sorted by count descending.
+
+    Uses context_expander's retrieval_origin field ("direct_X" vs "via_chunk_X") to
+    determine the retrieved unit type:
+      via_chunk_*  → unit_type = "chunk"  (retriever found a chunk; CE expanded to object)
+      direct_X     → unit_type = X        (retriever found this object directly from index)
+    Falls back to retrieved_type (set by vector_retriever) or matched_object.type.
+    This means 'vector/chunk' and 'vector/sentence' are now correctly distinguished:
+      vector/chunk    = vector_search_chunks lane → CE assigned best sentence/para within chunk
+      vector/sentence = _vector_search_objects returned a sentence object from semantic-objects
+    """
+    import collections
+    counts: collections.Counter = collections.Counter()
+    for r in all_results:
+        for h in r.get("final_hits", []):
+            obj       = h.get("matched_object") or {}
+            sources   = h.get("sources", [])
+            ce_origin = h.get("retrieval_origin", "")  # context_expander's value
+            if ce_origin.startswith("via_chunk_"):
+                unit_type = "chunk"
+            elif ce_origin.startswith("direct_"):
+                unit_type = ce_origin[len("direct_"):]
+            else:
+                unit_type = h.get("retrieved_type") or (obj.get("type") or "unknown")
+            key = ("+".join(sorted(sources)) if sources else "unknown") + "/" + unit_type
+            counts[key] += 1
+    return dict(counts.most_common())
+
+
 def _save_results_staged(all_results: list[dict], args, out_path: Path,
-                         wall_time: float, stage_wall: dict[str, float]) -> None:
+                         wall_time: float, stage_wall: dict[str, float],
+                         rerank_summary: dict | None = None) -> None:
     """Write results JSON with per-stage wall_clock_s in timing_summary."""
     import json
     from pathlib import Path
@@ -440,6 +474,12 @@ def _save_results_staged(all_results: list[dict], args, out_path: Path,
             ),
             "object_type_stats": _object_type_stats(all_results),
         },
+        "reranker_summary": rerank_summary or {},
+        # retrieval_origin_summary: for every final hit, which retriever-lane × object-type
+        # combination found it.  Key format: "bm25/sentence", "vector/paragraph", etc.
+        # Multi-source hits use "+"-joined source names: "bm25+vector/sentence".
+        # Use this to compare Variant A vs B vs C — which lanes lost hits.
+        "retrieval_origin_summary": _retrieval_origin_summary(all_results),
         "results": [_clean_result(r) for r in all_results],
     }
 
@@ -635,6 +675,7 @@ def main() -> None:
     ]
 
     stage_wall: dict[str, float] = {}
+    rerank_summary_dict: dict    = {}
     _t_wall_start = time.perf_counter()
 
     for stage_key, stage_fn, stage_workers in STAGES:
@@ -653,6 +694,16 @@ def main() -> None:
         done_early = sum(1 for r in all_reqs if r.get("_early_exit"))
         print(f"  [{stage_key}]  done in {elapsed:.1f}s"
               + (f"  ({done_early} early-exit)" if done_early else ""))
+
+        if stage_key == "S5:rerank" and not args.skip_rerank:
+            try:
+                rerank_mod = _load("search/reranker", "search_reranker")
+                rerank_summary_dict = rerank_mod.get_rerank_summary_dict()
+                summary = rerank_mod.get_rerank_summary()
+                if summary:
+                    print(summary, flush=True)
+            except Exception as _exc:
+                logger.debug("rerank summary unavailable: %s", _exc)
 
     wall_time = time.perf_counter() - _t_wall_start
 
@@ -687,7 +738,8 @@ def main() -> None:
         ROOT / "localfiles" / "search_results" /
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_staged_{Path(args.ci_file).stem}_{args.document_id}.json"
     )
-    _save_results_staged(all_results, args, out_path, wall_time, stage_wall)
+    _save_results_staged(all_results, args, out_path, wall_time, stage_wall,
+                         rerank_summary=rerank_summary_dict)
     print(f"\n  Results saved: {out_path}")
     print()
 

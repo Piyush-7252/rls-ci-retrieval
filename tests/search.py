@@ -509,11 +509,12 @@ def run_search(
     print(f"{'\u2500' * 60}")
 
     req = {
-        "search_id":          search_id,
-        "document_id":        document_id,
-        "ci":                 enriched_ci,
-        "document_context":   document_context or {},
-        "_diagnose_ci_ids":   diagnose_ids or set(),
+        "search_id":            search_id,
+        "document_id":          document_id,
+        "ci":                   enriched_ci,
+        "document_context":     document_context or {},
+        "document_page_count":  int((document_context or {}).get("total_pages", 0)),
+        "_diagnose_ci_ids":     diagnose_ids or set(),
     }
     _t_search_start = time.perf_counter()
     _timings: dict[str, object] = {}
@@ -1114,12 +1115,48 @@ def _object_type_stats(all_results: list[dict]) -> dict:
 
 def _hit_with_provenance(hit: dict) -> dict:
     """Add retrieval provenance fields to a final hit; strip the raw matched_object."""
-    obj = hit.get("matched_object") or {}
+    obj            = hit.get("matched_object") or {}
+    obj_type       = obj.get("type") or "unknown"
+    sources        = hit.get("sources", [])
+
+    # context_expander sets retrieval_origin as "{direct|via_chunk}_{object_type}":
+    #   direct_sentence   → retriever returned a sentence object from the semantic-objects index
+    #   direct_paragraph  → retriever returned a paragraph object directly
+    #   via_chunk_sentence → retriever returned a CHUNK; context_expander extracted a sentence
+    # We use this to determine what the retriever ACTUALLY retrieved, not what was expanded to.
+    ce_origin = hit.get("retrieval_origin", "")  # context_expander's value (will be overwritten)
+    if ce_origin.startswith("via_chunk_"):
+        # retriever found a chunk; context_expander chose best object within it
+        retrieved_unit = "chunk"
+    elif ce_origin.startswith("direct_"):
+        # retriever found this object type directly in the index
+        retrieved_unit = ce_origin[len("direct_"):]
+    else:
+        # no context_expander info → use retrieved_type (set by vector_retriever) or matched_object.type
+        retrieved_unit = hit.get("retrieved_type") or obj_type
+
+    # retrieval_origin: analytics format "sources/retrieved_unit"
+    # e.g. "vector/chunk", "bm25/sentence", "vector/paragraph"
+    origin_str = ("+".join(sorted(sources)) if sources else "unknown") + "/" + retrieved_unit
     extra = {
-        "retrieval_object_type": obj.get("type"),
+        "retrieval_object_type": obj_type,
+        # retrieved_type: the unit the retriever actually fetched from the index.
+        # "chunk" = vector_search_chunks fallback; context_expander assigned the object.
+        # "sentence"/"paragraph"/etc = object fetched directly from semantic-objects index.
+        "retrieved_type":        retrieved_unit,
+        # expansion_origin: context_expander's raw value preserved for debugging.
+        # Format: "direct_{type}" or "via_chunk_{type}".
+        "expansion_origin":      ce_origin or None,
         "retrieval_object_id":   obj.get("object_id"),
         "retrieval_heading_path": obj.get("heading_path"),
         "retrieval_section":     obj.get("section_category") or obj.get("section"),
+        "retrieval_origin":      origin_str,
+        "selection_reason":      hit.get("selection_reason"),
+        "literal_match_count":   hit.get("literal_match_count"),
+        "context_strategy":      hit.get("context_strategy"),
+        "matched_distance":      hit.get("matched_distance"),
+        "distance_ratio":        hit.get("distance_ratio"),
+        "current_text_chars":    hit.get("current_text_chars"),
         "agg_score":             hit.get("agg_score"),
         "score_breakdown":       hit.get("score_breakdown"),
         "agg_score_breakdown":   hit.get("agg_score_breakdown"),
@@ -1249,11 +1286,21 @@ def _full_candidate_record(v: dict) -> dict:
         "page_end":             v.get("page_end"),
         "sources":              v.get("sources", []),
         "retriever":            v.get("retriever", ""),
+        "retrieval_origin":     v.get("retrieval_origin", "direct_unknown"),
+        "selection_reason":     v.get("selection_reason"),
+        "literal_match_count":  v.get("literal_match_count"),
+        "context_strategy":     v.get("context_strategy"),
+        "matched_distance":     v.get("matched_distance"),
+        "distance_ratio":       v.get("distance_ratio"),
+        "current_text_chars":   v.get("current_text_chars"),
         # ── Verifier outcome ─────────────────────────────────────────────
         "verdict":              v.get("verdict"),
         "confidence":           v.get("confidence"),
         "verifier_reason":      v.get("reason", ""),
         "verifier_identity":    v.get("identity", {}),
+        "verifier_supporting_sentences":  v.get("supporting_sentences", []),
+        "verifier_highlight_type":        v.get("highlight_type", "sentence"),
+        "verifier_primary_support_index": v.get("primary_support_index", 0),
         "verifier_tokens":      v.get("_tokens"),   # actual input/output token counts from Bedrock
         # ── Reranker scores ──────────────────────────────────────────────
         "cross_encoder_score":  v.get("cross_encoder_score") or sb.get("ce"),
@@ -1319,6 +1366,13 @@ def _clean_result(result: dict) -> dict:
             "retrieval_object_id":   obj.get("object_id"),
             "retrieval_heading_path": obj.get("heading_path"),
             "retrieval_section":     obj.get("section_category") or obj.get("section"),
+            "retrieval_origin":      v.get("retrieval_origin", "direct_unknown"),
+            "selection_reason":      v.get("selection_reason"),
+            "literal_match_count":   v.get("literal_match_count"),
+            "context_strategy":      v.get("context_strategy"),
+            "matched_distance":      v.get("matched_distance"),
+            "distance_ratio":        v.get("distance_ratio"),
+            "current_text_chars":    v.get("current_text_chars"),
         }
 
     rejected_hits = [
@@ -1384,6 +1438,7 @@ def _clean_result(result: dict) -> dict:
         "final_hits":       [_hit_with_provenance(h) for h in result.get("final_hits", [])],
         "rejected_hits":    rejected_hits,
         "skipped_hits":     skipped_hits,
+        "ce_histogram":     result.get("ce_histogram"),
         "timings":          result.get("timings", {}),
     }
 
