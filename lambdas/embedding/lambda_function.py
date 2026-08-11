@@ -34,6 +34,15 @@ EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1"))
 # Set EMBEDDING_DEBUG=true to log every successful Bedrock call.
 # Off by default — at 27k chunks × 150 embeddings that's 4M+ log lines.
 EMBEDDING_DEBUG = os.environ.get("EMBEDDING_DEBUG", "").lower() in ("1", "true", "yes")
+# Comma-separated object types whose dense_vector should NOT be computed.
+# e.g. EMBEDDING_SKIP_TYPES=sentence         → skip sentence embeddings (~44% fewer Bedrock calls)
+#      EMBEDDING_SKIP_TYPES=sentence,heading  → skip sentence + heading vectors
+# Objects/spans with a skipped type are still indexed; they just won't have dense_vector,
+# so the vector retriever naturally ignores them.  BM25/literal/context_expander unaffected.
+_raw_skip = os.environ.get("EMBEDDING_SKIP_TYPES", "")
+EMBEDDING_SKIP_TYPES: frozenset[str] = frozenset(
+    t.strip() for t in _raw_skip.split(",") if t.strip()
+)
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000
@@ -229,12 +238,17 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None, cold_start: bool =
         heading_fut = pool.submit(_generate_dense_embedding, heading_text, **_kw) if heading_text else None
 
         for obj_idx, obj in enumerate(objects):
-            if obj.get("text") and not obj.get("embedding"):
+            obj_type = obj.get("type", "")
+            if obj.get("text") and not obj.get("embedding") and obj_type not in EMBEDDING_SKIP_TYPES:
                 fut = pool.submit(_generate_dense_embedding, _object_embedding_text(obj), **_kw)
                 tasks.append(("obj", obj_idx, None, fut))
 
             for span_idx, span in enumerate(obj.get("display_spans", [])):
-                if span.get("type") == "sentence" and span.get("text") and not span.get("embedding"):
+                span_type = span.get("type", "")
+                if (span_type == "sentence"
+                        and span.get("text")
+                        and not span.get("embedding")
+                        and span_type not in EMBEDDING_SKIP_TYPES):
                     fut = pool.submit(
                         _generate_dense_embedding,
                         _sentence_embedding_text(obj, span),
@@ -272,19 +286,27 @@ def _process_document(chunk: dict, *, lambda_ctx: Any = None, cold_start: bool =
     queue_wait_ms   = int(chunk.get("_queue_wait_ms", -1))
     memory_limit_mb = int(chunk.get("_memory_limit_mb", 0) or getattr(lambda_ctx, "memory_limit_in_mb", 0) or 0)
 
+    n_skipped_objects  = sum(1 for obj in objects if obj.get("type", "") in EMBEDDING_SKIP_TYPES and obj.get("text"))
+    n_skipped_sentences = sum(
+        1 for obj in objects
+        for span in obj.get("display_spans", [])
+        if span.get("type", "") in EMBEDDING_SKIP_TYPES and span.get("text")
+    )
     logger.info(
         "[ChunkSummary] chunk=%s doc=%s objects=%d sentences=%d "
         "embed_requests=%d bedrock_calls=%d bedrock_success=%d "
         "bedrock_throttles=%d bedrock_extra_attempts=%d total_backoff_ms=%d "
         "avg_attempts_per_call=%s throttle_rate=%s embedding_time=%.3fs cold_start=%s "
         "bedrock_lat_avg_ms=%d bedrock_lat_p95_ms=%d bedrock_lat_max_ms=%d "
-        "peak_inflight=%d max_workers=%d memory_limit_mb=%d queue_wait_ms=%d",
+        "peak_inflight=%d max_workers=%d memory_limit_mb=%d queue_wait_ms=%d "
+        "skip_types=%s skipped_objects=%d skipped_sentences=%d",
         chunk_id, doc_id, n_objects, n_sentences,
         n_embed_requests, stats.calls, stats.success,
         stats.throttles, stats.extra_attempts, stats.total_backoff_ms,
         avg_attempts, throttle_rate, embedding_time, cold_start,
         bedrock_lat_avg_ms, bedrock_lat_p95_ms, bedrock_lat_max_ms,
         stats.peak_active, EMBEDDING_MAX_WORKERS, memory_limit_mb, queue_wait_ms,
+        ",".join(sorted(EMBEDDING_SKIP_TYPES)) or "none", n_skipped_objects, n_skipped_sentences,
     )
 
     if objects and "extraction" in chunk:
