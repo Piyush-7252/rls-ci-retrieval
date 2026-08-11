@@ -22,6 +22,12 @@ OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K                  = int(os.environ.get("RETRIEVER_TOP_K", "10"))
+TIE_BUFFER             = int(os.environ.get("RETRIEVER_TIE_BUFFER", "15"))
+# Score-decay threshold (relative to top score): keep all hits >= top * ratio.
+# 0.0 = disabled → falls back to adaptive-k + tie-inclusion.
+# 0.80 is a sensible starting point: drops candidates that score < 80% of the best hit.
+BM25_SCORE_RATIO       = float(os.environ.get("BM25_SCORE_RATIO", "0.0"))
+BM25_MAX_HITS          = int(os.environ.get("BM25_MAX_HITS", "150"))
 
 _os_client = None
 
@@ -45,6 +51,56 @@ def _get_os():
     return _os_client
 
 
+# ─── Adaptive retrieval depth ─────────────────────────────────────────────────
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    """Scale retrieval depth with document size.
+
+    Small documents (<500 pages) keep the base TOP_K to avoid unnecessary cost.
+    Large clinical documents (CSRs, dossiers) scale up so evidence beyond rank-10
+    is reachable.  Set document_page_count=0 (or omit) to fall back to base_k.
+    """
+    if page_count <= 0:
+        return base_k
+    if page_count < 500:
+        return base_k
+    if page_count < 3_000:
+        return max(base_k, 25)
+    if page_count < 10_000:
+        return max(base_k, 50)
+    return max(base_k, 75)
+
+
+def _with_ties(sorted_hits: list[dict], k: int) -> list[dict]:
+    """Return top-k hits plus any additional hits that tie the score at rank k.
+
+    Prevents cutting through identical-scored candidates at the boundary, which
+    is common when many document sections mention the same clinical term.
+    """
+    if len(sorted_hits) <= k:
+        return sorted_hits
+    cutoff = sorted_hits[k - 1]["score"]
+    result = sorted_hits[:k]
+    for h in sorted_hits[k:]:
+        if h["score"] == cutoff:
+            result.append(h)
+        else:
+            break
+    return result
+
+def _score_decay_filter(sorted_hits: list[dict], ratio: float, max_hits: int) -> list[dict]:
+    """Keep all hits whose score is within `ratio` of the top score.
+
+    Example: ratio=0.80, top_score=95 → keep all hits with score >= 76.
+    Dense distributions (many hits at similar scores) produce many results;
+    sparse distributions (big score drop after rank-1) produce few.
+    Always bounded by max_hits.
+    """
+    if not sorted_hits:
+        return sorted_hits
+    threshold = sorted_hits[0]["score"] * ratio
+    return [h for h in sorted_hits if h["score"] >= threshold][:max_hits]
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
@@ -64,11 +120,19 @@ def _process(req: dict) -> dict:
     tokens      = req["ci"].get("normalization", {}).get("tokens", [])
     document_id = req.get("document_id")
 
-    # Search semantic-objects for precision; chunk index for recall
-    obj_hits   = _bm25_search_objects(norm_text, tokens, document_id)
-    chunk_hits = _bm25_search_chunks(norm_text, tokens, document_id)
+    page_count  = int(req.get("document_page_count", 0))
+    k           = _adaptive_k(page_count, TOP_K)
 
-    # Object hits take priority; fill remaining TOP_K with chunk hits not already covered
+    # Choose fetch size: when score-decay is active we need to see a wider pool
+    # so the threshold operates on enough candidates; otherwise use adaptive k.
+    ratio      = BM25_SCORE_RATIO
+    fetch_size = BM25_MAX_HITS if ratio > 0.0 else k + TIE_BUFFER
+
+    # Search semantic-objects for precision; chunk index for recall
+    obj_hits   = _bm25_search_objects(norm_text, tokens, document_id, fetch_size)
+    chunk_hits = _bm25_search_chunks(norm_text, tokens, document_id, fetch_size)
+
+    # Object hits take priority; fill remaining slots with chunk hits not already covered
     seen_chunks: set[str] = set()
     hits: list[dict] = []
     for h in obj_hits:
@@ -81,19 +145,26 @@ def _process(req: dict) -> dict:
 
     hits.sort(key=lambda x: x["score"], reverse=True)
 
+    # Score-decay mode: drop candidates below ratio * top_score
+    # Fallback: adaptive-k with tie inclusion (no threshold configured)
+    if ratio > 0.0 and hits:
+        hits = _score_decay_filter(hits, ratio, BM25_MAX_HITS)
+    else:
+        hits = _with_ties(hits, k)
+
     return {
         "retriever": "bm25",
-        "hits":      hits[:TOP_K],
+        "hits":      hits,
     }
 
 
-def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | None) -> list[dict]:
+def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | None, fetch_size: int = TOP_K) -> list[dict]:
     """BM25 search against semantic-objects index."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {
-        "size": TOP_K,
+        "size": fetch_size,
         "query": {
             "bool": {
                 "filter": filter_clause,
@@ -148,13 +219,13 @@ def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | N
     return _parse_object_hits(resp)
 
 
-def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | None) -> list[dict]:
+def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | None, fetch_size: int = TOP_K) -> list[dict]:
     """BM25 fallback against document-chunks for broad recall."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {
-        "size": TOP_K,
+        "size": fetch_size,
         "query": {
             "bool": {
                 "filter": filter_clause,

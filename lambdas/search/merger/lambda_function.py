@@ -156,10 +156,20 @@ def _merge_group(ci_id, ci_text: str, group: list[dict]) -> dict:
         "confidence":       round(confidence, 3),
         "chunk_ids":        chunk_ids,
         # Retrieval provenance — which semantic object was matched and how
-        "matched_object":   best.get("matched_object"),
-        "agg_score":        round(best.get("agg_score", 0.0), 4),
+        "matched_object":      best.get("matched_object"),
+        "retrieval_origin":    best.get("retrieval_origin", "direct_unknown"),
+        "selection_reason":    best.get("selection_reason"),
+        "literal_match_count": best.get("literal_match_count"),
+        "context_strategy":    best.get("context_strategy"),
+        "matched_distance":    best.get("matched_distance"),
+        "distance_ratio":      best.get("distance_ratio"),
+        "current_text_chars":  best.get("current_text_chars"),
+        "agg_score":           round(best.get("agg_score", 0.0), 4),
         # Scoring breakdowns from reranker (score_breakdown) and aggregator (agg_score_breakdown)
         "score_breakdown":      best.get("score_breakdown"),
         "agg_score_breakdown":  best.get("agg_score_breakdown"),
-        "span_debug":           best.get("span_debug"),
+        "span_debug":             best.get("span_debug"),
+        "supporting_sentences":   best.get("supporting_sentences", []),
+        "highlight_type":         best.get("highlight_type", "sentence"),
+        "primary_support_index":  best.get("primary_support_index", 0),
     }

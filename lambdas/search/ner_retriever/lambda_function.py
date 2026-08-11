@@ -22,6 +22,14 @@ OPENSEARCH_INDEX    = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 AWS_REGION          = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K               = int(os.environ.get("RETRIEVER_TOP_K", "10"))
 
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    if page_count <= 0:    return base_k
+    if page_count < 500:   return base_k
+    if page_count < 3_000: return max(base_k, 25)
+    if page_count < 10_000: return max(base_k, 50)
+    return max(base_k, 75)
+
 _os_client = None
 
 def _get_os():
@@ -65,7 +73,9 @@ def _process(req: dict) -> dict:
     if not entity_texts:
         return {"retriever": "ner", "hits": []}
 
-    hits = _ner_search(entity_texts, document_id)
+    page_count = int(req.get("document_page_count", 0))
+    k          = _adaptive_k(page_count, TOP_K)
+    hits = _ner_search(entity_texts, document_id, k)
 
     return {
         "retriever": "ner",
@@ -73,7 +83,7 @@ def _process(req: dict) -> dict:
     }
 
 
-def _ner_search(entity_texts: list[str], document_id: str | None) -> list[dict]:
+def _ner_search(entity_texts: list[str], document_id: str | None, k: int = TOP_K) -> list[dict]:
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
 
     # Search for chunks whose entity list overlaps with CI entity texts
@@ -90,7 +100,7 @@ def _ner_search(entity_texts: list[str], document_id: str | None) -> list[dict]:
     ]
 
     body = {
-        "size": TOP_K,
+        "size": k,
         "query": {
             "bool": {
                 "filter": filter_clause,

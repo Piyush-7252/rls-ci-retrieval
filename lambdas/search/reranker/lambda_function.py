@@ -67,6 +67,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +130,18 @@ except ImportError:
 
 LLM_VERIFIER_LAMBDA_ARN = os.environ.get("LLM_VERIFIER_LAMBDA_ARN", "")
 RERANK_TOP_N             = int(os.environ.get("RERANK_TOP_N", "20"))
+# Fallback fixed top-N for large documents when CE_SCORE_THRESHOLD is not set.
+RERANK_TOP_N_LARGE       = int(os.environ.get("RERANK_TOP_N_LARGE", "35"))
+# Threshold-based selection for large documents (page_count >= 10_000).
+# When > 0.0: keep every candidate whose CE score >= this value, up to
+# CE_THRESHOLD_MAX.  0.0 = disabled (falls back to RERANK_TOP_N_LARGE).
+# Tune empirically using the histogram logged by _log_ce_histogram.
+CE_SCORE_THRESHOLD       = float(os.environ.get("CE_SCORE_THRESHOLD", "0.0"))
+CE_THRESHOLD_MAX         = int(os.environ.get("CE_THRESHOLD_MAX", "100"))
 CE_MODEL_NAME            = os.environ.get("RERANKER_CE_MODEL", "BAAI/bge-reranker-base")
+
+# Per-run accumulator for get_rerank_summary().  Populated by _apply_rerank_cap.
+_RERANK_STATS: list[dict] = []
 
 import threading
 
@@ -323,12 +335,16 @@ def _process(req: dict) -> dict:
     ce_logits: list[float]
     if pairs:
         try:
+            _t_ce = time.perf_counter()
             ce_logits = _get_ce_model().predict(pairs).tolist()
+            ce_time_s = time.perf_counter() - _t_ce
         except Exception as exc:
             logger.warning("[Reranker] cross-encoder failed, using zeros: %s", exc)
             ce_logits = [0.0] * len(pairs)
+            ce_time_s = 0.0
     else:
         ce_logits = []
+        ce_time_s = 0.0
 
     ranked = []
     for cand, logit in zip(candidates, ce_logits):
@@ -348,10 +364,204 @@ def _process(req: dict) -> dict:
 
     ranked.sort(key=lambda x: x["cross_encoder_score"], reverse=True)
 
+    page_count = int(req.get("document_page_count", 0))
+    cap_result, mode = _apply_rerank_cap(ranked, page_count)
+
+    ci_id = (ci or {}).get("id", "?")
+    _log_ce_histogram(ranked, n_after=len(cap_result), mode=mode, ci_id=ci_id)
+    # top_ce_norm: score_breakdown.ce of the top candidate — the pure CE signal
+    # (sigmoid(logit)×10, 0–10), distinct from cross_encoder_score (composite).
+    top_ce_norm = ranked[0].get("score_breakdown", {}).get("ce", 0.0) if ranked else 0.0
+    ce_above7   = sum(1 for c in ranked if (c.get("score_breakdown") or {}).get("ce", 0.0) >= 7.0)
+    _RERANK_STATS.append({
+        "n_scored":    len(ranked),
+        "n_after":     len(cap_result),
+        "top_score":   ranked[0]["cross_encoder_score"] if ranked else 0.0,  # composite
+        "top_ce_norm": top_ce_norm,   # score_breakdown.ce of top candidate
+        "ce_above7":   ce_above7,     # count of candidates with score_breakdown.ce >= 7
+        "threshold":   mode.startswith("threshold"),
+        "ce_time_s":   ce_time_s,
+    })
     return {
         **req,
-        "ranked_candidates": ranked[:RERANK_TOP_N],
+        "ranked_candidates": cap_result,
+        "ce_histogram":      _get_ce_histogram_data(ranked),
     }
+
+
+def _get_ce_histogram_data(ranked: list[dict]) -> dict:
+    """Return CE score histogram as structured data for JSON persistence."""
+    if not ranked:
+        return {}
+    scores = [c["cross_encoder_score"] for c in ranked]
+    bands  = [8, 7, 6, 5, 4, 3, 2, 1]
+    return {
+        "scored": len(scores),
+        "top":    round(scores[0], 3),
+        "bands":  {f">={t}": sum(1 for s in scores if s >= t) for t in bands},
+    }
+
+
+def _log_ce_histogram(
+    ranked:  list[dict],
+    n_after: int | None        = None,
+    mode:    str | None        = None,
+    ci_id:   int | str | None  = None,
+) -> None:
+    """Log a full CE score distribution with selection context.
+
+    Example output::
+
+        CE histogram — CI 118  scored=68  top=5.486
+          >=8:   0
+          >=5:   4
+          >=4:  12
+          >=1:  68
+          → selected 4 (threshold≥5.0)
+    """
+    if not ranked:
+        return
+    data   = _get_ce_histogram_data(ranked)
+    header = "CE histogram"
+    if ci_id is not None:
+        header += f" — CI {ci_id}"
+    header += f"  scored={data['scored']}  top={data['top']:.3f}"
+    lines  = [header]
+    for band, n in data["bands"].items():
+        lines.append(f"  {band}: {n:3d}")
+    if n_after is not None and mode is not None:
+        lines.append(f"  → selected {n_after} ({mode})")
+    logger.info("\n".join(lines))
+
+
+def _apply_rerank_cap(
+    ranked: list[dict], page_count: int = 0
+) -> tuple[list[dict], str]:
+    """Threshold-based selection for large documents; fixed top-N for small ones.
+
+    Returns ``(filtered_candidates, mode_label)`` so the caller can log both
+    the histogram and the selection decision in one place.  _RERANK_STATS is
+    appended by _process() after this returns.
+
+    mode_label examples: "threshold≥5.0", "top-20", "top-35-large".
+    """
+    if CE_SCORE_THRESHOLD > 0.0:
+        above = [c for c in ranked if c["cross_encoder_score"] >= CE_SCORE_THRESHOLD]
+        if above:
+            return above[:CE_THRESHOLD_MAX], f"threshold≥{CE_SCORE_THRESHOLD}"
+        logger.warning(
+            "CE_SCORE_THRESHOLD=%.2f produced 0 candidates; "
+            "falling back to top-N",
+            CE_SCORE_THRESHOLD,
+        )
+    # Threshold not set or nothing cleared it — fall back to fixed top-N.
+    # Large documents keep a wider window; small documents use RERANK_TOP_N.
+    top_n = RERANK_TOP_N_LARGE if page_count >= 10_000 else RERANK_TOP_N
+    label = f"top-{top_n}-large" if page_count >= 10_000 else f"top-{top_n}"
+    return ranked[:top_n], label
+
+
+def get_rerank_summary_dict() -> dict:
+    """Return reranker summary as a dict for JSON serialization."""
+    if not _RERANK_STATS:
+        return {}
+    n            = len(_RERANK_STATS)
+    total_before = sum(s["n_scored"] for s in _RERANK_STATS)
+    total_after  = sum(s["n_after"]  for s in _RERANK_STATS)
+    # ce_tops: score_breakdown.ce (pure CE signal, sigmoid×10, 0–10) of each CI's top candidate.
+    # Falls back to composite top_score for stats produced before top_ce_norm was added.
+    ce_tops  = sorted(s.get("top_ce_norm", s["top_score"]) for s in _RERANK_STATS)
+    afters   = sorted(s["n_after"]                          for s in _RERANK_STATS)
+    # ce_above7: candidates where ce_norm >= 7.0 (logit >= 0.85, model 70%+ confident).
+    # Threshold at 5.0 (logit=0) would match 100% for documents where all logits >= 0 —
+    # 7.0 provides meaningful separation for BAAI/bge-reranker-base on clinical text.
+    above7s  = sorted(s.get("ce_above7", 0)                for s in _RERANK_STATS)
+    thresh   = sum(1 for s in _RERANK_STATS if s["threshold"])
+    ce_times = [s.get("ce_time_s", 0.0) for s in _RERANK_STATS]
+    total_ce_s = sum(ce_times)
+    # cis_using_threshold is meaningful only when the threshold is active.
+    # Return None when disabled so callers can distinguish "0 used threshold" from
+    # "threshold logic was never executed" — avoids false alarms six months later.
+    cis_using_threshold = thresh if CE_SCORE_THRESHOLD > 0.0 else None
+    return {
+        # Threshold config
+        "ce_score_threshold_active":   CE_SCORE_THRESHOLD > 0.0,
+        "ce_score_threshold":          CE_SCORE_THRESHOLD,
+        "ce_threshold_max":            CE_THRESHOLD_MAX,
+        # Candidate counts
+        "cis_processed":               n,
+        "candidates_before_ce":        total_before,
+        "candidates_after_cap":        total_after,
+        "avg_before_per_ci":           round(total_before / n, 1),
+        "avg_after_per_ci":            round(total_after  / n, 1),
+        "median_survivors_per_ci":     afters[n // 2],
+        "max_survivors":               max(s["n_after"] for s in _RERANK_STATS),
+        # CE score distribution — score_breakdown.ce (pure CE signal, 0–10)
+        # NOT cross_encoder_score (composite which includes drug/fact/penalty terms)
+        "avg_top_ce_score":            round(sum(ce_tops) / n, 3),
+        "median_top_ce_score":         round(ce_tops[n // 2], 3),
+        "p95_top_ce_score":            round(ce_tops[min(int(n * 0.95), n - 1)], 3),
+        # CE strength — candidates per CI where the CE model itself (not composite)
+        # is 70%+ confident (ce_norm >= 7.0, equivalent to logit >= 0.85).
+        # Threshold at 5.0 (logit=0) is vacuous for docs where all logits >= 0.
+        "avg_candidates_ce_above7":    round(sum(above7s) / n, 1),
+        "median_candidates_ce_above7": above7s[n // 2],
+        "max_candidates_ce_above7":    max(above7s),
+        # Selection mode breakdown — per CI, not per candidate
+        "cis_using_threshold":         cis_using_threshold,   # None = threshold disabled
+        "cis_using_fallback":          n - thresh,
+        "max_pool_before":             max(s["n_scored"] for s in _RERANK_STATS),
+        "max_pool_after":              max(s["n_after"]  for s in _RERANK_STATS),
+        # CE inference timing
+        "total_ce_inference_s":        round(total_ce_s, 2),
+        "avg_ce_inference_s_per_ci":   round(total_ce_s / n, 2),
+    }
+
+
+def get_rerank_summary() -> str:
+    """Return a formatted reranker summary accumulated across all CIs in this run.
+
+    Call once after the S5:rerank stage completes.  Stats are module-level and
+    persist until the process exits or _RERANK_STATS is cleared manually.
+    """
+    d = get_rerank_summary_dict()
+    if not d:
+        return ""
+    n = d["cis_processed"]
+    w = 50
+    sep = "═" * w
+    mid = "─" * w
+    def row(label: str, value: str) -> str:
+        return f"  {label:<32s} {value}"
+    lines = [
+        sep,
+        "  Reranker Summary",
+        mid,
+        row("CIs processed",          str(n)),
+        "",
+        row("Candidates before CE",    f"{d['candidates_before_ce']:,}"),
+        row("Candidates after cap",    f"{d['candidates_after_cap']:,}"),
+        "",
+        row("Average before / CI",     f"{d['avg_before_per_ci']:.1f}"),
+        row("Average after  / CI",     f"{d['avg_after_per_ci']:.1f}"),
+        "",
+        row("Median top CE score",         f"{d['median_top_ce_score']:.2f}  (score_breakdown.ce)"),
+        row("95th-pct top CE score",       f"{d['p95_top_ce_score']:.2f}"),
+        "",
+        row("Avg candidates CE≥7 / CI",    f"{d['avg_candidates_ce_above7']:.1f}"),
+        row("Median candidates CE≥7 / CI", str(d['median_candidates_ce_above7'])),
+        row("Max candidates CE≥7",         str(d['max_candidates_ce_above7'])),
+        "",
+        row("CIs using threshold",
+            "N/A (disabled)" if d['cis_using_threshold'] is None
+            else f"{d['cis_using_threshold']} CIs"),
+        row("CIs using fallback",          f"{d['cis_using_fallback']} CIs"),
+        "",
+        row("Largest pool (before)",       str(d['max_pool_before'])),
+        row("Largest pool (after)",        str(d['max_pool_after'])),
+        sep,
+    ]
+    return "\n".join(lines)
 
 
 def _candidate_text(cand: dict) -> str:

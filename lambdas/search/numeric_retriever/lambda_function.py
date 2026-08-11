@@ -55,6 +55,14 @@ SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-obje
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K                  = int(os.environ.get("RETRIEVER_TOP_K", "10"))
 
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    if page_count <= 0:    return base_k
+    if page_count < 500:   return base_k
+    if page_count < 3_000: return max(base_k, 25)
+    if page_count < 10_000: return max(base_k, 50)
+    return max(base_k, 75)
+
 _os_client = None
 
 
@@ -117,9 +125,13 @@ def _process(req: dict) -> dict:
     si          = ci.get("statistical_identity") or {}
     document_id = req.get("document_id")
 
+    page_count = int(req.get("document_page_count", 0))
+    k          = _adaptive_k(page_count, TOP_K)
+
     # Tier 1: structured filter query (near-zero false positives)
     body = _build_structured_query(si, document_id)
     if body is not None:
+        body["size"] = k
         try:
             resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
             hits = _parse_hits(resp)
@@ -138,6 +150,7 @@ def _process(req: dict) -> dict:
     if body is None:
         logger.debug("[Numeric Retriever] no numeric tokens found — returning empty")
         return {"retriever": "numeric", "hits": []}
+    body["size"] = k
 
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)

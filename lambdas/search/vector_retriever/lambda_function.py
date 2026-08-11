@@ -26,7 +26,20 @@ OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K                  = int(os.environ.get("RETRIEVER_TOP_K", "10"))
+TIE_BUFFER             = int(os.environ.get("RETRIEVER_TIE_BUFFER", "15"))
+# Score-decay threshold: keep all hits with cosine >= top_cosine * ratio.
+# 0.0 = disabled → adaptive-k + tie-inclusion.
+VECTOR_SCORE_RATIO     = float(os.environ.get("VECTOR_SCORE_RATIO", "0.0"))
+VECTOR_MAX_HITS        = int(os.environ.get("VECTOR_MAX_HITS", "100"))
 FETCH_SIZE             = int(os.environ.get("VECTOR_FETCH_SIZE", "100"))
+# Comma-separated object types to exclude from semantic-objects vector search.
+# Useful for ablation: VECTOR_EXCLUDE_TYPES=sentence  → Variant B (no sentence vectors)
+#                      VECTOR_EXCLUDE_TYPES=sentence,heading → Variant C
+# Empty (default) = no exclusion = current behaviour.
+_raw_exclude = os.environ.get("VECTOR_EXCLUDE_TYPES", "")
+VECTOR_EXCLUDE_TYPES: list[str] = [
+    t.strip() for t in _raw_exclude.split(",") if t.strip()
+]
 
 _os_client = None
 
@@ -48,6 +61,48 @@ def _get_os():
             retry_on_timeout=True,
         )
     return _os_client
+
+
+# ─── Adaptive retrieval depth ─────────────────────────────────────────────────
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    """Scale retrieval depth with document size.
+
+    Small documents (<500 pages) keep base TOP_K.  Large clinical documents
+    (CSRs, dossiers) scale up so evidence beyond rank-10 is reachable.
+    Set document_page_count=0 (or omit) to fall back to base_k.
+    """
+    if page_count <= 0:
+        return base_k
+    if page_count < 500:
+        return base_k
+    if page_count < 3_000:
+        return max(base_k, 25)
+    if page_count < 10_000:
+        return max(base_k, 50)
+    return max(base_k, 75)
+
+
+def _with_ties(sorted_hits: list[dict], k: int) -> list[dict]:
+    """Return top-k hits plus any additional hits that tie the score at rank k."""
+    if len(sorted_hits) <= k:
+        return sorted_hits
+    cutoff = sorted_hits[k - 1]["score"]
+    result = sorted_hits[:k]
+    for h in sorted_hits[k:]:
+        if h["score"] == cutoff:
+            result.append(h)
+        else:
+            break
+    return result
+
+
+def _score_decay_filter(sorted_hits: list[dict], ratio: float, max_hits: int) -> list[dict]:
+    """Keep all hits within `ratio` of the top score, up to max_hits."""
+    if not sorted_hits:
+        return sorted_hits
+    threshold = sorted_hits[0]["score"] * ratio
+    return [h for h in sorted_hits if h["score"] >= threshold][:max_hits]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,12 +127,15 @@ def _process(req: dict) -> dict:
         logger.warning("[Vector Retriever] no embedding on CI — returning empty")
         return {"retriever": "vector", "hits": []}
 
+    page_count = int(req.get("document_page_count", 0))
+    k          = _adaptive_k(page_count, TOP_K)
+
     # Lane 1: body-vector search (object text vs CI embedding)
-    obj_hits   = _vector_search_objects(ci_embedding, document_id)
+    obj_hits   = _vector_search_objects(ci_embedding, document_id, k)
     # Lane 2: heading-vector search (heading text vs CI embedding)
-    head_hits  = _vector_search_objects_heading(ci_embedding, document_id)
+    head_hits  = _vector_search_objects_heading(ci_embedding, document_id, k)
     # Lane 3: chunk-level fallback for broad recall
-    chunk_hits = _vector_search_chunks(ci_embedding, document_id)
+    chunk_hits = _vector_search_chunks(ci_embedding, document_id, k)
 
     # Merge: body hits first (most precise), then heading hits, then chunk fallback
     seen_chunks: set[str] = set()
@@ -95,25 +153,35 @@ def _process(req: dict) -> dict:
             seen_chunks.add(h["chunk_id"])
 
     hits.sort(key=lambda x: x["score"], reverse=True)
+
+    ratio = VECTOR_SCORE_RATIO
+    if ratio > 0.0 and hits:
+        hits = _score_decay_filter(hits, ratio, VECTOR_MAX_HITS)
+    else:
+        hits = _with_ties(hits, k)
+
     return {
         "retriever": "vector",
-        "hits":      hits[:TOP_K],
+        "hits":      hits,
     }
 
 
-def _vector_search_objects(ci_embedding: list[float], document_id: str | None) -> list[dict]:
+def _vector_search_objects(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
     """
     Search semantic-objects index by body dense_vector.
     Returns hits with full matched_object metadata.
     """
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause   = [{"term": {"document_id": document_id}}] if document_id else []
+    must_not_clause = ([{"terms": {"type": VECTOR_EXCLUDE_TYPES}}]
+                       if VECTOR_EXCLUDE_TYPES else [])
 
     body = {
-        "size": FETCH_SIZE,
+        "size": max(FETCH_SIZE, k + TIE_BUFFER),
         "query": {
             "bool": {
-                "filter": filter_clause,
-                "must":   [{"exists": {"field": "dense_vector"}}],
+                "filter":   filter_clause,
+                "must":     [{"exists": {"field": "dense_vector"}}],
+                **({"must_not": must_not_clause} if must_not_clause else {}),
             }
         },
         "_source": [
@@ -150,14 +218,19 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None) -
 
     return [
         {
-            "chunk_id":   s["parent_chunk_id"],
-            "score":      round(score, 4),
-            "page_start": s.get("page", 0),
-            "page_end":   s.get("page", 0),
-            "snippet":    s.get("text", "")[:200],
+            "chunk_id":      s["parent_chunk_id"],
+            "score":         round(score, 4),
+            "page_start":    s.get("page", 0),
+            "page_end":      s.get("page", 0),
+            "snippet":       s.get("text", "")[:200],
+            # retrieved_type: the object type as stored in OpenSearch at retrieval time.
+            # Preserved here so downstream attribution (origin summary, provenance) can
+            # distinguish e.g. "vector/paragraph" from "vector/sentence" even if
+            # context_expander later replaces matched_object with a different type.
+            "retrieved_type": s.get("type", "unknown"),
             "matched_object": _build_matched_object(s),
         }
-        for score, s in scored[:TOP_K]
+        for score, s in scored[:k + TIE_BUFFER]
     ]
 
 
@@ -202,7 +275,7 @@ def _build_matched_object(s: dict) -> dict:
     }
 
 
-def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None) -> list[dict]:
+def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
     """
     Search semantic-objects index by heading_dense_vector.
 
@@ -213,12 +286,15 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     """
     if not ci_embedding:
         return []
-    filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    filter_clause   = [{"term": {"document_id": document_id}}] if document_id else []
+    must_not_clause = ([{"terms": {"type": VECTOR_EXCLUDE_TYPES}}]
+                       if VECTOR_EXCLUDE_TYPES else [])
     body = {
         "size": FETCH_SIZE,
         "query": {"bool": {
-            "filter": filter_clause,
-            "must":   [{"exists": {"field": "heading_dense_vector"}}],
+            "filter":   filter_clause,
+            "must":     [{"exists": {"field": "heading_dense_vector"}}],
+            **({"must_not": must_not_clause} if must_not_clause else {}),
         }},
         "_source": [
             "object_id", "parent_chunk_id", "document_id",
@@ -251,18 +327,19 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     scored.sort(key=lambda x: x[0], reverse=True)
     return [
         {
-            "chunk_id":   s["parent_chunk_id"],
-            "score":      round(score, 4),
-            "page_start": s.get("page", 0),
-            "page_end":   s.get("page", 0),
-            "snippet":    s.get("text", "")[:200],
+            "chunk_id":      s["parent_chunk_id"],
+            "score":         round(score, 4),
+            "page_start":    s.get("page", 0),
+            "page_end":      s.get("page", 0),
+            "snippet":       s.get("text", "")[:200],
+            "retrieved_type": s.get("type", "unknown"),
             "matched_object": _build_matched_object(s),
         }
-        for score, s in scored[:TOP_K]
+        for score, s in scored[:k + TIE_BUFFER]
     ]
 
 
-def _vector_search_chunks(ci_embedding: list[float], document_id: str | None) -> list[dict]:
+def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
     """
     Fallback: search document-chunks for broad recall.
     Returns hits WITHOUT matched_object (context_expander handles those).
@@ -301,14 +378,18 @@ def _vector_search_chunks(ci_embedding: list[float], document_id: str | None) ->
 
     return [
         {
-            "chunk_id":   s["chunk_id"],
-            "score":      round(score, 4),
-            "page_start": s.get("page_start", 0),
-            "page_end":   s.get("page_end",   0),
-            "snippet":    s.get("raw_text", "")[:200],
+            "chunk_id":      s["chunk_id"],
+            "score":         round(score, 4),
+            "page_start":    s.get("page_start", 0),
+            "page_end":      s.get("page_end",   0),
+            "snippet":       s.get("raw_text", "")[:200],
+            # retrieved_type: "chunk" — context_expander will fetch context_objects by position
+            # and may pick a sentence/paragraph within; recording "chunk" here preserves
+            # the true retrieval origin for ablation attribution.
+            "retrieved_type": "chunk",
             # no matched_object — context_expander will fetch context_objects by position
         }
-        for score, s in scored[:TOP_K]
+        for score, s in scored[:k + TIE_BUFFER]
     ]
 
 

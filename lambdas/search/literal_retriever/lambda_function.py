@@ -26,6 +26,9 @@ OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_INDEX    = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 AWS_REGION          = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K               = int(os.environ.get("RETRIEVER_TOP_K", "10"))
+# Literal retriever returns ALL exact matches (up to LITERAL_MAX).
+# Exact/phrase hits are always evidence — never cap on a hard k.
+LITERAL_MAX         = int(os.environ.get("LITERAL_MAX", "200"))
 
 _os_client = None
 
@@ -119,7 +122,7 @@ def _literal_search(ci_text: str, norm_text: str, document_id: str | None) -> li
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
 
     body = {
-        "size": TOP_K,
+        "size": LITERAL_MAX,
         "query": {
             "bool": {
                 "filter": filter_clause,

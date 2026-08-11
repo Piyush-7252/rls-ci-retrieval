@@ -37,6 +37,7 @@ OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K                  = int(os.environ.get("RETRIEVER_TOP_K", "10"))
+TIE_BUFFER             = int(os.environ.get("RETRIEVER_TIE_BUFFER", "15"))
 
 _os_client = None
 
@@ -140,6 +141,30 @@ _SOURCE_FIELDS: list[str] = [
 ]
 
 
+# ─── Adaptive retrieval depth ─────────────────────────────────────────────────
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    if page_count <= 0:   return base_k
+    if page_count < 500:  return base_k
+    if page_count < 3_000: return max(base_k, 25)
+    if page_count < 10_000: return max(base_k, 50)
+    return max(base_k, 75)
+
+
+def _with_ties(sorted_hits: list[dict], k: int) -> list[dict]:
+    """Return top-k hits plus any additional hits that tie the score at rank k."""
+    if len(sorted_hits) <= k:
+        return sorted_hits
+    cutoff = sorted_hits[k - 1]["score"]
+    result = sorted_hits[:k]
+    for h in sorted_hits[k:]:
+        if h["score"] == cutoff:
+            result.append(h)
+        else:
+            break
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
@@ -164,15 +189,18 @@ def _process(req: dict) -> dict:
     ci_study_context = ci.get("study_context", "GENERAL")
     document_id      = req.get("document_id")
 
+    page_count = int(req.get("document_page_count", 0))
+    k          = _adaptive_k(page_count, TOP_K)
+
     # Stage 1: flat-fact + statement_type + study_context search
-    fact_hits = _fact_search(ci_facts, ci_stmt_type, ci_study_context, document_id)
+    fact_hits = _fact_search(ci_facts, ci_stmt_type, ci_study_context, document_id, k)
 
     # Stage 2: clinical-relation search (skip if no relations extracted)
-    rel_hits  = _relation_search(ci_relations, document_id) if ci_relations else []
+    rel_hits  = _relation_search(ci_relations, document_id, k) if ci_relations else []
 
     return {
         "retriever": "fact",
-        "hits":      _merge_hits(fact_hits, rel_hits)[:TOP_K],
+        "hits":      _with_ties(_merge_hits(fact_hits, rel_hits), k),
     }
 
 
@@ -183,11 +211,13 @@ def _fact_search(
     ci_stmt_type:     str,
     ci_study_context: str,
     document_id:      str | None,
+    k:                int = TOP_K,
 ) -> list[dict]:
     body = _build_fact_query(ci_facts, ci_stmt_type, ci_study_context, document_id)
     if body is None:
         logger.debug("[Fact Retriever] no usable facts — skipping stage 1")
         return []
+    body["size"] = k + TIE_BUFFER
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
@@ -256,10 +286,11 @@ def _build_fact_query(
 
 # ─── Stage 2: clinical-relation search ─────────────────────────────────────────
 
-def _relation_search(ci_relations: list[dict], document_id: str | None) -> list[dict]:
+def _relation_search(ci_relations: list[dict], document_id: str | None, k: int = TOP_K) -> list[dict]:
     body = _build_relation_query(ci_relations, document_id)
     if body is None:
         return []
+    body["size"] = k + TIE_BUFFER
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:

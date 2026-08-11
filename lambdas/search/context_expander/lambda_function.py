@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,23 @@ def _process(req: dict) -> dict:
     idx_cache:   dict[int, str]          = _msearch_by_idx(document_id, list(idx_needed))
     ctx_cache:   dict[tuple, list[dict]] = _msearch_context_objects(document_id, ctx_keys)
 
+    logger.info(
+        "[Context Expander] search_id=%s  candidates=%d  idx_lookups=%d"
+        "  ctx_queries=%d  chunk_cache_hits=%d/%d",
+        req.get("search_id"), len(candidates), len(idx_needed),
+        len(ctx_keys), len(chunk_cache), len(primary_ids),
+    )
+
     # ── Phase 3: expand each candidate from caches ────────────────────────────
     expanded = [_expand(c, document_id, chunk_cache, idx_cache, ctx_cache) for c in candidates]
+
+    if expanded:
+        avg_chars = sum(e.get("current_text_chars", 0) for e in expanded) / len(expanded)
+        logger.info(
+            "[Context Expander] search_id=%s  avg_context_chars=%.0f  max_context_chars=%d",
+            req.get("search_id"), avg_chars,
+            max(e.get("current_text_chars", 0) for e in expanded),
+        )
 
     return {**req, "expanded_candidates": expanded}
 
@@ -131,6 +147,54 @@ def _process(req: dict) -> dict:
 _OBJECT_TYPE_PRIORITY: dict[str, int] = {
     "sentence": 3, "paragraph": 2, "heading": 1, "table_row": 1,
 }
+
+# ── Heading normalizer ────────────────────────────────────────────────────────
+
+_SECTION_NUM_RE = re.compile(r'^[\d\.]+\s+')
+
+def _normalize_heading(heading: str) -> str:
+    """Strip leading section numbers from each breadcrumb segment.
+
+    Example: "5.1 Primary Objective > 5.1.2 ORR" → "Primary Objective > ORR"
+    Passes through headings that have no numeric prefix unchanged.
+    """
+    parts   = heading.split(" > ")
+    cleaned = [_SECTION_NUM_RE.sub("", seg.strip()) for seg in parts if seg.strip()]
+    return " > ".join(cleaned)
+
+
+# ── Context object sorter ─────────────────────────────────────────────────────
+
+_CTX_TYPE_ORDER: dict[str, int] = {
+    "heading":   1,
+    "paragraph": 2,
+    "sentence":  3,
+    "table_row": 4,
+    "list":      4,
+}
+
+def _sort_context_objects(
+    objs:       list[dict],
+    matched_id: str | None,
+    center_pos: int | None,
+) -> list[dict]:
+    """Sort context objects for verifier relevance.
+
+    Order:
+      1. The matched object itself (always first)
+      2. Heading objects — nearest first
+      3. Paragraph objects — nearest first
+      4. Sentence objects — nearest first
+      5. Table / list objects — nearest first
+      6. Other types — nearest first
+    """
+    cp = center_pos or 0
+    def _key(o: dict) -> tuple:
+        is_match = 0 if o.get("object_id") == matched_id else 1
+        tord     = _CTX_TYPE_ORDER.get(o.get("type", ""), 5)
+        dist     = abs((o.get("global_position") or 0) - cp)
+        return (is_match, tord, dist)
+    return sorted(objs, key=_key)
 
 
 def _expand(
@@ -150,20 +214,39 @@ def _expand(
 
     # If candidate came from semantic-objects index it already has the matched object
     matched_obj = candidate.get("matched_object")   # set by retriever for object-level hits
+    # Capture origin before context_expander potentially assigns matched_obj from chunk context
+    origin_is_direct = matched_obj is not None
 
-    # For sentence-level hits, replace current_text with the tight 3-sentence window
-    # stored inline (prev_sentence_text + sentence + next_sentence_text).
-    # This gives the verifier precise, focused context rather than the full paragraph.
-    # The chunk-level prev/next text still provides broader surrounding context.
+    # context_strategy describes what actually ended up in current_text.
+    # Set here to "chunk_fallback"; updated once we know the matched object type.
+    context_strategy = "chunk_fallback"
+
+    # For sentence-level hits, build hierarchical context:
+    #   normalized heading → parent paragraph (only when multi-sentence) → 3-sentence window.
+    # Preserves the semantic hierarchy (drug / endpoint / disease inherited from heading)
+    # while keeping the verifier's context tight and precise.
     if matched_obj and matched_obj.get("type") == "sentence":
-        parts = [
-            matched_obj.get("prev_sentence_text") or "",
-            matched_obj.get("text") or "",
-            matched_obj.get("next_sentence_text") or "",
-        ]
-        sentence_window = " ".join(p for p in parts if p).strip()
-        if sentence_window:
-            current_text = sentence_window
+        raw_heading = (matched_obj.get("heading_path") or matched_obj.get("semantic_path") or "").strip()
+        heading     = _normalize_heading(raw_heading) if raw_heading else ""
+        para_text   = (matched_obj.get("paragraph_text") or "").strip()
+        sent_text   = (matched_obj.get("text") or "").strip()
+        prev_s      = (matched_obj.get("prev_sentence_text") or "").strip()
+        next_s      = (matched_obj.get("next_sentence_text") or "").strip()
+        sent_window = " ".join(p for p in [prev_s, sent_text, next_s] if p)
+
+        ctx_parts: list[str] = []
+        if heading:
+            ctx_parts.append(heading)
+        # Include parent paragraph only when it contains more than this one sentence
+        # (para_text == sent_text means single-sentence paragraph — would be redundant)
+        if para_text and para_text != sent_text:
+            ctx_parts.append(para_text)
+        if sent_window:
+            ctx_parts.append(sent_window)
+
+        if ctx_parts:
+            current_text     = "\n\n".join(ctx_parts)
+            context_strategy = "sentence_hierarchical"
 
     # Extract adjacency indices set by the section chunker
     obj_meta         = matched_obj or {}
@@ -189,6 +272,14 @@ def _expand(
     center_pos      = obj_meta.get("global_position")
     context_objects = ctx_cache.get((chunk_id, center_pos), [])
 
+    # Track why this object was selected — useful for debugging retrieval decisions:
+    #   retriever_direct  — retriever set matched_object directly from semantic-objects
+    #   literal_match     — via_chunk: chosen because text contained a literal CI match
+    #   highest_priority  — via_chunk: chosen by type-priority (sentence > paragraph > …)
+    #   chunk_only        — via_chunk: no context objects found at all
+    selection_reason    = "retriever_direct" if origin_is_direct else None
+    literal_match_count = 0      # set below when selection_reason == "literal_match"
+
     if matched_obj is None and context_objects:
         lit_texts = [lm["text"].lower()
                      for lm in candidate.get("literal_matches", [])
@@ -202,12 +293,54 @@ def _expand(
                 obj_lower = (o.get("text") or "").lower()
                 return (int(any(lt in obj_lower for lt in lit_texts)),
                         _OBJECT_TYPE_PRIORITY.get(o.get("type", ""), 0))
-            matched_obj = max(context_objects, key=_lit_key)
+            matched_obj         = max(context_objects, key=_lit_key)
+            selection_reason    = "literal_match"
+            # How many context objects contained the literal — low count = high confidence
+            literal_match_count = sum(
+                1 for o in context_objects
+                if any(lt in (o.get("text") or "").lower() for lt in lit_texts)
+            )
         else:
-            matched_obj = max(
+            matched_obj      = max(
                 context_objects,
                 key=lambda o: _OBJECT_TYPE_PRIORITY.get(o.get("type", ""), 0),
             )
+            selection_reason = "highest_priority"
+    elif matched_obj is None:
+        selection_reason = "chunk_only"   # no context objects available
+
+    # Finalize context_strategy now that matched_obj is settled.
+    # "sentence_hierarchical" is already set above; all other types take the object type name.
+    if context_strategy == "chunk_fallback" and matched_obj is not None:
+        context_strategy = matched_obj.get("type", "unknown")
+
+    # Sort context_objects by verifier relevance:
+    # matched object first, then headings, paragraphs, sentences, tables — each nearest first.
+    matched_id      = (matched_obj or {}).get("object_id")
+    context_objects = _sort_context_objects(context_objects, matched_id, center_pos)
+
+    # Distance from the retrieval center to the matched object's global_position.
+    # distance=0 → exact indexed position; distance>0 → pulled from surrounding window.
+    matched_pos      = (matched_obj or {}).get("global_position")
+    matched_distance = (
+        abs(matched_pos - center_pos)
+        if matched_pos is not None and center_pos is not None
+        else None
+    )
+
+    # Character length of current_text sent to the verifier.
+    # Tracks whether hierarchical context (heading + para + window) is growing too large.
+    current_text_chars = len(current_text)
+
+    # distance_ratio = matched_distance / CONTEXT_WINDOW
+    # Normalises distance against the configured window size so analytics remain
+    # comparable if CONTEXT_WINDOW changes (e.g. 3 → 5).
+    #   0.0 = exact hit   1.0 = edge of window   >1.0 = outside window (shouldn't happen)
+    distance_ratio = (
+        round(matched_distance / CONTEXT_WINDOW, 3)
+        if matched_distance is not None and CONTEXT_WINDOW > 0
+        else None
+    )
 
     context_quality = {
         "parent":    bool(parent_text),
@@ -215,12 +348,25 @@ def _expand(
         "next":      bool(next_text),
         "n_objects": len(context_objects),
     }
+    # Granular origin: "{direct|via_chunk}_{object_type}"
+    #   direct    — retriever found this object in semantic-objects index directly
+    #   via_chunk — BM25 chunk fallback; context_expander assigned best matching object
+    obj_type = (matched_obj or {}).get("type") or "unknown"
+    prefix   = "direct" if origin_is_direct else "via_chunk"
+    retrieval_origin = f"{prefix}_{obj_type}"
 
     return {
         **candidate,
-        "matched_object":  matched_obj,
-        "context_objects": context_objects,
-        "context_quality": context_quality,
+        "matched_object":     matched_obj,
+        "retrieval_origin":   retrieval_origin,
+        "selection_reason":   selection_reason,
+        "literal_match_count": literal_match_count,
+        "context_strategy":   context_strategy,
+        "matched_distance":   matched_distance,
+        "distance_ratio":     distance_ratio,
+        "current_text_chars": current_text_chars,
+        "context_objects":    context_objects,
+        "context_quality":    context_quality,
         "context": {
             "parent_text":  parent_text[:CONTEXT_CHARS]  if parent_text else "",
             "prev_text":    prev_text[-CONTEXT_CHARS:]   if prev_text  else "",

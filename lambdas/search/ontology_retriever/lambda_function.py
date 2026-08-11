@@ -21,6 +21,28 @@ OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_INDEX    = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 AWS_REGION          = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K               = int(os.environ.get("RETRIEVER_TOP_K", "10"))
+TIE_BUFFER          = int(os.environ.get("RETRIEVER_TIE_BUFFER", "15"))
+
+
+def _adaptive_k(page_count: int, base_k: int = 10) -> int:
+    if page_count <= 0:    return base_k
+    if page_count < 500:   return base_k
+    if page_count < 3_000: return max(base_k, 25)
+    if page_count < 10_000: return max(base_k, 50)
+    return max(base_k, 75)
+
+
+def _with_ties(sorted_hits: list[dict], k: int) -> list[dict]:
+    if len(sorted_hits) <= k:
+        return sorted_hits
+    cutoff = sorted_hits[k - 1]["score"]
+    result = sorted_hits[:k]
+    for h in sorted_hits[k:]:
+        if h["score"] == cutoff:
+            result.append(h)
+        else:
+            break
+    return result
 
 _os_client = None
 
@@ -87,15 +109,17 @@ def _process(req: dict) -> dict:
     if not search_terms:
         return {"retriever": "ontology", "hits": []}
 
-    hits = _ontology_search(search_terms, document_id)
+    page_count = int(req.get("document_page_count", 0))
+    k          = _adaptive_k(page_count, TOP_K)
+    hits = _ontology_search(search_terms, document_id, k)
 
     return {
         "retriever": "ontology",
-        "hits":      hits,
+        "hits":      _with_ties(hits, k),
     }
 
 
-def _ontology_search(terms: list[str], document_id: str | None) -> list[dict]:
+def _ontology_search(terms: list[str], document_id: str | None, k: int = TOP_K) -> list[dict]:
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
 
     # One match clause per term — any match counts
@@ -105,7 +129,7 @@ def _ontology_search(terms: list[str], document_id: str | None) -> list[dict]:
     ]
 
     body = {
-        "size": TOP_K,
+        "size": k + TIE_BUFFER,
         "query": {
             "bool": {
                 "filter": filter_clause,
