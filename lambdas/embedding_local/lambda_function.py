@@ -44,15 +44,6 @@ INDEX_LAMBDA_ARN = os.environ.get("INDEX_LAMBDA_ARN", "")
 # Truncate input at character level before encoding (BGE-M3 max ≈ 8 192 tokens)
 _MAX_INPUT_CHARS = 25_000
 
-# Comma-separated object types whose dense_vector should NOT be computed.
-# e.g. EMBEDDING_SKIP_TYPES=sentence         → skip sentence embeddings (~44% fewer calls)
-#      EMBEDDING_SKIP_TYPES=sentence,heading  → skip sentence + heading vectors
-# Skipped objects/spans are still indexed — BM25/literal/context_expander unaffected.
-_raw_skip = os.environ.get("EMBEDDING_SKIP_TYPES", "")
-EMBEDDING_SKIP_TYPES: frozenset[str] = frozenset(
-    t.strip() for t in _raw_skip.split(",") if t.strip()
-)
-
 _model       = None
 _model_lock  = threading.Lock()
 _COLD_START: bool = True
@@ -177,18 +168,15 @@ def _process_document(
     sent_slots: list[tuple[int, int, int]]  = []   # (slot_idx, obj_idx, span_idx)
 
     for obj_idx, obj in enumerate(objects):
-        obj_type = obj.get("type", "")
-        if obj.get("text") and not obj.get("embedding") and obj_type not in EMBEDDING_SKIP_TYPES:
+        if obj.get("text") and not obj.get("embedding"):
             slot_idx = len(slot_texts)
             slot_texts.append(_object_embedding_text(obj)[:_MAX_INPUT_CHARS])
             obj_slots.append((slot_idx, obj_idx))
 
         for span_idx, span in enumerate(obj.get("display_spans", [])):
-            span_type = span.get("type", "")
-            if (span_type == "sentence"
+            if (span.get("type") == "sentence"
                     and span.get("text")
-                    and not span.get("embedding")
-                    and span_type not in EMBEDDING_SKIP_TYPES):
+                    and not span.get("embedding")):
                 slot_idx = len(slot_texts)
                 slot_texts.append(_sentence_embedding_text(obj, span)[:_MAX_INPUT_CHARS])
                 sent_slots.append((slot_idx, obj_idx, span_idx))
@@ -219,19 +207,11 @@ def _process_document(
         objects[obj_idx]["display_spans"][span_idx]["embedding"] = dense_vecs[slot_idx].tolist()
 
     embedding_time = time.monotonic() - t0
-    n_skipped_objects   = sum(1 for obj in objects if obj.get("type", "") in EMBEDDING_SKIP_TYPES and obj.get("text"))
-    n_skipped_sentences = sum(
-        1 for obj in objects
-        for span in obj.get("display_spans", [])
-        if span.get("type", "") in EMBEDDING_SKIP_TYPES and span.get("text")
-    )
     logger.info(
         "[ChunkSummary] chunk=%s doc=%s objects=%d sentences=%d "
-        "embed_requests=%d model=%s embedding_time=%.3fs cold_start=%s "
-        "skip_types=%s skipped_objects=%d skipped_sentences=%d",
+        "embed_requests=%d model=%s embedding_time=%.3fs cold_start=%s",
         chunk_id, doc_id, len(obj_slots), len(sent_slots),
         n_embed_requests, MODEL_NAME, embedding_time, cold_start,
-        ",".join(sorted(EMBEDDING_SKIP_TYPES)) or "none", n_skipped_objects, n_skipped_sentences,
     )
 
     if objects and "extraction" in chunk:
