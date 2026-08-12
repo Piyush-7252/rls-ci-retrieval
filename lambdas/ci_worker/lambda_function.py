@@ -57,6 +57,11 @@ if str(ROOT) not in sys.path:
 
 _loaded: dict[str, types.ModuleType] = {}
 
+# Selects which embedding lambda module to load; default keeps Titan behaviour unchanged.
+_EMBEDDING_MODULE: tuple[str, str] = {
+    "cohere": ("embedding_cohere", "embedding_cohere"),
+}.get(os.environ.get("EMBEDDING_PROVIDER", "titan"), ("embedding", "embedding"))
+
 # Requeue if less than this many ms remain in the Lambda invocation.
 _MIN_REMAINING_MS = 30_000
 
@@ -102,7 +107,7 @@ def _run_ci(ci: dict, context: Any = None) -> dict:
     normalize = _load("normalize", "normalize")
     ner       = _load("ner",       "ner")
     ontology  = _load("ontology",  "ontology")
-    embedding = _load("embedding", "embedding")
+    embedding = _load(*_EMBEDDING_MODULE)
     idx       = _load("index",     "idx")
 
     timings: dict[str, float] = {}
