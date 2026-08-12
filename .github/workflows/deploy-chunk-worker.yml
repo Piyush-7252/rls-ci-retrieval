@@ -12,6 +12,7 @@ on:
       - "lambdas/ner/**"
       - "lambdas/normalize/**"
       - "lambdas/embedding/**"
+      - "lambdas/embedding_cohere/**"
       - "lambdas/ontology/**"
       - "lambdas/index/**"
       - "lambdas/extraction/**"
@@ -30,12 +31,7 @@ on:
           - ci_worker
           - search_worker
           - search_orchestrator
-
-# ── Path-change detection ─────────────────────────────────────────────────────
-# The `changes` job decides which workers need rebuilding.
-#
-#   chunk_worker      — triggered by its own folder + all shared pipeline stages
-#   ci_worker         — triggered by its own folder + all shared pipeline stages
+            - cohere_chunk_worker
 #   search_worker     — triggered by its own folder + lambdas/search/** (sub-lambdas
 #                       loaded in-process) + shared/**
 #   search_orchestrator — triggered by its own folder + shared/**
@@ -51,6 +47,7 @@ jobs:
       ci_worker:           ${{ steps.filter.outputs.ci_worker }}
       search_worker:       ${{ steps.filter.outputs.search_worker }}
       search_orchestrator: ${{ steps.filter.outputs.search_orchestrator }}
+      cohere_chunk_worker: ${{ steps.filter.outputs.cohere_chunk_worker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -62,6 +59,7 @@ jobs:
               - 'lambdas/ner/**'
               - 'lambdas/normalize/**'
               - 'lambdas/embedding/**'
+              - 'lambdas/embedding_cohere/**'
               - 'lambdas/ontology/**'
               - 'lambdas/index/**'
               - 'lambdas/extraction/**'
@@ -83,6 +81,16 @@ jobs:
               - '.github/workflows/deploy-chunk-worker.yml'
             search_orchestrator:
               - 'lambdas/search_orchestrator/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            cohere_chunk_worker:
+              - 'lambdas/chunk_worker/**'
+              - 'lambdas/embedding_cohere/**'
+              - 'lambdas/ner/**'
+              - 'lambdas/normalize/**'
+              - 'lambdas/ontology/**'
+              - 'lambdas/index/**'
+              - 'lambdas/extraction/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
 
@@ -214,3 +222,34 @@ jobs:
         run: |
           chmod +x tools/deploy_search_orchestrator.sh
           tools/deploy_search_orchestrator.sh
+
+  # ── cohere_chunk_worker ───────────────────────────────────────────────────────
+  deploy-cohere-chunk-worker:
+    name: Deploy cohere_chunk_worker (rls-ci-chunk-worker-cohere)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.cohere_chunk_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'cohere_chunk_worker'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-ci-chunk-worker-cohere
+      ECR_REPO:      rls-ci-chunk-worker
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
+          HF_TOKEN:  ${{ secrets.HF_TOKEN }}
+        run: |
+          chmod +x tools/deploy_cohere_chunk_worker.sh
+          tools/deploy_cohere_chunk_worker.sh
