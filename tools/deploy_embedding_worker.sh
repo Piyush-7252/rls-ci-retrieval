@@ -27,20 +27,17 @@ ROLE_ARN="${ROLE_ARN:-}"
 TIMEOUT="${TIMEOUT:-300}"
 MEMORY_SIZE="${MEMORY_SIZE:-1024}"
 
-EMBEDDING_API_URL="${EMBEDDING_API_URL:-}"
+EMBEDDING_API_URL="${EMBEDDING_API_URL:-https://890c-117-208-170-214.ngrok-free.app}"
 EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-}"
 EMBEDDING_API_TIMEOUT="${EMBEDDING_API_TIMEOUT:-120}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-gpu-embed}"
 EMBEDDING_VERSION="${EMBEDDING_VERSION:-1}"
-ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-}"
-INDEX_QUEUE_URL="${INDEX_QUEUE_URL:-}"
+ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-rls-chunk-artifacts}"
+INDEX_QUEUE_URL="${INDEX_QUEUE_URL:-https://sqs.eu-west-1.amazonaws.com/064051750322/rls-index-queue}"
 NOTIFY_SERVER_URL="${NOTIFY_SERVER_URL:-}"
 NOTIFY_SERVER_TIMEOUT="${NOTIFY_SERVER_TIMEOUT:-5}"
 
 if [[ -z "$ROLE_ARN" ]];          then echo "ERROR: ROLE_ARN is required";          exit 1; fi
-if [[ -z "$EMBEDDING_API_URL" ]];  then echo "ERROR: EMBEDDING_API_URL is required";  exit 1; fi
-if [[ -z "$ARTIFACT_BUCKET" ]];    then echo "ERROR: ARTIFACT_BUCKET is required";    exit 1; fi
-if [[ -z "$INDEX_QUEUE_URL" ]];    then echo "ERROR: INDEX_QUEUE_URL is required";    exit 1; fi
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
