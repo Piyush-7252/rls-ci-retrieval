@@ -6,17 +6,21 @@ on:
     paths:
       - "lambdas/chunk_worker/**"
       - "lambdas/ci_worker/**"
-      - "lambdas/search_worker/**"
-      - "lambdas/search_orchestrator/**"
-      - "lambdas/search/**"
+      - "lambdas/chunk_worker_v2/**"
+      - "lambdas/embedding_worker/**"
+      - "lambdas/index_worker/**"
       - "lambdas/ner/**"
       - "lambdas/normalize/**"
       - "lambdas/embedding/**"
-      - "lambdas/embedding_cohere/**"
       - "lambdas/ontology/**"
       - "lambdas/index/**"
       - "lambdas/extraction/**"
       - "shared/**"
+      - "tools/deploy_chunk_worker.sh"
+      - "tools/deploy_ci_worker.sh"
+      - "tools/deploy_chunk_worker_v2.sh"
+      - "tools/deploy_embedding_worker.sh"
+      - "tools/deploy_index_worker.sh"
       - ".github/workflows/deploy-chunk-worker.yml"
   workflow_dispatch:
     inputs:
@@ -29,31 +33,21 @@ on:
           - all
           - chunk_worker
           - ci_worker
-          - search_worker
-          - search_orchestrator
-          - cohere_chunk_worker
           - chunk_worker_v2
           - embedding_worker
           - index_worker
-#   search_worker     — triggered by its own folder + lambdas/search/** (sub-lambdas
-#                       loaded in-process) + shared/**
-#   search_orchestrator — triggered by its own folder + shared/**
-#
-# A change to lambdas/ner/** or shared/** triggers chunk_worker + ci_worker + search_worker.
+# A change to lambdas/ner/** or shared/** triggers chunk_worker + ci_worker.
 # workflow_dispatch lets you force-deploy any single lambda or all.
 jobs:
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      chunk_worker:        ${{ steps.filter.outputs.chunk_worker }}
-      ci_worker:           ${{ steps.filter.outputs.ci_worker }}
-      search_worker:       ${{ steps.filter.outputs.search_worker }}
-      search_orchestrator: ${{ steps.filter.outputs.search_orchestrator }}
-      cohere_chunk_worker: ${{ steps.filter.outputs.cohere_chunk_worker }}
-      chunk_worker_v2:     ${{ steps.filter.outputs.chunk_worker_v2 }}
-      embedding_worker:    ${{ steps.filter.outputs.embedding_worker }}
-      index_worker:        ${{ steps.filter.outputs.index_worker }}
+      chunk_worker:    ${{ steps.filter.outputs.chunk_worker }}
+      ci_worker:       ${{ steps.filter.outputs.ci_worker }}
+      chunk_worker_v2: ${{ steps.filter.outputs.chunk_worker_v2 }}
+      embedding_worker: ${{ steps.filter.outputs.embedding_worker }}
+      index_worker:    ${{ steps.filter.outputs.index_worker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -80,25 +74,7 @@ jobs:
               - 'lambdas/index/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
-            search_worker:
-              - 'lambdas/search_worker/**'
-              - 'lambdas/search/**'
-              - 'shared/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
-            search_orchestrator:
-              - 'lambdas/search_orchestrator/**'
-              - 'shared/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
-            cohere_chunk_worker:
-              - 'lambdas/chunk_worker/**'
-              - 'lambdas/embedding_cohere/**'
-              - 'lambdas/ner/**'
-              - 'lambdas/normalize/**'
-              - 'lambdas/ontology/**'
-              - 'lambdas/index/**'
-              - 'lambdas/extraction/**'
-              - 'shared/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
+
             chunk_worker_v2:
               - 'lambdas/chunk_worker_v2/**'
               - 'lambdas/ner/**'
