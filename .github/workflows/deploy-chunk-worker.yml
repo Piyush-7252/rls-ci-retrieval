@@ -31,7 +31,10 @@ on:
           - ci_worker
           - search_worker
           - search_orchestrator
-            - cohere_chunk_worker
+          - cohere_chunk_worker
+          - chunk_worker_v2
+          - embedding_worker
+          - index_worker
 #   search_worker     — triggered by its own folder + lambdas/search/** (sub-lambdas
 #                       loaded in-process) + shared/**
 #   search_orchestrator — triggered by its own folder + shared/**
@@ -48,6 +51,9 @@ jobs:
       search_worker:       ${{ steps.filter.outputs.search_worker }}
       search_orchestrator: ${{ steps.filter.outputs.search_orchestrator }}
       cohere_chunk_worker: ${{ steps.filter.outputs.cohere_chunk_worker }}
+      chunk_worker_v2:     ${{ steps.filter.outputs.chunk_worker_v2 }}
+      embedding_worker:    ${{ steps.filter.outputs.embedding_worker }}
+      index_worker:        ${{ steps.filter.outputs.index_worker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -91,6 +97,23 @@ jobs:
               - 'lambdas/ontology/**'
               - 'lambdas/index/**'
               - 'lambdas/extraction/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            chunk_worker_v2:
+              - 'lambdas/chunk_worker_v2/**'
+              - 'lambdas/ner/**'
+              - 'lambdas/normalize/**'
+              - 'lambdas/ontology/**'
+              - 'lambdas/index/**'
+              - 'lambdas/extraction/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            embedding_worker:
+              - 'lambdas/embedding_worker/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            index_worker:
+              - 'lambdas/index_worker/**'
+              - 'lambdas/index/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
 
@@ -253,3 +276,103 @@ jobs:
         run: |
           chmod +x tools/deploy_cohere_chunk_worker.sh
           tools/deploy_cohere_chunk_worker.sh
+
+  # ── chunk_worker_v2 ───────────────────────────────────────────────────────────
+  deploy-chunk-worker-v2:
+    name: Deploy chunk_worker_v2 (rls-ci-chunk-worker-v2)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.chunk_worker_v2 == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'chunk_worker_v2'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-ci-chunk-worker-v2
+      ECR_REPO:      rls-ci-chunk-worker-v2
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:             ${{ secrets.ROLE_ARN }}
+          HF_TOKEN:             ${{ secrets.HF_TOKEN }}
+          ARTIFACT_BUCKET:      ${{ secrets.ARTIFACT_BUCKET }}
+          EMBEDDING_QUEUE_URL:  ${{ secrets.EMBEDDING_QUEUE_URL }}
+          NOTIFY_SERVER_URL:    ${{ secrets.NOTIFY_SERVER_URL }}
+        run: |
+          chmod +x tools/deploy_chunk_worker_v2.sh
+          tools/deploy_chunk_worker_v2.sh
+
+  # ── embedding_worker ──────────────────────────────────────────────────────────
+  deploy-embedding-worker:
+    name: Deploy embedding_worker (rls-embedding-worker)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.embedding_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'embedding_worker'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-embedding-worker
+      ECR_REPO:      rls-embedding-worker
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:             ${{ secrets.ROLE_ARN }}
+          EMBEDDING_API_URL:    ${{ secrets.EMBEDDING_API_URL }}
+          EMBEDDING_API_KEY:    ${{ secrets.EMBEDDING_API_KEY }}
+          ARTIFACT_BUCKET:      ${{ secrets.ARTIFACT_BUCKET }}
+          INDEX_QUEUE_URL:      ${{ secrets.INDEX_QUEUE_URL }}
+          NOTIFY_SERVER_URL:    ${{ secrets.NOTIFY_SERVER_URL }}
+        run: |
+          chmod +x tools/deploy_embedding_worker.sh
+          tools/deploy_embedding_worker.sh
+
+  # ── index_worker ──────────────────────────────────────────────────────────────
+  deploy-index-worker:
+    name: Deploy index_worker (rls-index-worker)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.index_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'index_worker'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-index-worker
+      ECR_REPO:      rls-index-worker
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN:          ${{ secrets.ROLE_ARN }}
+          NOTIFY_SERVER_URL: ${{ secrets.NOTIFY_SERVER_URL }}
+        run: |
+          chmod +x tools/deploy_index_worker.sh
+          tools/deploy_index_worker.sh
