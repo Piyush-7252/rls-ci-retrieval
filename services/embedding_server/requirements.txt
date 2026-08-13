@@ -1,0 +1,6 @@
+FlagEmbedding
+torch
+fastapi
+uvicorn[standard]
+aiohttp
+pydantic
