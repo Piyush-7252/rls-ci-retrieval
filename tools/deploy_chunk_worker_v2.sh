@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
-# Deploy rls-ci-chunk-worker-v2 (GPU embedding API + S3 artifact cache + notify_server).
+# Deploy rls-ci-chunk-worker-v2 (Stage 1: enrichment only — normalize/NER/ontology → S3 cache → embedding queue).
 # Does NOT touch the existing rls-ci-chunk-worker Lambda.
 #
 # Required env vars:
 #   ROLE_ARN            IAM role ARN for the Lambda
-#   EMBEDDING_API_URL   URL of the GPU embedding service (e.g. http://host:8080/embed)
-#   ARTIFACT_BUCKET     S3 bucket for enriched-chunk cache
 #
 # Optional env vars (all have defaults):
-#   FUNCTION_NAME, ECR_REPO, AWS_REGION, NOTIFY_SERVER_URL, EMBEDDING_MODEL,
-#   ENRICHMENT_VERSION, EMBEDDING_API_KEY, EMBEDDING_API_TIMEOUT,
-#   NOTIFY_SERVER_TIMEOUT, OPENSEARCH_*, NER_MODEL, HF_TOKEN
+#   FUNCTION_NAME, ECR_REPO, AWS_REGION, ARTIFACT_BUCKET, EMBEDDING_QUEUE_URL,
+#   ENRICHMENT_VERSION, NOTIFY_SERVER_URL, OPENSEARCH_*, NER_MODEL, HF_TOKEN
 #
 # Example:
-#   ROLE_ARN=arn:aws:iam::064051750322:role/rls-ci-worker-role \
-#   EMBEDDING_API_URL=http://10.0.1.50:8080/embed \
-#   ARTIFACT_BUCKET=rls-chunk-artifacts \
-#   NOTIFY_SERVER_URL=http://10.0.1.50:9000 \
-#   tools/deploy_chunk_worker_v2.sh
+#   ROLE_ARN=arn:aws:iam::064051750322:role/rls-ci-worker-role tools/deploy_chunk_worker_v2.sh
 
 set -euo pipefail
 
@@ -32,14 +25,11 @@ ROLE_ARN="${ROLE_ARN:-}"
 TIMEOUT="${TIMEOUT:-900}"
 MEMORY_SIZE="${MEMORY_SIZE:-10240}"
 
-# Embedding API
-EMBEDDING_API_URL="${EMBEDDING_API_URL:-}"
-EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-}"
-EMBEDDING_API_TIMEOUT="${EMBEDDING_API_TIMEOUT:-120}"
-EMBEDDING_MODEL="${EMBEDDING_MODEL:-gpu-embed}"
+# Embedding queue (Stage 2 destination)
+EMBEDDING_QUEUE_URL="${EMBEDDING_QUEUE_URL:-https://sqs.eu-west-1.amazonaws.com/064051750322/rls-embedding-queue}"
 
 # Artifact cache
-ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-}"
+ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-rls-chunk-artifacts}"
 ENRICHMENT_VERSION="${ENRICHMENT_VERSION:-1}"
 
 # Notify server
@@ -57,14 +47,6 @@ HF_TOKEN="${HF_TOKEN:-}"
 if [[ -z "$ROLE_ARN" ]]; then
   echo "ERROR: ROLE_ARN is required"
   echo "Example: ROLE_ARN=arn:aws:iam::<acct>:role/rls-ci-worker-role tools/deploy_chunk_worker_v2.sh"
-  exit 1
-fi
-if [[ -z "$EMBEDDING_API_URL" ]]; then
-  echo "ERROR: EMBEDDING_API_URL is required (e.g. http://host:8080/embed)"
-  exit 1
-fi
-if [[ -z "$ARTIFACT_BUCKET" ]]; then
-  echo "ERROR: ARTIFACT_BUCKET is required (S3 bucket for enrichment cache)"
   exit 1
 fi
 
@@ -130,17 +112,12 @@ ENV_VARS+="OPENSEARCH_INDEX=${OPENSEARCH_INDEX},"
 ENV_VARS+="SEMANTIC_OBJECTS_INDEX=${SEMANTIC_OBJECTS_INDEX},"
 ENV_VARS+="OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX},"
 ENV_VARS+="NER_MODEL=${NER_MODEL},"
-ENV_VARS+="EMBEDDING_API_URL=${EMBEDDING_API_URL},"
-ENV_VARS+="EMBEDDING_API_TIMEOUT=${EMBEDDING_API_TIMEOUT},"
-ENV_VARS+="EMBEDDING_MODEL=${EMBEDDING_MODEL},"
 ENV_VARS+="ARTIFACT_BUCKET=${ARTIFACT_BUCKET},"
 ENV_VARS+="ENRICHMENT_VERSION=${ENRICHMENT_VERSION},"
+ENV_VARS+="EMBEDDING_QUEUE_URL=${EMBEDDING_QUEUE_URL},"
 ENV_VARS+="NOTIFY_SERVER_URL=${NOTIFY_SERVER_URL},"
 ENV_VARS+="NOTIFY_SERVER_TIMEOUT=${NOTIFY_SERVER_TIMEOUT},"
 ENV_VARS+="HF_HOME=/tmp/hf_cache"
-if [[ -n "$EMBEDDING_API_KEY" ]]; then
-  ENV_VARS+=",EMBEDDING_API_KEY=${EMBEDDING_API_KEY}"
-fi
 if [[ -n "$HF_TOKEN" ]]; then
   ENV_VARS+=",HF_TOKEN=${HF_TOKEN}"
 fi
