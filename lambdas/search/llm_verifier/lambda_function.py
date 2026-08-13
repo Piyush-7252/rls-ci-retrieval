@@ -2,7 +2,6 @@
 Search Pipeline — Stage 6: LLM Verifier
 =========================================
 Asks Bedrock Claude for a YES/NO/MAYBE verdict on each top-ranked candidate.
-Only processes the top N candidates (controlled by LLM_VERIFY_TOP_N env var).
 
 Prompt returns structured JSON: { "verdict": "YES"|"NO"|"MAYBE", "reason": str,
                                    "confidence": float 0-1 }
@@ -27,7 +26,6 @@ logger.setLevel(logging.INFO)
 BEDROCK_REGION       = os.environ.get("BEDROCK_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 BEDROCK_MODEL        = os.environ.get("VERIFIER_MODEL", "eu.anthropic.claude-haiku-4-5-20251001-v1:0")
 MERGER_LAMBDA_ARN    = os.environ.get("MERGER_LAMBDA_ARN", "")
-LLM_VERIFY_TOP_N     = int(os.environ.get("LLM_VERIFY_TOP_N", "20"))
 MIN_RERANK_SCORE     = float(os.environ.get("MIN_RERANK_SCORE", "3.0"))
 
 _aws: dict = {}
