@@ -11,13 +11,14 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 S3_BUCKET    = "rls-file-bucket-eu"
-S3_PREFIX    = "Patterns Check Run/18"
+TENANT = "Patterns Check Run"
+S3_PREFIX    = "18"
 QUEUE_URL    = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-chunk-queue"
 REGION       = "eu-west-1"
 CACHE_BASE   = Path(".cache/run18")
 
 DOCUMENTS = [
-    "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209",
+    # "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209",
     # "20260727131413555_kma65kc_10991_REDACTED_SCS-FD-JNJ-64407564-AAA-498431_1245203",
     # "20260727131420119_56fiqkl_10992_REDACTED_PopPK-Full-64407564MMY1001-867391_1245204",
     # "20260727131528867_exspu63_10999_REDACTED_SAP-FD-64407564MMY1001-745917_1245323",
@@ -48,8 +49,8 @@ def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 def dispatch(doc_id: str, index: int, total: int, suffix: str = "") -> bool:
-    s3_key          = f"{S3_PREFIX}/documents/{doc_id}.pdf"
-    full_tables_key = f"{S3_PREFIX}/extraction/{doc_id}/full_tables.json"
+    s3_key          = f"{S3_PREFIX}/{TENANT}/documents/{doc_id}.pdf"
+    full_tables_key = f"{S3_PREFIX}/extraction/{TENANT}/{doc_id}/full_tables.json"
     cache_path      = CACHE_BASE / doc_id / "full_tables.json"
 
     print(f"\n{'='*70}")
