@@ -186,8 +186,11 @@ def _verify_batch(
         in_tok    = usage.get("input_tokens", 0)
         out_tok   = usage.get("output_tokens", 0)
         parsed    = json.loads(text)
-        if not isinstance(parsed, list) or len(parsed) < len(candidates):
+        if not isinstance(parsed, list) or len(parsed) == 0:
             raise ValueError(f"Expected list of {len(candidates)}, got {len(parsed) if isinstance(parsed,list) else type(parsed)}")
+        # Pad if Claude returned fewer items than expected rather than doing full sequential fallback
+        while len(parsed) < len(candidates):
+            parsed.append({"verdict": "MAYBE", "confidence": 0.5, "reason": "batch_missing"})
         parsed = parsed[:len(candidates)]  # truncate any extra items Claude occasionally adds
         results = []
         per_tok = max(1, in_tok // len(candidates)), max(1, out_tok // len(candidates))
