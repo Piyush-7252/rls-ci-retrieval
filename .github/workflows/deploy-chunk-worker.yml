@@ -6,9 +6,6 @@ on:
     paths:
       - "lambdas/chunk_worker/**"
       - "lambdas/ci_worker/**"
-      - "lambdas/chunk_worker_v2/**"
-      - "lambdas/embedding_worker/**"
-      - "lambdas/index_worker/**"
       - "lambdas/ner/**"
       - "lambdas/normalize/**"
       - "lambdas/embedding/**"
@@ -18,9 +15,6 @@ on:
       - "shared/**"
       - "tools/deploy_chunk_worker.sh"
       - "tools/deploy_ci_worker.sh"
-      - "tools/deploy_chunk_worker_v2.sh"
-      - "tools/deploy_embedding_worker.sh"
-      - "tools/deploy_index_worker.sh"
       - ".github/workflows/deploy-chunk-worker.yml"
   workflow_dispatch:
     inputs:
@@ -33,21 +27,14 @@ on:
           - all
           - chunk_worker
           - ci_worker
-          - chunk_worker_v2
-          - embedding_worker
-          - index_worker
-# A change to lambdas/ner/** or shared/** triggers chunk_worker + ci_worker.
-# workflow_dispatch lets you force-deploy any single lambda or all.
+
 jobs:
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      chunk_worker:    ${{ steps.filter.outputs.chunk_worker }}
-      ci_worker:       ${{ steps.filter.outputs.ci_worker }}
-      chunk_worker_v2: ${{ steps.filter.outputs.chunk_worker_v2 }}
-      embedding_worker: ${{ steps.filter.outputs.embedding_worker }}
-      index_worker:    ${{ steps.filter.outputs.index_worker }}
+      chunk_worker: ${{ steps.filter.outputs.chunk_worker }}
+      ci_worker:    ${{ steps.filter.outputs.ci_worker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -75,25 +62,7 @@ jobs:
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
 
-            chunk_worker_v2:
-              - 'lambdas/chunk_worker_v2/**'
-              - 'lambdas/ner/**'
-              - 'lambdas/normalize/**'
-              - 'lambdas/ontology/**'
-              - 'lambdas/index/**'
-              - 'lambdas/extraction/**'
-              - 'shared/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
-            embedding_worker:
-              - 'lambdas/embedding_worker/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
-            index_worker:
-              - 'lambdas/index_worker/**'
-              - 'lambdas/index/**'
-              - 'shared/**'
-              - '.github/workflows/deploy-chunk-worker.yml'
-
-  # ── chunk_worker ─────────────────────────────────────────────────────────────
+  # ── chunk_worker ──────────────────────────────────────────────────────────────
   deploy-chunk-worker:
     name: Deploy chunk_worker (rls-ci-chunk-worker)
     needs: changes
@@ -118,8 +87,8 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
-          HF_TOKEN:  ${{ secrets.HF_TOKEN }}
+          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_chunk_worker.sh
           tools/deploy_chunk_worker.sh
@@ -149,206 +118,8 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
-          HF_TOKEN:  ${{ secrets.HF_TOKEN }}
+          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_ci_worker.sh
           tools/deploy_ci_worker.sh
-
-  # ── search_worker ─────────────────────────────────────────────────────────────
-  deploy-search-worker:
-    name: Deploy search_worker (rls-search-worker)
-    needs: changes
-    if: |
-      (github.event_name == 'push' && needs.changes.outputs.search_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search_worker'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-search-worker
-      ECR_REPO:      rls-search-worker
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
-        run: |
-          chmod +x tools/deploy_search_worker.sh
-          tools/deploy_search_worker.sh
-
-  # ── search_orchestrator ───────────────────────────────────────────────────────
-  # Runs AFTER search_worker so it can pick up its ARN automatically.
-  deploy-search-orchestrator:
-    name: Deploy search_orchestrator (rls-search-orchestrator)
-    needs: [changes, deploy-search-worker]
-    # Run if: search_orchestrator paths changed OR search_worker was just deployed
-    # (orchestrator needs the latest worker ARN in its env).
-    # Also honour manual workflow_dispatch target.
-    if: |
-      !failure() && !cancelled() &&
-      (
-        (github.event_name == 'push' && (needs.changes.outputs.search_orchestrator == 'true' || needs.changes.outputs.search_worker == 'true')) ||
-        (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search_orchestrator'))
-      )
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-search-orchestrator
-      ECR_REPO:      rls-search-orchestrator
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
-        run: |
-          chmod +x tools/deploy_search_orchestrator.sh
-          tools/deploy_search_orchestrator.sh
-
-  # ── cohere_chunk_worker ───────────────────────────────────────────────────────
-  deploy-cohere-chunk-worker:
-    name: Deploy cohere_chunk_worker (rls-ci-chunk-worker-cohere)
-    needs: changes
-    if: |
-      (github.event_name == 'push' && needs.changes.outputs.cohere_chunk_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'cohere_chunk_worker'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-ci-chunk-worker-cohere
-      ECR_REPO:      rls-ci-chunk-worker
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:  ${{ secrets.ROLE_ARN }}
-          HF_TOKEN:  ${{ secrets.HF_TOKEN }}
-        run: |
-          chmod +x tools/deploy_cohere_chunk_worker.sh
-          tools/deploy_cohere_chunk_worker.sh
-
-  # ── chunk_worker_v2 ───────────────────────────────────────────────────────────
-  deploy-chunk-worker-v2:
-    name: Deploy chunk_worker_v2 (rls-ci-chunk-worker-v2)
-    needs: changes
-    if: |
-      (github.event_name == 'push' && needs.changes.outputs.chunk_worker_v2 == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'chunk_worker_v2'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-ci-chunk-worker-v2
-      ECR_REPO:      rls-ci-chunk-worker-v2
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:             ${{ secrets.ROLE_ARN }}
-          HF_TOKEN:             ${{ secrets.HF_TOKEN }}
-          ARTIFACT_BUCKET:      ${{ secrets.ARTIFACT_BUCKET }}
-          EMBEDDING_QUEUE_URL:  ${{ secrets.EMBEDDING_QUEUE_URL }}
-          NOTIFY_SERVER_URL:    ${{ secrets.NOTIFY_SERVER_URL }}
-        run: |
-          chmod +x tools/deploy_chunk_worker_v2.sh
-          tools/deploy_chunk_worker_v2.sh
-
-  # ── embedding_worker ──────────────────────────────────────────────────────────
-  deploy-embedding-worker:
-    name: Deploy embedding_worker (rls-embedding-worker)
-    needs: changes
-    if: |
-      (github.event_name == 'push' && needs.changes.outputs.embedding_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'embedding_worker'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-embedding-worker
-      ECR_REPO:      rls-embedding-worker
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:             ${{ secrets.ROLE_ARN }}
-          EMBEDDING_API_URL:    ${{ secrets.EMBEDDING_API_URL }}
-          EMBEDDING_API_KEY:    ${{ secrets.EMBEDDING_API_KEY }}
-          ARTIFACT_BUCKET:      ${{ secrets.ARTIFACT_BUCKET }}
-          INDEX_QUEUE_URL:      ${{ secrets.INDEX_QUEUE_URL }}
-          NOTIFY_SERVER_URL:    ${{ secrets.NOTIFY_SERVER_URL }}
-        run: |
-          chmod +x tools/deploy_embedding_worker.sh
-          tools/deploy_embedding_worker.sh
-
-  # ── index_worker ──────────────────────────────────────────────────────────────
-  deploy-index-worker:
-    name: Deploy index_worker (rls-index-worker)
-    needs: changes
-    if: |
-      (github.event_name == 'push' && needs.changes.outputs.index_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'index_worker'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    env:
-      AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-index-worker
-      ECR_REPO:      rls-index-worker
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            eu-west-1
-      - uses: docker/setup-buildx-action@v3
-      - name: Deploy
-        env:
-          ROLE_ARN:          ${{ secrets.ROLE_ARN }}
-          NOTIFY_SERVER_URL: ${{ secrets.NOTIFY_SERVER_URL }}
-        run: |
-          chmod +x tools/deploy_index_worker.sh
-          tools/deploy_index_worker.sh
