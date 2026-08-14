@@ -1,5 +1,5 @@
 """
-batch_search_run19.py — Run search for all run19 doc/CI combinations sequentially.
+batch_search_run25.py — Run search for all run25 doc/CI combinations sequentially.
 
 Groups:
   Group A: 12 docs  × ahmedCis.json          (34 CIs)
@@ -7,7 +7,7 @@ Groups:
   Group C:  4 docs  × random.json             (11 CIs)
   Group D:  1 doc   × ahmedFalseNumaricCis.json (13 CIs)
 
-Output: localfiles/search_results/run19/{timestamp}_{ci_stem}_{doc_id}.json
+Output: localfiles/search_results/run25/{timestamp}_{ci_stem}_{doc_id}.json
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-OUTPUT_DIR = ROOT / "localfiles" / "search_results" / "run19"
+OUTPUT_DIR = ROOT / "localfiles" / "search_results" / "run25"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 WORKERS = 10
@@ -38,6 +38,9 @@ RUNS: list[tuple[str, str, int]] = [
     # ("localfiles/ci/ahmedCis.json", "20260727131828604_zg1px2h_14473_REDACTED_SAP-Amend_2-64007957MMY1001-192385_1099540", 34),
     ("localfiles/ci/ahmedCis.json", "20260727131832855_1bchble_14475_REDACTED_CSR_Protocol_Appdx-FD-64007957MMY1001-1242306_1565113", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131845808_cy9r8kq_14706_Redacted-Master_ICF_Parts_1-2-64407564MMY1001-1359988", 34),
+    # -----------Large with 14000 pages -------------------
+    ("localfiles/ci/ahmedCis.json", "Combined_REDACTED_CSR-Full-co-jnj-64407564", 34),
+    # -----------Large end  -------------------
     # ── Group B: christineCIs × 5 docs ──────────────────────────────────────
     # ("localfiles/ci/christineCIs.json", "20260727133608401_s2bgig2_011_vbp15-006-study-report_Marking_and_Anon", 61),
     # ("localfiles/ci/christineCIs.json", "20260727133613754_trhhhzi_018_vbp15-006-16-1-01-prot-amendments_Marking_and_Anon", 61),
@@ -59,7 +62,7 @@ def main() -> None:
     passed = 0
     failed: list[str] = []
 
-    print(f"[{datetime.now():%H:%M:%S}] Starting run19 — {total} combinations")
+    print(f"[{datetime.now():%H:%M:%S}] Starting run25 — {total} combinations")
     print(f"  Output dir : {OUTPUT_DIR}")
     print(f"  Workers    : {WORKERS}")
     print()

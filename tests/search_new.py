@@ -46,12 +46,13 @@ sys.path.insert(0, str(ROOT / "tests"))
 # ── Import shared config + helpers from search.py ─────────────────────────────
 import search as _S
 
-_load                 = _S._load
-_build_os_client      = _S._build_os_client
-_inject_os            = _S._inject_os
-_lookup_ci_from_index = _S._lookup_ci_from_index
-_classify_evidence    = _S._classify_evidence
-_calibrate_evidence   = _S._calibrate_evidence
+_load                    = _S._load
+_build_os_client         = _S._build_os_client
+_inject_os               = _S._inject_os
+_lookup_ci_from_index    = _S._lookup_ci_from_index
+_classify_evidence       = _S._classify_evidence
+_classify_evidence_batch = _S._classify_evidence_batch
+_calibrate_evidence      = _S._calibrate_evidence
 _numeric_gate_pattern = _S._numeric_gate_pattern
 _NUMERIC_GATE_TYPES   = _S._NUMERIC_GATE_TYPES
 RETRIEVER_MAP         = _S.RETRIEVER_MAP
@@ -133,16 +134,32 @@ def _s2_retrieve(req: dict) -> dict:
     if req.get("_failed") or req.get("_early_exit"):
         return req
     strategies = req.get("classification", {}).get("strategies", list(RETRIEVER_MAP.keys()))
-    retriever_results: list[dict] = []
-    timings: dict[str, float]     = {}
-    for strategy in strategies:
-        if strategy not in RETRIEVER_MAP:
-            continue
-        mod = _load(RETRIEVER_MAP[strategy], f"search_{strategy}")
+    valid = [(s, RETRIEVER_MAP[s]) for s in strategies if s in RETRIEVER_MAP]
+    if not valid:
+        req["retriever_results"]       = []
+        req["_st"]["retrievers"]       = {}
+        req["_st"]["retrievers_total"] = 0.0
+        return req
+
+    def _run_one(s_path: tuple[str, str]) -> tuple[str, dict, float]:
+        strategy, path = s_path
+        mod = _load(path, f"search_{strategy}")
         _inject_os(mod)
-        t0     = time.perf_counter()
+        t0 = time.perf_counter()
         result = mod._process(req)
-        timings[strategy] = round(time.perf_counter() - t0, 3)
+        elapsed = round(time.perf_counter() - t0, 3)
+        return strategy, result, elapsed
+
+    with ThreadPoolExecutor(max_workers=len(valid)) as pool:
+        raw = list(pool.map(_run_one, valid))
+
+    timings: dict[str, float] = {}
+    retriever_results = []
+    for strategy, result, elapsed in raw:
+        timings[strategy] = elapsed
+        # Merge vector sub-timings (body/heading/chunk) directly into the timings dict
+        for k_sub, v_sub in (result.pop("_sub_timings", None) or {}).items():
+            timings[k_sub] = v_sub
         retriever_results.append(result)
     req["retriever_results"]       = retriever_results
     req["_st"]["retrievers"]       = timings
@@ -247,16 +264,30 @@ def _s6_llm_verify(req: dict, skip_verify: bool = False) -> dict:
         _inject_os(verifier)
         call_times:  list[float] = []
         call_tokens: list[dict]  = []
-        orig = verifier._verify
 
+        # Patch sequential _verify (fallback path)
+        orig = verifier._verify
         def _timed(*a, **kw):
             _t = time.perf_counter()
             _r = orig(*a, **kw)
             call_times.append(round(time.perf_counter() - _t, 3))
             call_tokens.append(_r.get("_tokens", {"input": 0, "output": 0}))
             return _r
-
         verifier._verify = _timed
+
+        # Patch _verify_batch to capture batch-level call timing + tokens
+        orig_batch = verifier._verify_batch
+        def _timed_batch(*a, **kw):
+            _t = time.perf_counter()
+            results = orig_batch(*a, **kw)
+            call_times.append(round(time.perf_counter() - _t, 3))
+            call_tokens.append({
+                "input":  sum(r.get("_tokens", {}).get("input", 0) for r in results),
+                "output": sum(r.get("_tokens", {}).get("output", 0) for r in results),
+            })
+            return results
+        verifier._verify_batch = _timed_batch
+
         req = verifier._process(req)
         req["_st"]["per_verifier_call_s"]    = {i + 1: t for i, t in enumerate(call_times)}
         req["_st"]["actual_verifier_tokens"] = {
@@ -308,19 +339,21 @@ def _s9_evidence_classify(req: dict, skip_verify: bool = False) -> dict:
     doc_ctx   = req.get("document_context", {})
 
     if hits and not skip_verify:
-        for hit in hits:
-            if hit.get("verdict") in ("YES", "MAYBE"):
-                _t = time.perf_counter()
-                ec = _classify_evidence(ci_text, hit, doc_ctx)
-                ec_times.append(round(time.perf_counter() - _t, 3))
+        to_classify = [h for h in hits if h.get("verdict") in ("YES", "MAYBE")]
+        if to_classify:
+            _t_batch = time.perf_counter()
+            classified = _classify_evidence_batch(ci_text, to_classify, doc_ctx)
+            ec_times.append(round(time.perf_counter() - _t_batch, 3))
+            for hit, ec in zip(to_classify, classified):
                 tok = ec.pop("_ec_tokens", {"input": 0, "output": 0})
                 ec_tokens["input"]  += tok["input"]
                 ec_tokens["output"] += tok["output"]
-                ec = _calibrate_evidence(hit, ec)
-                hit.update(ec)
-                if _is_related(ec["evidence_type"]):
+                ec_clean = {k: ec[k] for k in ("evidence_type", "evidence_confidence", "evidence_reason") if k in ec}
+                ec_clean = _calibrate_evidence(hit, ec_clean)
+                hit.update(ec_clean)
+                if _is_related(ec_clean["evidence_type"]):
                     hit["verdict"] = "RELATED"
-                elif ec["evidence_type"] == "UNRELATED":
+                elif ec_clean["evidence_type"] == "UNRELATED":
                     hit["verdict"] = "NO"
         hits.sort(key=lambda h: (
             _EVIDENCE_RANK.get(h.get("evidence_type", "BACKGROUND"), 4),
@@ -370,6 +403,21 @@ def _print_stage_timing(stage_wall: dict[str, float], all_results: list[dict],
     for stage_key, _ in stage_map:
         wc = stage_wall.get(stage_key, 0.0)
         print(f"  {stage_key:<{W1}}  {wc:>{W2}.2f}s")
+        if stage_key == "S2:retrieve":
+            # Per-CI retriever timings table
+            all_strategies = sorted({s for t in all_t for s in t.get("retrievers", {})})
+            if all_strategies:
+                col = 8
+                header = f"    {'CI':<5}" + "".join(f"{s[:col]:>{col+2}}" for s in all_strategies)
+                print(header)
+                print(f"    {'─'*5}" + "".join(f"{'─'*(col+2)}" for _ in all_strategies))
+                for idx, (t, r) in enumerate(zip(all_t, all_results), 1):
+                    ci_id = (r.get("ci") or {}).get("id", idx)
+                    row = f"    {ci_id!s:<5}"
+                    for s in all_strategies:
+                        v = t.get("retrievers", {}).get(s)
+                        row += f"{(f'{v:.2f}s' if v is not None else '-'):>{col+2}}"
+                    print(row)
 
     print(f"  {'─' * W1}  {'─' * W2}")
     print(f"  {'TOTAL':<{W1}}  {total_wall:>{W2}.2f}s")
@@ -489,6 +537,10 @@ def _save_results_staged(all_results: list[dict], args, out_path: Path,
     output["timing_summary"] = {
         "classifier":              {"wall_clock_s": stage_wall.get("S1:classify", 0.0)},
         "retrievers_total":        {"wall_clock_s": stage_wall.get("S2:retrieve", 0.0)},
+        "per_ci_retrievers": [
+            {"ci_id": (r.get("ci") or {}).get("id", i), "retrievers": t.get("retrievers", {})}
+            for i, (r, t) in enumerate(zip(all_results, all_t), 1)
+        ],
         "aggregator":              {"wall_clock_s": stage_wall.get("S3:aggregate", 0.0)},
         "context_expander":        {"wall_clock_s": stage_wall.get("S4:context_expand", 0.0)},
         "reranker":                {"wall_clock_s": stage_wall.get("S5:rerank", 0.0)},
@@ -667,7 +719,7 @@ def main() -> None:
         ("S2:retrieve",          lambda r: _s2_retrieve(r),                         n_workers),
         ("S3:aggregate",         lambda r: _s3_aggregate(r),                        n_workers),
         ("S4:context_expand",    lambda r: _s4_context_expand(r),                   n_workers),
-        ("S5:rerank",            lambda r: _s5_rerank(r, args.skip_rerank),         1),
+        ("S5:rerank",            lambda r: _s5_rerank(r, args.skip_rerank),         1),         # CrossEncoder is not thread-safe; load once, score sequentially
         ("S6:llm_verify",        lambda r: _s6_llm_verify(r, args.skip_verify),     n_workers),
         ("S7:highlight",         lambda r: _s7_highlight_extract(r),                n_workers),
         ("S8:merge",             lambda r: _s8_merge(r),                            n_workers),
@@ -694,6 +746,16 @@ def main() -> None:
         done_early = sum(1 for r in all_reqs if r.get("_early_exit"))
         print(f"  [{stage_key}]  done in {elapsed:.1f}s"
               + (f"  ({done_early} early-exit)" if done_early else ""))
+
+        if stage_key == "S2:retrieve":
+            # Quick per-CI retriever breakdown for early debugging
+            for req in all_reqs:
+                ret = req.get("_st", {}).get("retrievers", {})
+                if not ret:
+                    continue
+                ci_id = (req.get("ci") or {}).get("id", "?")
+                parts = "  ".join(f"{k}={v:.2f}s" for k, v in sorted(ret.items()))
+                print(f"    CI {ci_id}: {parts}")
 
         if stage_key == "S5:rerank" and not args.skip_rerank:
             try:

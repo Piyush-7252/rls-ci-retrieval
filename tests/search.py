@@ -184,7 +184,14 @@ def _build_os_client():
         timeout          = 60,
         max_retries      = 2,
         retry_on_timeout = True,
+        maxsize          = 128,  # parallel retrievers × workers; default 10 causes pool exhaustion
     )
+    # opensearch-py ignores maxsize for RequestsHttpConnection — patch HTTPAdapter directly
+    from requests.adapters import HTTPAdapter as _HA
+    for _conn in _os_client.transport.connection_pool.connections:
+        if hasattr(_conn, "session"):
+            _conn.session.mount("https://", _HA(pool_maxsize=256, pool_connections=64))
+            _conn.session.mount("http://",  _HA(pool_maxsize=256, pool_connections=64))
     return _os_client
 
 
@@ -346,6 +353,77 @@ def _classify_evidence(ci_text: str, hit: dict, doc_ctx: dict) -> dict:
             "evidence_type":       "RELATED_EFFICACY",
             "evidence_confidence": 0.0,
             "evidence_reason":     f"classification failed: {exc}",
+            "_ec_tokens":          {"input": 0, "output": 0},
+        }
+
+
+def _classify_evidence_batch(ci_text: str, hits: list[dict], doc_ctx: dict) -> list[dict]:
+    """Classify all YES/MAYBE hits in one Bedrock call; falls back to sequential on error."""
+    if not hits:
+        return []
+    if len(hits) == 1:
+        return [_classify_evidence(ci_text, hits[0], doc_ctx)]
+
+    doc_tag = ""
+    if doc_ctx:
+        drugs   = ", ".join(doc_ctx.get("primary_drugs", [])[:2])
+        studies = ", ".join(doc_ctx.get("study_ids", [])[:1])
+        if drugs or studies:
+            doc_tag = f"Document \u2014 Drug: {drugs} | Study: {studies}\n\n"
+
+    blocks = []
+    for i, h in enumerate(hits, 1):
+        span = (h.get("match_span") or h.get("text", ""))[:300]
+        blocks.append(f"--- HIT {i} (p{h.get('match_page','?')}) ---\n\"{span}\"")
+
+    labels = ("DIRECT|SUPPORTING|RELATED_OBJECTIVE|RELATED_PROTOCOL|RELATED_DOSE|"
+               "RELATED_POPULATION|RELATED_SAFETY|RELATED_EFFICACY|RELATED_DEFINITION")
+    prompt = (
+        f"You are a clinical evidence analyst.\n\n{doc_tag}"
+        f'CI: "{ci_text}"\n\n'
+        f"For each excerpt below, classify the evidence relationship.\n"
+        f"Valid labels: {labels}\n"
+        f"Reply ONLY with a JSON ARRAY of {len(hits)} objects in order:\n"
+        f'[{{"evidence_type":"LABEL","confidence":<0.0-1.0>,"reason":"<one sentence>"}}, ...]\n\n'
+        + "\n\n".join(blocks)
+    )
+    try:
+        import boto3 as _boto3
+        br   = _boto3.client("bedrock-runtime", region_name=AWS_REGION)
+        body = {"anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": min(100 * len(hits), 8000),  # ~41 actual/hit; cap at API limit
+                "messages": [{"role": "user", "content": prompt}]}
+        resp      = br.invoke_model(modelId=VERIFIER_MODEL, contentType="application/json",
+                                    accept="application/json", body=json.dumps(body).encode())
+        resp_body = json.loads(resp["body"].read())
+        raw       = resp_body["content"][0]["text"].strip()
+        import re as _re
+        raw = _re.sub(r"^```(?:json)?\s*", "", raw); raw = _re.sub(r"\s*```$", "", raw.strip())
+        brace = raw.find("["); raw = raw[brace:] if brace >= 0 else raw
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list) or len(parsed) < len(hits):
+            raise ValueError(f"Expected {len(hits)} items, got {len(parsed)}")
+        parsed = parsed[:len(hits)]
+        usage = resp_body.get("usage", {})
+        in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
+        per = max(1, in_tok // len(hits)), max(1, out_tok // len(hits))
+        results = []
+        for h, item in zip(hits, parsed):
+            ev = item.get("evidence_type", "RELATED_EFFICACY")
+            if ev == "RELATED": ev = "RELATED_EFFICACY"
+            results.append({**h,
+                "evidence_type":       ev,
+                "evidence_confidence": float(item.get("confidence", 0.5)),
+                "evidence_reason":     item.get("reason", ""),
+                "_ec_tokens":          {"input": per[0], "output": per[1]},
+            })
+        return results
+    except Exception as exc:
+        logger.warning("[EC] batch failed (%s) \u2014 falling back to sequential", exc)
+        return [_classify_evidence(ci_text, h, doc_ctx) for h in hits]
+
+
+_PLACEHOLDER_EC_RETURN = {  # silences the original except block's missing key
             "_ec_tokens":          {"input": 0, "output": 0},
         }
 

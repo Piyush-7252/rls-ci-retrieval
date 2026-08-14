@@ -58,6 +58,7 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
         "settings": {
             "number_of_shards":   n_shards,
             "number_of_replicas": 0,
+            "index.knn":          True,
             "refresh_interval":   "30s",
         },
         "mappings": {
@@ -101,12 +102,10 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
                     }
                 },
                 # Ontology
-                # ontology_expansions is a list of dicts — stored, not indexed
-                # (no retriever queries it directly; ontology_retriever uses normalized_text)
                 "ontology_expansions":  {"type": "object", "enabled": False},
                 "ontology_synonyms":    {"type": "keyword", "index": False},
-                # Vectors
-                "dense_vector":         {"type": "float", "index": False},
+                # Vectors — dense_vector is knn-searched; heading is stored only
+                "dense_vector":         _knn_field(1024),
                 "heading_dense_vector": {"type": "float", "index": False},
                 "sparse_vector_json":   {"type": "keyword", "index": False},
                 # Metadata
@@ -116,12 +115,25 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
     }
 
 
+def _knn_field(dim: int) -> dict:
+    return {
+        "type":      "knn_vector",
+        "dimension": dim,
+        "method": {
+            "name":       "hnsw",
+            "engine":     "faiss",
+            "space_type": "innerproduct",
+            "parameters": {"ef_construction": 128, "m": 16},
+        },
+    }
+
+
 def _objects_mapping() -> dict:
     return {
         "settings": {
-            "number_of_shards":   1,
+            "number_of_shards":   5,
             "number_of_replicas": 0,
-            "knn":                False,
+            "index.knn":          True,
             "refresh_interval":   "30s",
         },
         "mappings": {
@@ -167,9 +179,9 @@ def _objects_mapping() -> dict:
                 "parent_heading":    {"type": "keyword"},
                 "prev_object_pos":   {"type": "integer"},
                 "next_object_pos":   {"type": "integer"},
-                # Vectors
-                "dense_vector":         {"type": "float", "index": False},
-                "heading_dense_vector": {"type": "float", "index": False},
+                # Vectors — both fields are knn-searched in vector_retriever
+                "dense_vector":         _knn_field(1024),
+                "heading_dense_vector": _knn_field(1024),
                 # NER entities
                 "entities": {
                     "type": "nested",

@@ -68,6 +68,11 @@ def _get_os():
             max_retries=2,
             retry_on_timeout=True,
         )
+        from requests.adapters import HTTPAdapter as _HA
+        for _conn in _os_client.transport.connection_pool.connections:
+            if hasattr(_conn, "session"):
+                _conn.session.mount("https://", _HA(pool_maxsize=64, pool_connections=16))
+                _conn.session.mount("http://",  _HA(pool_maxsize=64, pool_connections=16))
     return _os_client
 
 
@@ -118,10 +123,15 @@ def _process(req: dict) -> dict:
             ctx_keys.append(ctx_key)
             _ctx_key_set.add(ctx_key)
 
-    # ── Phase 2: batch-fetch all chunks (mget + msearch) ──────────────────────
-    chunk_cache: dict[str, dict]         = _mget_chunks(list(dict.fromkeys(primary_ids)))
-    idx_cache:   dict[int, str]          = _msearch_by_idx(document_id, list(idx_needed))
-    ctx_cache:   dict[tuple, list[dict]] = _msearch_context_objects(document_id, ctx_keys)
+    # ── Phase 2: run all 3 fetches concurrently (they're independent) ───────────
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    with _TPE(max_workers=3) as _pool:
+        _f_chunk = _pool.submit(_mget_chunks, list(dict.fromkeys(primary_ids)))
+        _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed))
+        _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys)
+        chunk_cache: dict[str, dict]         = _f_chunk.result()
+        idx_cache:   dict[int, str]          = _f_idx.result()
+        ctx_cache:   dict[tuple, list[dict]] = _f_ctx.result()
 
     logger.info(
         "[Context Expander] search_id=%s  candidates=%d  idx_lookups=%d"
@@ -418,6 +428,95 @@ def _msearch_by_idx(document_id: str, idx_list: list[int]) -> dict[int, str]:
     except Exception as exc:
         logger.warning("[Context Expander] msearch by idx failed: %s", exc)
         return {}
+
+
+def _fetch_context_objects_merged(
+    document_id: str,
+    ctx_keys:    list[tuple[str, int | None]],
+) -> dict[tuple, list[dict]]:
+    """Fetch context objects for all candidates in ONE OpenSearch terms query.
+
+    Instead of N range sub-queries, expand every center_pos by ±CONTEXT_WINDOW,
+    deduplicate all resulting positions, then issue a single terms(global_position)
+    query.  For 190 dispersed candidates × 7 positions each = ~1,288 unique
+    positions vs 190 individual searches.
+    """
+    if not ctx_keys:
+        return {}
+
+    result: dict[tuple, list[dict]] = {}
+    with_pos    = [(key, key[1]) for key in ctx_keys if key[1] is not None]
+    without_pos = [key for key in ctx_keys if key[1] is None]
+
+    # ── Chunk-only fallbacks (no global_position) — still need per-chunk queries ──
+    if without_pos:
+        body: list[dict] = []
+        for key in without_pos:
+            body.append({})
+            body.append({
+                "size": 100,
+                "query": {"bool": {"filter": [{"term": {"parent_chunk_id": key[0]}}]}},
+                "sort": [{"global_position": "asc"}],
+            })
+        try:
+            resp = _get_os().msearch(body=body, index=SEMANTIC_OBJECTS_INDEX)
+            for i, r in enumerate(resp.get("responses", [])):
+                result[without_pos[i]] = [h["_source"] for h in r.get("hits", {}).get("hits", [])]
+        except Exception as exc:
+            logger.warning("[Context Expander] chunk-only msearch failed: %s", exc)
+            for key in without_pos:
+                result[key] = []
+
+    if not with_pos:
+        return result
+
+    # ── Expand all center positions to full ±CONTEXT_WINDOW neighbourhoods ────
+    needed: set[int] = set()
+    for _, center_pos in with_pos:
+        for offset in range(-CONTEXT_WINDOW, CONTEXT_WINDOW + 1):
+            needed.add(center_pos + offset)
+
+    logger.info(
+        "[Context Expander] ctx_keys=%d  needed_positions=%d  os_queries=1",
+        len(with_pos), len(needed),
+    )
+
+    # ── ONE terms query — all needed positions in a single request ────────────
+    pos_to_objs: dict[int, list[dict]] = {}
+    try:
+        fetch_size = min(len(needed) * 6, 10000)
+        resp = _get_os().search(
+            index=SEMANTIC_OBJECTS_INDEX,
+            body={
+                "size": fetch_size,
+                "query": {"bool": {"filter": [
+                    {"term":  {"document_id": document_id}},
+                    {"terms": {"global_position": sorted(needed)}},
+                ]}},
+                "sort": [{"global_position": "asc"}],
+            },
+        )
+        hits = resp.get("hits", {}).get("hits", [])
+        logger.info(
+            "[Context Expander] needed_positions=%d  returned_objects=%d  fetch_size=%d",
+            len(needed), len(hits), fetch_size,
+        )
+        for h in hits:
+            src  = h["_source"]
+            gpos = src.get("global_position")
+            if gpos is not None:
+                pos_to_objs.setdefault(gpos, []).append(src)
+    except Exception as exc:
+        logger.warning("[Context Expander] terms context fetch failed: %s", exc)
+
+    # ── Resolve per-key neighborhood from the local position dict ─────────────
+    for key, center_pos in with_pos:
+        neighborhood = []
+        for offset in range(-CONTEXT_WINDOW, CONTEXT_WINDOW + 1):
+            neighborhood.extend(pos_to_objs.get(center_pos + offset, []))
+        result[key] = sorted(neighborhood, key=lambda o: o.get("global_position", 0))
+
+    return result
 
 
 def _msearch_context_objects(

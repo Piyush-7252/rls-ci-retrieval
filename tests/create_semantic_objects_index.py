@@ -41,10 +41,10 @@ def _get_os():
 
 MAPPING = {
     "settings": {
-        "number_of_shards":   1,
-        "number_of_replicas": 0,          # 0 for single-node dev; bump to 1 for multi-node
-        "knn":                False,      # set to True when using k-NN plugin
-        "refresh_interval":   "30s",      # reduce refresh overhead during bulk indexing
+        "number_of_shards":   5,
+        "number_of_replicas": 1,
+        "index.knn":          True,
+        "refresh_interval":   "30s",
     },
     "mappings": {
         # ── Safety net: any NEW string field added to _build_object_docs or
@@ -96,14 +96,15 @@ MAPPING = {
             "parent_heading":    {"type": "keyword"},
             "prev_object_pos":   {"type": "integer"},
             "next_object_pos":   {"type": "integer"},
-            # Stored as float array; change to "knn_vector" when k-NN plugin is ready
             "dense_vector": {
-                "type":  "float",
-                "index": False,
+                "type":      "knn_vector",
+                "dimension": 1024,
+                "method":    {"name": "hnsw", "engine": "faiss", "space_type": "innerproduct", "parameters": {"ef_construction": 128, "m": 16}},
             },
             "heading_dense_vector": {
-                "type":  "float",
-                "index": False,
+                "type":      "knn_vector",
+                "dimension": 1024,
+                "method":    {"name": "hnsw", "engine": "faiss", "space_type": "innerproduct", "parameters": {"ef_construction": 128, "m": 16}},
             },
             "entities": {
                 "type": "nested",

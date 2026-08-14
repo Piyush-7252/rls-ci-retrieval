@@ -423,7 +423,8 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             "prev_object_pos":  obj.get("prev_object_pos"),
             "next_object_pos":  obj.get("next_object_pos"),
             "dense_vector":     obj.get("embedding", []),
-            "heading_dense_vector": chunk.get("embedding", {}).get("heading_dense_vector", []),
+            # knn_vector rejects empty arrays; omit the field entirely when absent
+            **({"heading_dense_vector": _hdv} if (_hdv := chunk.get("embedding", {}).get("heading_dense_vector")) else {}),
             "entities":         obj.get("entities", []),
             # ── ClinicalObject enrichment (single source of truth) ────────────
             **build_enrichment_fields(obj),
