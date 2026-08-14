@@ -50,7 +50,7 @@ def now_utc() -> str:
 
 def dispatch(doc_id: str, index: int, total: int, suffix: str = "") -> bool:
     s3_key          = f"{TENANT}/{PROJECT_ID}/documents/{doc_id}.pdf"
-    full_tables_key = f"{PROJECT_ID}/extraction/{TENANT}/{doc_id}/full_tables.json"
+    full_tables_key = f"extraction/{TENANT}/{PROJECT_ID}/{doc_id}/full_tables.json"
     cache_path      = CACHE_BASE / doc_id / "full_tables.json"
 
     print(f"\n{'='*70}")
