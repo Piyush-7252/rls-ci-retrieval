@@ -47,9 +47,10 @@ def _get_os():
 
 MAPPING = {
     "settings": {
-        "number_of_shards":   5,      # 5 shards matches the live index
-        "number_of_replicas": 0,      # 0 for single-node dev; bump to 1 for multi-node
-        "refresh_interval":   "30s",  # reduce refresh overhead during bulk indexing
+        "number_of_shards":   5,
+        "number_of_replicas": 1,
+        "index.knn":          True,
+        "refresh_interval":   "30s",
     },
     "mappings": {
         # ── Safety net: any NEW string field added to _build_chunk_doc in the
@@ -113,11 +114,16 @@ MAPPING = {
             "ontology_synonyms":    {"type": "keyword", "index": False},
 
             # ── Vectors ───────────────────────────────────────────────────────
-            # Stored as float arrays.  index=False means no inverted-index or
-            # HNSW graph is built for these; they are returned in _source only.
-            # Change to "knn_vector" when the k-NN plugin is enabled.
-            "dense_vector":         {"type": "float", "index": False},
-            "heading_dense_vector": {"type": "float", "index": False},
+            "dense_vector": {
+                "type":      "knn_vector",
+                "dimension": 1024,
+                "method":    {"name": "hnsw", "engine": "faiss", "space_type": "innerproduct", "parameters": {"ef_construction": 128, "m": 16}},
+            },
+            "heading_dense_vector": {
+                "type":      "knn_vector",
+                "dimension": 1024,
+                "method":    {"name": "hnsw", "engine": "faiss", "space_type": "innerproduct", "parameters": {"ef_construction": 128, "m": 16}},
+            },
             # sparse_vector_json is a raw JSON string — not searched, just stored.
             "sparse_vector_json":   {"type": "keyword", "index": False},
 

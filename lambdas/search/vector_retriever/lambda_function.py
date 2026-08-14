@@ -130,12 +130,24 @@ def _process(req: dict) -> dict:
     page_count = int(req.get("document_page_count", 0))
     k          = _adaptive_k(page_count, TOP_K)
 
-    # Lane 1: body-vector search (object text vs CI embedding)
-    obj_hits   = _vector_search_objects(ci_embedding, document_id, k)
-    # Lane 2: heading-vector search (heading text vs CI embedding)
-    head_hits  = _vector_search_objects_heading(ci_embedding, document_id, k)
-    # Lane 3: chunk-level fallback for broad recall
-    chunk_hits = _vector_search_chunks(ci_embedding, document_id, k)
+    # Lanes 1-3 are independent — run concurrently to eliminate serial latency
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    import time as _time
+    with _TPE(max_workers=3) as _pool:
+        _ts_obj  = _time.perf_counter()
+        _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, k)
+        _ts_head = _time.perf_counter()
+        _f_head  = _pool.submit(_vector_search_objects_heading, ci_embedding, document_id, k)
+        _ts_chunk = _time.perf_counter()
+        _f_chunk = _pool.submit(_vector_search_chunks,          ci_embedding, document_id, k)
+        obj_hits   = _f_obj.result();   _te_obj   = _time.perf_counter()
+        head_hits  = _f_head.result();  _te_head  = _time.perf_counter()
+        chunk_hits = _f_chunk.result(); _te_chunk = _time.perf_counter()
+    _sub_timings = {
+        "vector_body":    round(_te_obj   - _ts_obj,   3),
+        "vector_heading": round(_te_head  - _ts_head,  3),
+        "vector_chunk":   round(_te_chunk - _ts_chunk, 3),
+    }
 
     # Merge: body hits first (most precise), then heading hits, then chunk fallback
     seen_chunks: set[str] = set()
@@ -161,8 +173,9 @@ def _process(req: dict) -> dict:
         hits = _with_ties(hits, k)
 
     return {
-        "retriever": "vector",
-        "hits":      hits,
+        "retriever":    "vector",
+        "hits":         hits,
+        "_sub_timings": _sub_timings,
     }
 
 
@@ -176,22 +189,30 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, k
                        if VECTOR_EXCLUDE_TYPES else [])
 
     body = {
-        "size": max(FETCH_SIZE, k + TIE_BUFFER),
+        "size": k + TIE_BUFFER,
         "query": {
-            "bool": {
-                "filter":   filter_clause,
-                "must":     [{"exists": {"field": "dense_vector"}}],
-                **({"must_not": must_not_clause} if must_not_clause else {}),
+            "knn": {
+                "dense_vector": {
+                    "vector": ci_embedding,
+                    "k":      k + TIE_BUFFER,
+                    **({
+                        "filter": {
+                            "bool": {
+                                "filter": filter_clause,
+                                **({"must_not": must_not_clause} if must_not_clause else {}),
+                            }
+                        }
+                    } if filter_clause or must_not_clause else {}),
+                }
             }
         },
         "_source": [
             "object_id", "parent_chunk_id", "document_id",
             "position", "global_position", "type", "text", "page", "bbox",
-            "display_spans", "dense_vector",
+            "display_spans",
             "section_category", "heading_path", "semantic_path",
             "section_confidence", "document_position",
             "chunk_idx", "parent_chunk_idx", "prev_chunk_idx", "next_chunk_idx",
-            # Semantic layer: canonical identity fields for reranker
             "effective_facts", "clinical_identity",
             "treatment_identity", "endpoint_identity", "population_identity",
             "modality", "study_context", "statement_type",
@@ -201,36 +222,21 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, k
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] semantic-objects search failed: %s", exc)
+        logger.warning("[Vector Retriever] semantic-objects knn failed: %s", exc)
         return []
-
-    raw_hits = resp.get("hits", {}).get("hits", [])
-    scored: list[tuple[float, dict]] = []
-    for h in raw_hits:
-        src = h.get("_source", {})
-        vec = src.get("dense_vector", [])
-        if not vec:
-            continue
-        score = _cosine(ci_embedding, vec)
-        scored.append((score, src))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
 
     return [
         {
-            "chunk_id":      s["parent_chunk_id"],
-            "score":         round(score, 4),
-            "page_start":    s.get("page", 0),
-            "page_end":      s.get("page", 0),
-            "snippet":       s.get("text", "")[:200],
-            # retrieved_type: the object type as stored in OpenSearch at retrieval time.
-            # Preserved here so downstream attribution (origin summary, provenance) can
-            # distinguish e.g. "vector/paragraph" from "vector/sentence" even if
-            # context_expander later replaces matched_object with a different type.
-            "retrieved_type": s.get("type", "unknown"),
-            "matched_object": _build_matched_object(s),
+            "chunk_id":       h["_source"]["parent_chunk_id"],
+            "score":          round(h["_score"], 4),
+            "page_start":     h["_source"].get("page", 0),
+            "page_end":       h["_source"].get("page", 0),
+            "snippet":        h["_source"].get("text", "")[:200],
+            "retrieved_type": h["_source"].get("type", "unknown"),
+            "matched_object": _build_matched_object(h["_source"]),
         }
-        for score, s in scored[:k + TIE_BUFFER]
+        for h in resp.get("hits", {}).get("hits", [])
+        if h.get("_source", {}).get("parent_chunk_id")
     ]
 
 
@@ -290,16 +296,23 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     must_not_clause = ([{"terms": {"type": VECTOR_EXCLUDE_TYPES}}]
                        if VECTOR_EXCLUDE_TYPES else [])
     body = {
-        "size": FETCH_SIZE,
-        "query": {"bool": {
-            "filter":   filter_clause,
-            "must":     [{"exists": {"field": "heading_dense_vector"}}],
-            **({"must_not": must_not_clause} if must_not_clause else {}),
-        }},
+        "size": k + TIE_BUFFER,
+        "query": {
+            "knn": {
+                "heading_dense_vector": {
+                    "vector": ci_embedding,
+                    "k":      k + TIE_BUFFER,
+                    **({"filter": {"bool": {
+                        "filter": filter_clause,
+                        **({"must_not": must_not_clause} if must_not_clause else {}),
+                    }}} if filter_clause or must_not_clause else {}),
+                }
+            }
+        },
         "_source": [
             "object_id", "parent_chunk_id", "document_id",
             "position", "global_position", "type", "text", "page", "bbox",
-            "display_spans", "heading_dense_vector",
+            "display_spans",
             "section_category", "heading_path", "semantic_path",
             "section_confidence", "document_position",
             "chunk_idx", "parent_chunk_idx", "prev_chunk_idx", "next_chunk_idx",
@@ -311,85 +324,61 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] heading vector search failed: %s", exc)
+        logger.warning("[Vector Retriever] heading knn failed: %s", exc)
         return []
 
-    raw_hits = resp.get("hits", {}).get("hits", [])
-    scored: list[tuple[float, dict]] = []
-    for h in raw_hits:
-        src = h.get("_source", {})
-        vec = src.get("heading_dense_vector", [])
-        if not vec:
-            continue
-        score = _cosine(ci_embedding, vec) * 0.90   # slight penalty vs body search
-        scored.append((score, src))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
     return [
         {
-            "chunk_id":      s["parent_chunk_id"],
-            "score":         round(score, 4),
-            "page_start":    s.get("page", 0),
-            "page_end":      s.get("page", 0),
-            "snippet":       s.get("text", "")[:200],
-            "retrieved_type": s.get("type", "unknown"),
-            "matched_object": _build_matched_object(s),
+            "chunk_id":       h["_source"]["parent_chunk_id"],
+            "score":          round(h["_score"] * 0.90, 4),
+            "page_start":     h["_source"].get("page", 0),
+            "page_end":       h["_source"].get("page", 0),
+            "snippet":        h["_source"].get("text", "")[:200],
+            "retrieved_type": h["_source"].get("type", "unknown"),
+            "matched_object": _build_matched_object(h["_source"]),
         }
-        for score, s in scored[:k + TIE_BUFFER]
+        for h in resp.get("hits", {}).get("hits", [])
+        if h.get("_source", {}).get("parent_chunk_id")
     ]
 
 
 def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
-    """
-    Fallback: search document-chunks for broad recall.
-    Returns hits WITHOUT matched_object (context_expander handles those).
-    """
+    """KNN search on document-chunks dense_vector (chunk-level fallback)."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
 
     body = {
-        "size": FETCH_SIZE,
+        "size": k + TIE_BUFFER,
         "query": {
-            "bool": {
-                "filter": filter_clause,
-                "must":   [{"exists": {"field": "dense_vector"}}],
+            "knn": {
+                "dense_vector": {
+                    "vector": ci_embedding,
+                    "k":      k + TIE_BUFFER,
+                    **({
+                        "filter": {"bool": {"filter": filter_clause}}
+                    } if filter_clause else {}),
+                }
             }
         },
-        "_source": ["chunk_id", "document_id", "page_start", "page_end", "raw_text",
-                    "dense_vector"],
+        "_source": ["chunk_id", "document_id", "page_start", "page_end", "raw_text"],
     }
 
     try:
         resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] document-chunks search failed: %s", exc)
+        logger.warning("[Vector Retriever] document-chunks knn failed: %s", exc)
         return []
-
-    raw_hits = resp.get("hits", {}).get("hits", [])
-    scored: list[tuple[float, dict]] = []
-    for h in raw_hits:
-        src = h.get("_source", {})
-        vec = src.get("dense_vector", [])
-        if not vec:
-            continue
-        score = _cosine(ci_embedding, vec)
-        scored.append((score, src))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
 
     return [
         {
-            "chunk_id":      s["chunk_id"],
-            "score":         round(score, 4),
-            "page_start":    s.get("page_start", 0),
-            "page_end":      s.get("page_end",   0),
-            "snippet":       s.get("raw_text", "")[:200],
-            # retrieved_type: "chunk" — context_expander will fetch context_objects by position
-            # and may pick a sentence/paragraph within; recording "chunk" here preserves
-            # the true retrieval origin for ablation attribution.
+            "chunk_id":       h["_source"]["chunk_id"],
+            "score":          round(h["_score"], 4),
+            "page_start":     h["_source"].get("page_start", 0),
+            "page_end":       h["_source"].get("page_end",   0),
+            "snippet":        h["_source"].get("raw_text", "")[:200],
             "retrieved_type": "chunk",
-            # no matched_object — context_expander will fetch context_objects by position
         }
-        for score, s in scored[:k + TIE_BUFFER]
+        for h in resp.get("hits", {}).get("hits", [])
+        if h.get("_source", {}).get("chunk_id")
     ]
 
 
