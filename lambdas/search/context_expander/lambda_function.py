@@ -524,9 +524,11 @@ def _fetch_context_objects_merged(
     )
 
     # ── ONE terms query — all needed positions in a single request ────────────
+    import time as _time
     pos_to_objs: dict[int, list[dict]] = {}
     try:
         fetch_size = min(len(needed) * 6, 10000)
+        _t_os = _time.perf_counter()
         resp = _get_os().search(
             index=SEMANTIC_OBJECTS_INDEX,
             body={
@@ -538,10 +540,11 @@ def _fetch_context_objects_merged(
                 "sort": [{"global_position": "asc"}],
             },
         )
+        os_elapsed_ms = round((_time.perf_counter() - _t_os) * 1000)
         hits = resp.get("hits", {}).get("hits", [])
         logger.info(
-            "[Context Expander] needed_positions=%d  returned_objects=%d  fetch_size=%d",
-            len(needed), len(hits), fetch_size,
+            "[Context Expander] needed_positions=%d  returned_objects=%d  fetch_size=%d  os_ms=%d",
+            len(needed), len(hits), fetch_size, os_elapsed_ms,
         )
         for h in hits:
             src  = h["_source"]
