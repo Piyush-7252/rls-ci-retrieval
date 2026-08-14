@@ -109,6 +109,7 @@ def _process(req: dict) -> dict:
     idx_needed:   set[int]                           = set()
     ctx_keys:     list[tuple[str, int | None]]       = []
     _ctx_key_set: set[tuple[str, int | None]]        = set()
+    page_lookups: set[tuple[str, int]]               = set()
 
     for c in candidates:
         cid      = c.get("chunk_id", "")
@@ -122,16 +123,28 @@ def _process(req: dict) -> dict:
         if ctx_key not in _ctx_key_set:
             ctx_keys.append(ctx_key)
             _ctx_key_set.add(ctx_key)
+        # Collect page-range neighbor keys for candidates without chunk_idx adjacency
+        if obj_meta.get("prev_chunk_idx") is None:
+            page_lookups.add(("page_end",   c.get("page_start", 0) - 1))
+        if obj_meta.get("next_chunk_idx") is None:
+            page_lookups.add(("page_start", c.get("page_end",   0) + 1))
 
-    # ── Phase 2: run all 3 fetches concurrently (they're independent) ───────────
+    # ── Phase 2: run all 4 fetches concurrently (they're independent) ──────────
     from concurrent.futures import ThreadPoolExecutor as _TPE
-    with _TPE(max_workers=3) as _pool:
-        _f_chunk = _pool.submit(_mget_chunks, list(dict.fromkeys(primary_ids)))
+    deduped_ids = list(dict.fromkeys(primary_ids))
+    with _TPE(max_workers=4) as _pool:
+        _f_chunk = _pool.submit(_mget_chunks, deduped_ids)
         _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed))
         _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys)
+        _f_page  = _pool.submit(_msearch_neighbors_by_page, document_id, list(page_lookups))
         chunk_cache: dict[str, dict]         = _f_chunk.result()
         idx_cache:   dict[int, str]          = _f_idx.result()
         ctx_cache:   dict[tuple, list[dict]] = _f_ctx.result()
+        page_cache:  dict[tuple, str]        = _f_page.result()
+    # Second mget pass for any IDs the first mget missed
+    missed = [cid for cid in deduped_ids if cid not in chunk_cache]
+    if missed:
+        chunk_cache.update(_mget_chunks(missed))
 
     logger.info(
         "[Context Expander] search_id=%s  candidates=%d  idx_lookups=%d"
@@ -141,7 +154,7 @@ def _process(req: dict) -> dict:
     )
 
     # ── Phase 3: expand each candidate from caches ────────────────────────────
-    expanded = [_expand(c, document_id, chunk_cache, idx_cache, ctx_cache) for c in candidates]
+    expanded = [_expand(c, document_id, chunk_cache, idx_cache, ctx_cache, page_cache) for c in candidates]
 
     if expanded:
         avg_chars = sum(e.get("current_text_chars", 0) for e in expanded) / len(expanded)
@@ -213,13 +226,13 @@ def _expand(
     chunk_cache: dict[str, dict],
     idx_cache:   dict[int, str],
     ctx_cache:   dict[tuple, list[dict]],
+    page_cache:  dict[tuple, str],
 ) -> dict:
     chunk_id   = candidate["chunk_id"]
     page_start = candidate.get("page_start", 0)
     page_end   = candidate.get("page_end",   0)
 
-    # Fetch the chunk's raw text — use mget cache, fall back to single GET
-    chunk_doc    = chunk_cache.get(chunk_id) or _fetch_chunk(chunk_id)
+    chunk_doc    = chunk_cache.get(chunk_id, {})
     current_text = chunk_doc.get("raw_text", "")
 
     # If candidate came from semantic-objects index it already has the matched object
@@ -269,12 +282,12 @@ def _expand(
     if prev_chunk_idx is not None:
         prev_text = idx_cache.get(prev_chunk_idx, "")
     else:
-        prev_text = _fetch_neighbor(document_id, page_end=page_start - 1)
+        prev_text = page_cache.get(("page_end", page_start - 1), "")
 
     if next_chunk_idx is not None:
         next_text = idx_cache.get(next_chunk_idx, "")
     else:
-        next_text = _fetch_neighbor(document_id, page_start=page_end + 1)
+        next_text = page_cache.get(("page_start", page_end + 1), "")
 
     parent_text = idx_cache.get(parent_chunk_idx, "") if parent_chunk_idx is not None else ""
 
@@ -399,6 +412,35 @@ def _mget_chunks(chunk_ids: list[str]) -> dict[str, dict]:
         }
     except Exception as exc:
         logger.warning("[Context Expander] mget failed, will fall back per-doc: %s", exc)
+        return {}
+
+
+def _msearch_neighbors_by_page(
+    document_id: str,
+    page_keys:   list[tuple[str, int]],  # ("page_end", val) or ("page_start", val)
+) -> dict[tuple, str]:
+    """Batch-fetch neighbor raw_text for candidates that lack chunk_idx adjacency info."""
+    if not page_keys or not document_id:
+        return {}
+    body: list[dict] = []
+    for field, val in page_keys:
+        body.append({})
+        body.append({
+            "size": 1,
+            "query": {"bool": {"filter": [
+                {"term": {"document_id": document_id}},
+                {"term": {field: val}},
+            ]}},
+            "_source": ["raw_text"],
+        })
+    try:
+        resp = _get_os().msearch(body=body, index=OPENSEARCH_INDEX)
+        return {
+            page_keys[i]: (r.get("hits", {}).get("hits") or [{}])[0].get("_source", {}).get("raw_text", "")
+            for i, r in enumerate(resp.get("responses", []))
+        }
+    except Exception as exc:
+        logger.warning("[Context Expander] page neighbor msearch failed: %s", exc)
         return {}
 
 
