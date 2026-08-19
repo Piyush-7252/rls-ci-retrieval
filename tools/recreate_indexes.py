@@ -236,6 +236,21 @@ def _objects_mapping() -> dict:
                         "start": {"type": "integer"},
                         "end":   {"type": "integer"},
                         "bbox":  {"type": "float", "index": False},
+                        "_sentence_span": {
+                            "type": "object",
+                            "enabled": True,
+                            "properties": {
+                                "text":                {"type": "keyword", "index": False},
+                                "page":                {"type": "integer"},
+                                "char_start":          {"type": "integer"},
+                                "char_end":            {"type": "integer"},
+                                "rects":               {"type": "float", "index": False},
+                                "source_object_id":    {"type": "keyword"},
+                                "source_span_ids":     {"type": "keyword"},
+                                "span_type":           {"type": "keyword"},
+                                "geometry_source":     {"type": "keyword"},
+                            }
+                        }
                     }
                 },
             }
