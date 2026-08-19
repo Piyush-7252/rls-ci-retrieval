@@ -49,6 +49,7 @@ import tempfile
 from typing import Any
 
 from shared.apryse_parser import parse_pages
+from shared.geometry import SentenceSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -190,25 +191,71 @@ def _is_page_boilerplate(bbox: list, page_height: float) -> bool:
     return bbox[1] > page_height * 0.88
 
 
-def _make_display_spans(text: str, kind: str, bbox: list | None = None) -> list[dict]:
+def _extract_sentence_rects(spans: list[dict], sent_start: int, sent_end: int) -> list[list[float]]:
     """
-    Produce display_spans for a semantic object.
+    Extract Apryse line-level rectangles for a spaCy sentence.
+
+    For a sentence with character offsets (sent_start, sent_end) within the
+    parent paragraph text, find which Apryse spans overlap with that range
+    and return their rects.
+
+    Args:
+        spans: list of {"text": str, "rect": list, "start": int, "end": int}
+               from _extract_span_geometry (apryse_parser.py)
+        sent_start: character offset where sentence starts (within paragraph)
+        sent_end: character offset where sentence ends (within paragraph)
+
+    Returns:
+        list[list[float]]: one rect per overlapping span ([x1, y1, x2, y2])
+                          or empty list if no spans (fallback to paragraph bbox)
+    """
+    rects = []
+    for span in spans:
+        span_start = span.get("start", 0)
+        span_end = span.get("end", 0)
+        span_rect = span.get("rect", [])
+
+        # Check if this span overlaps with the sentence range
+        if span_end > sent_start and span_start < sent_end:
+            if span_rect and len(span_rect) >= 4:
+                rects.append(span_rect)
+
+    return rects
+
+
+def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: int = 0, object_id: str | None = None, apryse_spans: list[dict] | None = None) -> list[dict]:
+    """
+    Produce display_spans for a semantic object, with geometry preservation.
+
+    Key principle: Preserve Apryse geometry (page + rects) at sentence-creation time
+    so that HighlightExtractor can select existing geometry rather than reverse-engineer it.
 
     - Paragraphs  → spaCy sentences, each with char start/end within the
-                    full paragraph text.  Used by the UI to highlight the
-                    exact matched sentence without re-splitting at query time.
+                    full paragraph text AND per-line geometry from Apryse spans.
+                    Used by the UI to highlight the exact matched sentence.
     - All others  → single span covering the whole text (table row, heading,
                     list item, form field, bullet, signature are atomic display
                     units with their own bbox).
 
-    Returns list of:
-        {"type": str, "text": str, "start": int, "end": int, "bbox": list}
+    Args:
+        text: paragraph/object text
+        kind: "paragraph" | "heading" | "table_row" | "list" | etc.
+        bbox: paragraph-level bounding box [x1, y1, x2, y2]
+        page: page number
+        object_id: retrieval object ID for traceability
+        apryse_spans: list of {"text": str, "rect": list, "start": int, "end": int}
+                     from apryse_parser._extract_span_geometry()
+                     If provided, enables per-line geometry extraction for sentences
+
+    Returns list of legacy dict format for backward compatibility:
+        {"type": str, "text": str, "start": int, "end": int, "bbox": list,
+         "_sentence_span": SentenceSpan object with full geometry metadata}
     """
     _bbox = bbox or []
+    _apryse_spans = apryse_spans or []
 
     if kind == "list":
-        # Each newline-delimited item becomes a list_item span, so the whole
-        # list is embedded as one unit but each bullet can be highlighted.
+        # Each newline-delimited item becomes a list_item span
         spans: list[dict] = []
         cursor = 0
         for line in text.split("\n"):
@@ -218,41 +265,193 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None) -> list[
                 if start == -1:
                     start = cursor
                 end = start + len(stripped)
-                spans.append({"type": "list_item", "text": stripped,
-                               "start": start, "end": end, "bbox": _bbox})
+                # Extract per-line geometry if available, otherwise use bbox
+                item_rects = _extract_sentence_rects(_apryse_spans, start, end)
+                if not item_rects and _bbox:
+                    item_rects = [_bbox]
+                    geom_source = "object_bbox"
+                else:
+                    geom_source = "apryse_span" if item_rects else "none"
+                
+                # Create SentenceSpan for traceability
+                span_obj = SentenceSpan(
+                    text=stripped,
+                    page=page,
+                    char_start=start,
+                    char_end=end,
+                    rects=item_rects,
+                    source_object_id=object_id,
+                    span_type="list_item",
+                    geometry_source=geom_source,
+                )
+                spans.append({
+                    "type": "list_item",
+                    "text": stripped,
+                    "start": start,
+                    "end": end,
+                    "bbox": _bbox,
+                    "_sentence_span": span_obj,
+                })
                 cursor = end
-        return spans or [{"type": "list_item", "text": text,
-                          "start": 0, "end": len(text), "bbox": _bbox}]
+        if spans:
+            return spans
+        # Fallback: whole list as one span
+        list_rects = _extract_sentence_rects(_apryse_spans, 0, len(text))
+        if not list_rects and _bbox:
+            list_rects = [_bbox]
+            geom_source = "object_bbox"
+        else:
+            geom_source = "apryse_span" if list_rects else "none"
+        
+        span_obj = SentenceSpan(
+            text=text,
+            page=page,
+            char_start=0,
+            char_end=len(text),
+            rects=list_rects,
+            source_object_id=object_id,
+            span_type="list_item",
+            geometry_source=geom_source,
+        )
+        return [{
+            "type": "list_item",
+            "text": text,
+            "start": 0,
+            "end": len(text),
+            "bbox": _bbox,
+            "_sentence_span": span_obj,
+        }]
 
     if kind != "paragraph":
-        return [{"type": kind, "text": text, "start": 0, "end": len(text), "bbox": _bbox}]
+        # For non-paragraph types (table_row, heading, etc.), try to get real spans
+        obj_rects = _extract_sentence_rects(_apryse_spans, 0, len(text))
+        if not obj_rects and _bbox:
+            obj_rects = [_bbox]
+            geom_source = "object_bbox"
+        else:
+            geom_source = "apryse_span" if obj_rects else "none"
+        
+        span_obj = SentenceSpan(
+            text=text,
+            page=page,
+            char_start=0,
+            char_end=len(text),
+            rects=obj_rects,
+            source_object_id=object_id,
+            span_type=kind,
+            geometry_source=geom_source,
+        )
+        return [{
+            "type": kind,
+            "text": text,
+            "start": 0,
+            "end": len(text),
+            "bbox": _bbox,
+            "_sentence_span": span_obj,
+        }]
 
+    # Paragraph: split into sentences, preserve geometry for each
     nlp = _get_nlp()
+    spans: list[dict] = []
+    
     if nlp is not None:
         doc = nlp(text)
-        spans = [
-            {"type": "sentence",
-             "text": sent.text,
-             "start": sent.start_char,
-             "end":   sent.end_char,
-             "bbox":  _bbox}   # paragraph block bbox shared across its sentences
-            for sent in doc.sents
-            if len(sent.text.strip()) >= _MIN_SPAN_CHARS
-        ]
+        for sent in doc.sents:
+            if len(sent.text.strip()) >= _MIN_SPAN_CHARS:
+                # Extract per-line geometry from Apryse spans if available
+                # Otherwise fallback to paragraph bbox
+                sent_rects = _extract_sentence_rects(_apryse_spans, sent.start_char, sent.end_char)
+                if not sent_rects and _bbox:
+                    # Fallback to paragraph bbox if no per-line geometry found
+                    sent_rects = [_bbox]
+                    geom_source = "object_bbox"
+                else:
+                    geom_source = "apryse_span" if sent_rects else "none"
+
+                # Create SentenceSpan with character positions and per-line geometry
+                span_obj = SentenceSpan(
+                    text=sent.text,
+                    page=page,
+                    char_start=sent.start_char,
+                    char_end=sent.end_char,
+                    rects=sent_rects,
+                    source_object_id=object_id,
+                    span_type="sentence",
+                    geometry_source=geom_source,
+                )
+                spans.append({
+                    "type": "sentence",
+                    "text": sent.text,
+                    "start": sent.start_char,
+                    "end": sent.end_char,
+                    "bbox": _bbox,
+                    "_sentence_span": span_obj,
+                })
     else:
         # regex fallback — no char offsets from split(), recompute via search
-        spans = []
         cursor = 0
         for part in _SENT_SPLIT_RE.split(text):
             part = part.strip()
             if len(part) >= _MIN_SPAN_CHARS:
                 start = text.find(part, cursor)
-                end   = start + len(part)
-                spans.append({"type": "sentence", "text": part,
-                               "start": start, "end": end, "bbox": _bbox})
+                end = start + len(part)
+                # Extract per-line geometry from Apryse spans if available
+                part_rects = _extract_sentence_rects(_apryse_spans, start, end)
+                if not part_rects and _bbox:
+                    part_rects = [_bbox]
+                    geom_source = "object_bbox"
+                else:
+                    geom_source = "apryse_span" if part_rects else "none"
+                
+                span_obj = SentenceSpan(
+                    text=part,
+                    page=page,
+                    char_start=start,
+                    char_end=end,
+                    rects=part_rects,
+                    source_object_id=object_id,
+                    span_type="sentence",
+                    geometry_source=geom_source,
+                )
+                spans.append({
+                    "type": "sentence",
+                    "text": part,
+                    "start": start,
+                    "end": end,
+                    "bbox": _bbox,
+                    "_sentence_span": span_obj,
+                })
                 cursor = end
 
-    return spans or [{"type": "sentence", "text": text, "start": 0, "end": len(text), "bbox": _bbox}]
+    if spans:
+        return spans
+    
+    # Fallback: whole paragraph as one span
+    para_rects = _extract_sentence_rects(_apryse_spans, 0, len(text))
+    if not para_rects and _bbox:
+        para_rects = [_bbox]
+        geom_source = "object_bbox"
+    else:
+        geom_source = "apryse_span" if para_rects else "none"
+    
+    span_obj = SentenceSpan(
+        text=text,
+        page=page,
+        char_start=0,
+        char_end=len(text),
+        rects=para_rects,
+        source_object_id=object_id,
+        span_type="sentence",
+        geometry_source=geom_source,
+    )
+    return [{
+        "type": "sentence",
+        "text": text,
+        "start": 0,
+        "end": len(text),
+        "bbox": _bbox,
+        "_sentence_span": span_obj,
+    }]
 
 
 def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> list[dict]:
@@ -327,7 +526,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
                 "page":            page_num,
                 "bbox":            rect,
                 "searchable":      not _is_page_boilerplate(rect, page_height),
-                "display_spans":   _make_display_spans(text, kind, bbox=rect),
+                "display_spans":   _make_display_spans(text, kind, bbox=rect, page=page_num, apryse_spans=layout_obj.get("spans", [])),
                 "embedding":       [],
                 "entities":        [],
                 "_heading_level":  level,                    # ephemeral
@@ -373,7 +572,9 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
                 merged_text = prev["text"].rstrip() + " " + obj["text"].lstrip()
                 prev["text"]            = merged_text
                 prev["normalized_text"] = _normalize_text(merged_text)
-                prev["display_spans"]   = _make_display_spans(merged_text, "paragraph", bbox=prev["bbox"])
+                # For merged paragraphs, geometry is approximate (fallback to bbox)
+                # since we're combining fragments from multiple layout objects
+                prev["display_spans"]   = _make_display_spans(merged_text, "paragraph", bbox=prev["bbox"], page=prev["page"], apryse_spans=[])
                 continue   # swallow this fragment into the previous object
         merged.append(obj)
     raw = merged
@@ -448,6 +649,14 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
             "section":         current_section,
             "section_level":   current_section_level,
         })
+
+    # ── Serialize SentenceSpan objects in display_spans for JSON serialization ──
+    # Convert `_sentence_span` to dict so that the entire object tree is JSON-compatible.
+    # Retrieve stages will deserialize these back when needed for HighlightExtractor.
+    for obj in objects:
+        for span in obj.get("display_spans", []):
+            if "_sentence_span" in span:
+                span["_sentence_span"] = span["_sentence_span"].to_dict()
 
     return objects
 

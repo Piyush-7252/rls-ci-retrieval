@@ -71,6 +71,36 @@ def _get(service: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SentenceSpan deserialization (for geometry preservation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _deserialize_sentence_span(span_dict: dict) -> dict | None:
+    """
+    Restore SentenceSpan from serialized dict if _sentence_span field exists.
+    
+    Returns a dict with geometry info if present, otherwise None.
+    """
+    if not isinstance(span_dict, dict):
+        return None
+    
+    sentence_span = span_dict.get("_sentence_span")
+    if not isinstance(sentence_span, dict):
+        return None
+    
+    return {
+        "text": sentence_span.get("text"),
+        "page": sentence_span.get("page"),
+        "char_start": sentence_span.get("char_start"),
+        "char_end": sentence_span.get("char_end"),
+        "rects": sentence_span.get("rects", []),
+        "source_object_id": sentence_span.get("source_object_id"),
+        "source_span_ids": sentence_span.get("source_span_ids", []),
+        "span_type": sentence_span.get("span_type"),
+        "geometry_source": sentence_span.get("geometry_source", "none"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Scorer registry
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -393,6 +423,8 @@ def _process(req: dict) -> dict:
                     "context_sentence":  best["text"],
                     "match_page":        r["page"],
                     "match_bbox":        best.get("bbox") or matched_obj.get("bbox", []),
+                    "match_rects":       best.get("rects") or [],  # per-line geometry if available
+                    "match_geometry_source": best.get("match_geometry_source", "none"),  # "apryse_span" | "object_bbox" | "none"
                     "highlight_score":     round(r["highlight_score"], 3),
                     "match_method":      "object",
                     "match_reason":      r["match_reason"],
@@ -450,6 +482,8 @@ def _process(req: dict) -> dict:
                         "context_sentence":  best["text"],
                         "match_page":        page,
                         "match_bbox":        [],
+                        "match_rects":       best.get("rects", []),  # geometry if available
+                        "match_geometry_source": best.get("match_geometry_source", "none"),  # quality indicator
                         "highlight_score":     1.0,
                         "match_method":      "text_fallback",
                         "match_reason":      "literal",
@@ -480,6 +514,8 @@ def _process(req: dict) -> dict:
                         "context_sentence":  best["text"],
                         "match_page":        page,
                         "match_bbox":        [],
+                        "match_rects":       best.get("rects", []),  # geometry if available
+                        "match_geometry_source": best.get("match_geometry_source", "none"),  # quality indicator
                         "highlight_score":     round(best["score"], 3),
                         "match_method":      "text_fallback",
                         "match_reason":      best["reason"],
@@ -519,6 +555,10 @@ def _pick_best_span(ci_text: str, ci_meta: dict, obj: dict) -> dict:
     Also scores prev_sentence_text / next_sentence_text so the returned
     span is the sentence most literally relevant to the CI, even when the
     indexed object itself is a neighbouring sentence (e.g. 11/35 vs N=35).
+    
+    Geometry preservation:
+    - If a display_span has _sentence_span with rects, extract per-line geometry
+    - Use rects instead of bbox for accurate multi-line highlighting
     """
     spans = obj.get("display_spans", [])
     if not spans:
@@ -536,7 +576,7 @@ def _pick_best_span(ci_text: str, ci_meta: dict, obj: dict) -> dict:
                                "start": 0, "end": len(nbr), "bbox": obj.get("bbox", [])}]
 
     best: dict = {"text": "", "start": 0, "end": 0,
-                  "bbox": [], "score": -1.0, "reason": "none"}
+                  "bbox": [], "rects": [], "score": -1.0, "reason": "none"}
     all_scored: list[dict] = []
 
     for span in spans:
@@ -561,18 +601,26 @@ def _pick_best_span(ci_text: str, ci_meta: dict, obj: dict) -> dict:
             "scores":   all_scores_for_span,
         })
         if top and top["score"] > best["score"]:
+            # Extract geometry from SentenceSpan if available (geometry preservation)
+            sentence_span = _deserialize_sentence_span(span)
+            rects = sentence_span.get("rects", []) if sentence_span else []
+            geom_source = sentence_span.get("geometry_source", "none") if sentence_span else "none"
+            
             best = {
                 "text":   span_text,
                 "start":  span.get("start", 0),
                 "end":    span.get("end", 0),
                 "bbox":   span.get("bbox", []),
+                "rects":  rects,  # per-line geometry if available
                 "score":  top["score"],
                 "reason": top["reason"],
+                "match_geometry_source": geom_source,  # "apryse_span" | "object_bbox" | "none"
             }
     if best["score"] < 0:
         text = obj.get("text", "")
         best = {"text": text, "start": 0, "end": len(text),
-                "bbox": obj.get("bbox", []), "score": 0.0, "reason": "none"}
+                "bbox": obj.get("bbox", []), "rects": [], "score": 0.0, "reason": "none",
+                "match_geometry_source": "none"}
     best["all_scored_spans"] = all_scored
     return best
 
