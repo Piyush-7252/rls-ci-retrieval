@@ -120,6 +120,45 @@ def _candidate_confidence(c: dict) -> float:
 # Stage functions — each takes req dict, updates req["_st"], returns req
 # ─────────────────────────────────────────────────────────────────────────────
 
+import gzip as _gzip
+
+
+def _s4_cache_path(args, n_cis: int) -> "Path":
+    key = f"{Path(args.ci_file).stem}__{args.document_id}__{n_cis}"
+    return ROOT / ".cache" / "search_expand" / f"{key}.json.gz"
+
+
+def _save_s4_cache(all_reqs: list[dict], path: "Path") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save = []
+    for r in all_reqs:
+        r2 = {k: v for k, v in r.items()
+              if k not in ("_st", "_failed", "_early_exit", "_ci_idx")}
+        if isinstance(r2.get("_diagnose_ci_ids"), set):
+            r2["_diagnose_ci_ids"] = list(r2["_diagnose_ci_ids"])
+        save.append(r2)
+    with _gzip.open(path, "wt", encoding="utf-8") as fh:
+        import json as _j
+        _j.dump(save, fh)
+    print(f"  [cache] saved {len(save)} expanded CIs → {path.name}")
+
+
+def _load_s4_cache(path: "Path") -> list[dict]:
+    with _gzip.open(path, "rt", encoding="utf-8") as fh:
+        import json as _j
+        saved = _j.load(fh)
+    all_reqs = []
+    for r in saved:
+        r["_st"]              = {}
+        r["_failed"]          = False
+        r["_early_exit"]      = False
+        r["_ci_idx"]          = 0
+        if isinstance(r.get("_diagnose_ci_ids"), list):
+            r["_diagnose_ci_ids"] = set(r["_diagnose_ci_ids"])
+        all_reqs.append(r)
+    return all_reqs
+
+
 def _s1_classify(req: dict) -> dict:
     if req.get("_failed") or req.get("_early_exit"):
         return req
@@ -199,7 +238,8 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
     if skip_rerank:
         expanded = req.get("expanded_candidates", [])
         req["ranked_candidates"] = [
-            {**c, "cross_encoder_score": c.get("agg_score", 0.0)}
+            # Set score above MIN_RERANK_SCORE (3.0) so all candidates reach Claude
+            {**c, "cross_encoder_score": 10.0}
             for c in expanded
         ]
     else:
@@ -711,6 +751,15 @@ def main() -> None:
         print("  No CIs loaded — exiting.")
         return
 
+    # ── S4 cache: skip S1-S4 if --use-cache and cache exists ─────────────────
+    use_cache = getattr(args, "use_cache", False)
+    cache_path = _s4_cache_path(args, len(all_reqs))
+    s4_loaded_from_cache = False
+    if use_cache and cache_path.exists():
+        print(f"  [cache] loading S4 from {cache_path.name} — skipping S1-S4")
+        all_reqs = _load_s4_cache(cache_path)
+        s4_loaded_from_cache = True
+
     # ── Stage-parallel pipeline ───────────────────────────────────────────────
     # max_workers=1 for the reranker serializes CrossEncoder.predict() calls,
     # which prevents PyTorch/BLAS non-determinism from concurrent inference.
@@ -732,6 +781,10 @@ def main() -> None:
 
     for stage_key, stage_fn, stage_workers in STAGES:
         active = sum(1 for r in all_reqs if not r.get("_failed") and not r.get("_early_exit"))
+        # Skip S1-S4 when loaded from cache
+        if s4_loaded_from_cache and stage_key in ("S1:classify","S2:retrieve","S3:aggregate","S4:context_expand"):
+            stage_wall[stage_key] = 0.0
+            continue
         if active == 0:
             print(f"  [{stage_key}]  (no active CIs — skip)")
             stage_wall[stage_key] = 0.0
@@ -746,6 +799,10 @@ def main() -> None:
         done_early = sum(1 for r in all_reqs if r.get("_early_exit"))
         print(f"  [{stage_key}]  done in {elapsed:.1f}s"
               + (f"  ({done_early} early-exit)" if done_early else ""))
+
+        # Save S4 output to cache after context expansion completes
+        if stage_key == "S4:context_expand" and not s4_loaded_from_cache:
+            _save_s4_cache(all_reqs, cache_path)
 
         if stage_key == "S2:retrieve":
             # Quick per-CI retriever breakdown for early debugging

@@ -26,7 +26,7 @@ logger.setLevel(logging.INFO)
 BEDROCK_REGION       = os.environ.get("BEDROCK_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 BEDROCK_MODEL        = os.environ.get("VERIFIER_MODEL", "eu.anthropic.claude-haiku-4-5-20251001-v1:0")
 MERGER_LAMBDA_ARN    = os.environ.get("MERGER_LAMBDA_ARN", "")
-MIN_RERANK_SCORE     = float(os.environ.get("MIN_RERANK_SCORE", "3.0"))
+MIN_RERANK_SCORE     = float(os.environ.get("MIN_RERANK_SCORE", "0.0"))
 
 _aws: dict = {}
 
@@ -67,10 +67,8 @@ def _process(req: dict) -> dict:
     ranked     = req.get("ranked_candidates", [])
 
     # Verify all candidates that cleared the reranker score threshold (no position cap)
-    to_verify  = [c for c in ranked
-                  if c.get("cross_encoder_score", 0.0) >= MIN_RERANK_SCORE]
-    skip       = [c for c in ranked
-                  if c.get("cross_encoder_score", 0.0) < MIN_RERANK_SCORE]
+    to_verify  = [c for c in ranked]
+    skip       = []
 
     verified = _verify_batch(ci_text, to_verify, doc_ctx, ci_assets)
 
@@ -85,6 +83,9 @@ def _process(req: dict) -> dict:
     }
 
 
+_MAX_VERIFY_BATCH = 40  # max candidates per Bedrock call (8000 token output cap)
+
+
 def _verify_batch(
     ci_text: str,
     candidates: list[dict],
@@ -96,6 +97,12 @@ def _verify_batch(
         return []
     if len(candidates) == 1:
         return [_verify(ci_text, candidates[0], doc_ctx, ci_assets)]
+    # Split oversized batches to avoid hitting the 8000-token output cap
+    if len(candidates) > _MAX_VERIFY_BATCH:
+        results = []
+        for i in range(0, len(candidates), _MAX_VERIFY_BATCH):
+            results.extend(_verify_batch(ci_text, candidates[i:i+_MAX_VERIFY_BATCH], doc_ctx, ci_assets))
+        return results
 
     import re as _re
 

@@ -75,7 +75,7 @@ sys.path.insert(0, str(ROOT))
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DOCUMENT_ID          = "Combined_REDACTED_CSR-Full-co-jnj-64407564"
+DOCUMENT_ID          = "20260727131644799_jjryatd_10996_REDACTED_CSR_Protocol_and_Amendments-FD-64407564MMY1001-869239_1245312"
 OPENSEARCH_ENDPOINT  = (
     "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com"
 )
@@ -357,12 +357,21 @@ def _classify_evidence(ci_text: str, hit: dict, doc_ctx: dict) -> dict:
         }
 
 
+_EC_MAX_BATCH = 30  # max hits per EC batch call — keeps output within ~4500 tokens
+
+
 def _classify_evidence_batch(ci_text: str, hits: list[dict], doc_ctx: dict) -> list[dict]:
     """Classify all YES/MAYBE hits in one Bedrock call; falls back to sequential on error."""
     if not hits:
         return []
     if len(hits) == 1:
         return [_classify_evidence(ci_text, hits[0], doc_ctx)]
+    # Split large batches so we never approach the 8000-token output cap
+    if len(hits) > _EC_MAX_BATCH:
+        results = []
+        for i in range(0, len(hits), _EC_MAX_BATCH):
+            results.extend(_classify_evidence_batch(ci_text, hits[i:i+_EC_MAX_BATCH], doc_ctx))
+        return results
 
     doc_tag = ""
     if doc_ctx:
@@ -391,7 +400,8 @@ def _classify_evidence_batch(ci_text: str, hits: list[dict], doc_ctx: dict) -> l
         import boto3 as _boto3
         br   = _boto3.client("bedrock-runtime", region_name=AWS_REGION)
         body = {"anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": min(100 * len(hits), 8000),  # ~41 actual/hit; cap at API limit
+                # 150 tokens/hit is the measured actual usage (was 100 — caused truncation)
+                "max_tokens": min(150 * len(hits), 8000),
                 "messages": [{"role": "user", "content": prompt}]}
         resp      = br.invoke_model(modelId=VERIFIER_MODEL, contentType="application/json",
                                     accept="application/json", body=json.dumps(body).encode())
@@ -401,8 +411,21 @@ def _classify_evidence_batch(ci_text: str, hits: list[dict], doc_ctx: dict) -> l
         raw = _re.sub(r"^```(?:json)?\s*", "", raw); raw = _re.sub(r"\s*```$", "", raw.strip())
         brace = raw.find("["); raw = raw[brace:] if brace >= 0 else raw
         parsed = json.loads(raw)
-        if not isinstance(parsed, list) or len(parsed) < len(hits):
+        if not isinstance(parsed, list) or len(parsed) == 0:
             raise ValueError(f"Expected {len(hits)} items, got {len(parsed)}")
+        # If Claude still returned fewer items, classify the missed ones individually
+        # (don't pad with a placeholder — a dropped DIRECT hit would be misclassified)
+        if len(parsed) < len(hits):
+            logger.warning("[EC] batch returned %d/%d — classifying %d missed hits individually",
+                           len(parsed), len(hits), len(hits) - len(parsed))
+            for missed_hit in hits[len(parsed):]:
+                individual = _classify_evidence(ci_text, missed_hit, doc_ctx)
+                parsed.append({
+                    "evidence_type": individual.get("evidence_type", "RELATED_EFFICACY"),
+                    "confidence":    individual.get("evidence_confidence", 0.5),
+                    "reason":        individual.get("evidence_reason", ""),
+                    "_ec_tokens":    individual.get("_ec_tokens", {}),
+                })
         parsed = parsed[:len(hits)]
         usage = resp_body.get("usage", {})
         in_tok, out_tok = usage.get("input_tokens", 0), usage.get("output_tokens", 0)
@@ -1191,6 +1214,13 @@ def _object_type_stats(all_results: list[dict]) -> dict:
     }
 
 
+def _base_object_id(object_id: str | None) -> str:
+    """Normalize retriever object-id variants like *_s0/*_s1 to a stable base id."""
+    import re as _re
+    oid = str(object_id or "")
+    return _re.sub(r"_s\d+$", "", oid)
+
+
 def _hit_with_provenance(hit: dict) -> dict:
     """Add retrieval provenance fields to a final hit; strip the raw matched_object."""
     obj            = hit.get("matched_object") or {}
@@ -1216,6 +1246,9 @@ def _hit_with_provenance(hit: dict) -> dict:
     # retrieval_origin: analytics format "sources/retrieved_unit"
     # e.g. "vector/chunk", "bm25/sentence", "vector/paragraph"
     origin_str = ("+".join(sorted(sources)) if sources else "unknown") + "/" + retrieved_unit
+    object_id = obj.get("object_id")
+    parent_chunk_id = obj.get("parent_chunk_id")
+    retrieval_chunk_id = parent_chunk_id or hit.get("chunk_id")
     extra = {
         "retrieval_object_type": obj_type,
         # retrieved_type: the unit the retriever actually fetched from the index.
@@ -1225,7 +1258,10 @@ def _hit_with_provenance(hit: dict) -> dict:
         # expansion_origin: context_expander's raw value preserved for debugging.
         # Format: "direct_{type}" or "via_chunk_{type}".
         "expansion_origin":      ce_origin or None,
-        "retrieval_object_id":   obj.get("object_id"),
+        "retrieval_object_id":   object_id,
+        "retrieval_object_id_base": _base_object_id(object_id),
+        "retrieval_parent_chunk_id": parent_chunk_id,
+        "retrieval_chunk_id": retrieval_chunk_id,
         "retrieval_heading_path": obj.get("heading_path"),
         "retrieval_section":     obj.get("section_category") or obj.get("section"),
         "retrieval_origin":      origin_str,
@@ -1357,6 +1393,9 @@ def _full_candidate_record(v: dict) -> dict:
     sb  = v.get("score_breakdown") or {}
     obj = v.get("matched_object") or {}
     ctx_text = (v.get("context") or {}).get("current_text", "")
+    object_id = obj.get("object_id")
+    parent_chunk_id = obj.get("parent_chunk_id")
+    retrieval_chunk_id = parent_chunk_id or v.get("chunk_id")
     return {
         # ── Identity ─────────────────────────────────────────────────────
         "chunk_id":             v.get("chunk_id", ""),
@@ -1393,7 +1432,10 @@ def _full_candidate_record(v: dict) -> dict:
         "match_page":           v.get("match_page"),
         # ── Retrieval provenance ─────────────────────────────────────────
         "retrieval_object_type":  obj.get("type"),
-        "retrieval_object_id":    obj.get("object_id"),
+        "retrieval_object_id":    object_id,
+        "retrieval_object_id_base": _base_object_id(object_id),
+        "retrieval_parent_chunk_id": parent_chunk_id,
+        "retrieval_chunk_id":     retrieval_chunk_id,
         "retrieval_heading_path": obj.get("heading_path"),
         "retrieval_section":      obj.get("section_category") or obj.get("section"),
         # ── Full indexed object ──────────────────────────────────────────
@@ -1439,9 +1481,15 @@ def _clean_result(result: dict) -> dict:
     # can review what was retrieved-but-rejected and label false negatives.
     def _provenance(v: dict) -> dict:
         obj = (v.get("matched_object") or {})
+        object_id = obj.get("object_id")
+        parent_chunk_id = obj.get("parent_chunk_id")
+        retrieval_chunk_id = parent_chunk_id or v.get("chunk_id")
         return {
             "retrieval_object_type": obj.get("type"),
-            "retrieval_object_id":   obj.get("object_id"),
+            "retrieval_object_id":   object_id,
+            "retrieval_object_id_base": _base_object_id(object_id),
+            "retrieval_parent_chunk_id": parent_chunk_id,
+            "retrieval_chunk_id":   retrieval_chunk_id,
             "retrieval_heading_path": obj.get("heading_path"),
             "retrieval_section":     obj.get("section_category") or obj.get("section"),
             "retrieval_origin":      v.get("retrieval_origin", "direct_unknown"),
@@ -1764,6 +1812,10 @@ def parse_args() -> argparse.Namespace:
                    help=f"OpenSearch document_id to search  (default: {DOCUMENT_ID})")
     p.add_argument("--skip-rerank", action="store_true",
                    help="Skip Bedrock cross-encoder reranker")
+    p.add_argument("--skip-bge",    action="store_true",
+                   help="Run clinical composite scoring only; zero out BGE CE logits")
+    p.add_argument("--use-cache",   action="store_true",
+                   help="Load S4 expanded candidates from .cache/search_expand/ and skip S1-S4")
     p.add_argument("--skip-verify", action="store_true",
                    help="Skip Bedrock LLM verifier")
     p.add_argument("--verbose",     action="store_true",
