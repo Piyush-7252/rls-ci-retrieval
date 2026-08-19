@@ -121,6 +121,7 @@ def parse_page(page: dict) -> dict:
                         "rect":  el.get("rect", []),
                         "type":  "heading",
                         "level": 2,
+                        "spans": _extract_span_geometry(el.get("contents", [])),
                     })
                 else:
                     paragraphs.append(text.strip())
@@ -128,6 +129,7 @@ def parse_page(page: dict) -> dict:
                         "text": text.strip(),
                         "rect": el.get("rect", []),
                         "type": "paragraph",
+                        "spans": _extract_span_geometry(el.get("contents", [])),
                     })
 
         elif el_type == "heading":
@@ -143,6 +145,7 @@ def parse_page(page: dict) -> dict:
                     "rect":  el.get("rect", []),
                     "type":  "heading",
                     "level": el.get("level", 1),   # heading depth; used for section tracking
+                    "spans": _extract_span_geometry(el.get("contents", [])),
                 })
 
         elif el_type == "header":
@@ -156,16 +159,21 @@ def parse_page(page: dict) -> dict:
                 footers.append(text.strip())
 
         elif el_type == "table":
+            # Extract rows WITH geometry to preserve cell-level spans
+            rows_with_spans = _extract_table_rows_with_spans(el)
+            # Also extract basic rows for the summary data structure
             rows = _extract_table_rows(el)
             tables.append({"rect": el.get("rect", []), "rows": rows})
+            
             # Treat each non-empty row as a layout object for sentence extraction
-            for row in rows:
-                row_text = " | ".join(c for c in row if c).strip()
+            for row_data in rows_with_spans:
+                row_text = row_data["text"].strip()
                 if row_text:
                     paragraph_objects.append({
                         "text": row_text,
                         "rect": el.get("rect", []),
                         "type": "table_row",
+                        "spans": row_data.get("spans", []),  # ← real cell spans!
                     })
 
         elif el_type == "list":
@@ -188,6 +196,7 @@ def parse_page(page: dict) -> dict:
                         "type":            "section_marker",
                         "section_numbers": [r[0] for r in section_refs],
                         "section_title":   best[1] or None,
+                        "spans": [],  # section markers are synthetic
                     })
                     # Promote each hybrid ref (number + title) to a proper heading
                     # instead of a list object, eliminating the duplicate pair.
@@ -201,18 +210,40 @@ def parse_page(page: dict) -> dict:
                                 "rect":  el.get("rect", []),
                                 "type":  "heading",
                                 "level": depth,
+                                "spans": [],  # promoted from list; geometry from list
                             })
             elif items:
                 lists.append({"items": items})
+                # Extract items WITH geometry to preserve body-level spans
+                items_with_spans = _extract_list_items_with_spans(el)
+                
                 # Emit ONE object for the whole list; individual items become
                 # display_spans in the extraction lambda so the whole list is
                 # embedded as a single semantic unit instead of N fragments.
-                combined = "\n".join(item for item in items if item.strip())
+                combined = "\n".join(item_data["text"] for item_data in items_with_spans if item_data["text"].strip())
+                
+                # Collect and adjust spans: account for newline separators
+                all_list_spans = []
+                char_offset = 0
+                for item_data in items_with_spans:
+                    item_text = item_data["text"]
+                    # Adjust spans for this item
+                    for span in item_data.get("spans", []):
+                        adjusted_span = {
+                            "text": span["text"],
+                            "rect": span["rect"],
+                            "start": span["start"] + char_offset,
+                            "end": span["end"] + char_offset,
+                        }
+                        all_list_spans.append(adjusted_span)
+                    char_offset += len(item_text) + 1  # +1 for newline separator
+                
                 if combined:
                     paragraph_objects.append({
                         "text": combined,
                         "rect": el.get("rect", []),
                         "type": "list",
+                        "spans": all_list_spans,  # ← real item body spans!
                     })
 
         # graphic / image / toc / group with no text → skip
@@ -360,6 +391,211 @@ def _spans_text(contents: list) -> str:
         for c in contents
         if c.get("type") == "span" and c.get("text", "").strip()
     )
+
+
+def _extract_span_geometry(contents: list) -> list[dict]:
+    """
+    Extract span elements with their geometry for sentence-level accuracy.
+
+    Returns list of {"text": str, "rect": list[float], "start": int, "end": int}
+    where start/end are cumulative character offsets within the parent element.
+    
+    This enables mapping spaCy sentence character offsets to Apryse line-level
+    geometry for accurate multi-line sentence highlighting.
+    """
+    spans_with_geo = []
+    char_pos = 0
+    for c in contents:
+        if c.get("type") == "span" and c.get("text", "").strip():
+            text = c.get("text", "")
+            rect = c.get("rect", [])
+            start = char_pos
+            end = char_pos + len(text)
+            spans_with_geo.append({
+                "text": text,
+                "rect": rect,
+                "start": start,
+                "end": end,
+            })
+            char_pos = end + 1  # +1 for the space inserted by _spans_text
+    return spans_with_geo
+
+
+def _extract_table_rows_with_spans(table: dict) -> list[dict]:
+    """
+    Extract table rows with cell-level span geometry.
+
+    Returns list of {
+        "text": str,       # row text joined with " | "
+        "spans": list[dict] # [{"text", "rect", "start", "end"}, ...]
+    }
+
+    Character offsets account for " | " separator between cells.
+    """
+    # Get the basic grid first (as per _extract_table_rows)
+    max_row = 0
+    max_col = 0
+    for tr in table.get("trs", []):
+        for td in tr.get("tds", []):
+            r = td.get("rowStart", 0) + td.get("rowSpan", 1)
+            c = td.get("colStart", 0) + td.get("colSpan", 1)
+            max_row = max(max_row, r)
+            max_col = max(max_col, c)
+
+    if max_row == 0:
+        return []
+
+    # For each row, collect text AND spans
+    rows_with_spans = []
+    
+    for row_idx in range(max_row):
+        row_cells = [None] * max_col  # Will be {text, spans} dicts
+        
+        for tr in table.get("trs", []):
+            for td in tr.get("tds", []):
+                row_start = td.get("rowStart", 0)
+                col_start = td.get("colStart", 0)
+                
+                if row_start == row_idx and col_start < max_col:
+                    # Extract text and spans from this cell
+                    cell_spans = []
+                    cell_parts = []
+                    
+                    for c in td.get("contents", []):
+                        if c.get("type") in ("paragraph", "heading"):
+                            # Extract both text and spans from this paragraph
+                            para_text = _spans_text(c.get("contents", []))
+                            if para_text:
+                                cell_parts.append(para_text)
+                                
+                            # Extract span geometry, adjusted for current cell position
+                            para_spans = _extract_span_geometry(c.get("contents", []))
+                            cell_spans.extend(para_spans)
+                    
+                    cell_text = " ".join(p for p in cell_parts if p).strip()
+                    row_cells[col_start] = {
+                        "text": cell_text,
+                        "spans": cell_spans if cell_spans else []
+                    }
+        
+        # Join cells with " | " and adjust spans' character offsets
+        row_text_parts = []
+        all_row_spans = []
+        char_offset = 0
+        
+        for cell_dict in row_cells:
+            if cell_dict is None:
+                cell_dict = {"text": "", "spans": []}
+            
+            cell_text = cell_dict["text"]
+            row_text_parts.append(cell_text)
+            
+            # Adjust and collect spans from this cell
+            for span in cell_dict.get("spans", []):
+                adjusted_span = {
+                    "text": span["text"],
+                    "rect": span["rect"],
+                    "start": span["start"] + char_offset,
+                    "end": span["end"] + char_offset,
+                }
+                all_row_spans.append(adjusted_span)
+            
+            char_offset += len(cell_text) + 3  # +3 for " | "
+        
+        row_text = " | ".join(c["text"] if c else "" for c in row_cells)
+        if row_text.strip():
+            rows_with_spans.append({
+                "text": row_text,
+                "spans": all_row_spans,
+            })
+    
+    return rows_with_spans
+
+
+def _extract_list_items_with_spans(lst: dict) -> list[dict]:
+    """
+    Extract list items with body-level span geometry.
+
+    Returns list of {
+        "text": str,       # item text (may include label)
+        "spans": list[dict] # [{"text", "rect", "start", "end"}, ...]
+    }
+
+    Character offsets account for the joined text structure.
+    """
+    items_with_spans = []
+    
+    for item in lst.get("items", []):
+        item_type = item.get("type", "")
+
+        # Nested sub-list — recurse
+        if item_type == "list":
+            items_with_spans.extend(_extract_list_items_with_spans(item))
+            continue
+
+        # Standard listItem
+        label = item.get("label", {}).get("text", "").strip()
+        
+        # Extract text and spans from body
+        content_parts = []
+        content_spans = []
+        
+        for c in item.get("body", {}).get("contents", []):
+            if c.get("type") in ("paragraph", "heading"):
+                t = _spans_text(c.get("contents", []))
+                if t.strip():
+                    content_parts.append(t.strip())
+                    
+                # Extract spans from this element
+                para_spans = _extract_span_geometry(c.get("contents", []))
+                content_spans.extend(para_spans)
+            else:
+                t = _recursive_text(c)
+                if t.strip():
+                    content_parts.append(t.strip())
+        
+        # Fallback to item.contents if body is empty
+        if not content_parts:
+            for c in item.get("contents", []):
+                if c.get("type") in ("paragraph", "heading"):
+                    t = _spans_text(c.get("contents", []))
+                    if t.strip():
+                        content_parts.append(t.strip())
+                        para_spans = _extract_span_geometry(c.get("contents", []))
+                        content_spans.extend(para_spans)
+                else:
+                    t = _recursive_text(c)
+                    if t.strip():
+                        content_parts.append(t.strip())
+        
+        content = " ".join(content_parts).lstrip("\t").strip()
+        
+        # Build final text with label if meaningful
+        meaningful_label = label and len(label) > 2
+        if meaningful_label:
+            full_text = f"{label} {content}".strip()
+            # Adjust spans to account for label offset
+            label_offset = len(label) + 1  # label + space
+            adjusted_spans = [
+                {
+                    "text": s["text"],
+                    "rect": s["rect"],
+                    "start": s["start"] + label_offset,
+                    "end": s["end"] + label_offset,
+                }
+                for s in content_spans
+            ]
+        else:
+            full_text = content if content else label
+            adjusted_spans = content_spans
+        
+        if full_text and len(full_text.strip()) > 1:
+            items_with_spans.append({
+                "text": full_text,
+                "spans": adjusted_spans if adjusted_spans else [],
+            })
+    
+    return items_with_spans
 
 
 def _recursive_text(el: dict) -> str:

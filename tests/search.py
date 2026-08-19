@@ -75,7 +75,7 @@ sys.path.insert(0, str(ROOT))
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-DOCUMENT_ID          = "20260727131644799_jjryatd_10996_REDACTED_CSR_Protocol_and_Amendments-FD-64407564MMY1001-869239_1245312"
+DOCUMENT_ID          = "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209_apryse_geometry_latest"
 OPENSEARCH_ENDPOINT  = (
     "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com"
 )
@@ -1804,8 +1804,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Search pipeline real AWS test")
     p.add_argument("--ci-file",     default=DEFAULT_CI_FILE,
                    help=f"Path to CI JSON file  (default: {DEFAULT_CI_FILE})")
-    p.add_argument("--max-cis",     type=int, default=2,
-                   help="Maximum number of CIs to search for  (default: 2)")
+    p.add_argument("--max-cis",     type=int, default=34,
+                   help="Maximum number of CIs to search for  (default: 34)")
     p.add_argument("--ci-index",    type=int, default=None,
                    help="Run a single CI by its 0-based index in the CI file")
     p.add_argument("--document-id", default=DOCUMENT_ID,
@@ -1820,7 +1820,7 @@ def parse_args() -> argparse.Namespace:
                    help="Skip Bedrock LLM verifier")
     p.add_argument("--verbose",     action="store_true",
                    help="Print intermediate results in detail")
-    p.add_argument("--workers",     type=int, default=4,
+    p.add_argument("--workers",     type=int, default=5,
                    help="Max concurrent CI searches (default: 4)")
     p.add_argument("--output",      default=None,
                    help="Path to save results JSON (default: localfiles/search_results/<timestamp>.json)")
