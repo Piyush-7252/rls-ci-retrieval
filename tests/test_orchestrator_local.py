@@ -100,14 +100,16 @@ def build_event(
 def invoke_orchestrator_lambda(event: dict, function_name: str = "rls-ci-retrieval-search-orchestrator") -> dict:
     """Invoke orchestrator Lambda on AWS."""
     import boto3
+    from botocore.config import Config
     
     logger.info(f"Invoking orchestrator Lambda: {function_name}")
     logger.info(f"  CIs: {len(event['cis'])}")
     logger.info(f"  Search ID: {event['search_id']}")
     logger.info(f"  Document: {event['document_id'][:60]}...")
     
-    # Create Lambda client
-    lambda_client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
+    # Create Lambda client with 3-minute timeout for orchestrator response
+    config = Config(read_timeout=900, retries={'max_attempts': 1})
+    lambda_client = boto3.client("lambda", region_name=os.environ.get("AWS_REGION", "eu-west-1"), config=config)
     
     t0 = time.perf_counter()
     try:
