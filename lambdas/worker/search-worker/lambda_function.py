@@ -122,8 +122,6 @@ SEARCH_RESULTS_DEBUG_BUCKET = os.environ.get("SEARCH_RESULTS_DEBUG_BUCKET", "rls
 RESULTS_DEBUG_PREFIX   = os.environ.get("RESULTS_DEBUG_PREFIX", "search-results")
 # ── Lazy singletons ────────────────────────────────────────────────────────────
 _loaded: dict[str, types.ModuleType] = {}
-_os_client = None
-_aws: dict = {}
 _evidence_classifier = None  # Lazy load for evidence classification
 
 
@@ -135,33 +133,9 @@ def _get_evidence_classifier():
     return _evidence_classifier
 
 
-def _get(service: str, region: str | None = None):
-    key = f"{service}:{region or ''}"
-    if key not in _aws:
-        import boto3
-        _aws[key] = boto3.client(service, region_name=region) if region else boto3.client(service)
-    return _aws[key]
-
-
 def _get_os():
-    global _os_client
-    if _os_client is None:
-        import boto3
-        from opensearchpy import OpenSearch, RequestsHttpConnection
-        from requests_aws4auth import AWS4Auth
-        frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
-                          session_token=frozen.token)
-        _os_client = OpenSearch(
-            hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-            http_auth=awsauth, use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=OPENSEARCH_TIMEOUT,
-            max_retries=2,
-            retry_on_timeout=True,
-            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
-        )
-    return _os_client
+    from shared.opensearch_client import get_opensearch_client
+    return get_opensearch_client()
 
 
 def _load(rel_path: str, alias: str) -> types.ModuleType:
