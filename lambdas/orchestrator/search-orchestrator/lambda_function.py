@@ -129,7 +129,15 @@ def _get(service: str, region: str | None = None):
     key = f"{service}:{region or ''}"
     if key not in _aws:
         import boto3
-        _aws[key] = boto3.client(service, region_name=region) if region else boto3.client(service)
+        from botocore.config import Config
+        
+        # For Lambda invocations, set longer read timeout (workers can take 100+ seconds)
+        config = Config(
+            read_timeout=180,  # 3 minutes for worker Lambda responses
+            retries={'max_attempts': 1}  # Don't retry on timeout
+        ) if service == "lambda" else None
+        
+        _aws[key] = boto3.client(service, region_name=region, config=config)
     return _aws[key]
 
 
