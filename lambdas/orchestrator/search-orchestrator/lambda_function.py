@@ -139,13 +139,26 @@ def _get_os():
         import boto3
         from opensearchpy import OpenSearch, RequestsHttpConnection
         from requests_aws4auth import AWS4Auth
+        
+        # Custom connection class that configures HTTPAdapter pool sizes
+        class PooledRequestsHttpConnection(RequestsHttpConnection):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                from requests.adapters import HTTPAdapter
+                adapter = HTTPAdapter(
+                    pool_connections=OPENSEARCH_MAXSIZE,
+                    pool_maxsize=OPENSEARCH_MAXSIZE,
+                )
+                self.session.mount("https://", adapter)
+                self.session.mount("http://", adapter)
+        
         frozen  = boto3.Session().get_credentials().get_frozen_credentials()
         awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
                           session_token=frozen.token)
         _os_client = OpenSearch(
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
             http_auth=awsauth, use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
+            connection_class=PooledRequestsHttpConnection,
             timeout=OPENSEARCH_TIMEOUT,
             max_retries=2,
             retry_on_timeout=True,
