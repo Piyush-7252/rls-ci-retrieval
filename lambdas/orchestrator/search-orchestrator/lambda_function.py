@@ -300,13 +300,16 @@ def _invoke_worker(batch_payload: dict) -> dict:
 
 # ── Result merge ───────────────────────────────────────────────────────────────
 
-def _merge_stage_walls(walls: list[dict[str, float]]) -> dict[str, float]:
-    """Return max wall-clock per stage across all batches (worst-case latency)."""
-    merged: dict[str, float] = {}
-    for w in walls:
-        for k, v in w.items():
-            merged[k] = max(merged.get(k, 0.0), v)
-    return merged
+def _clean_ci_vectors(ci: dict) -> dict:
+    """Remove embedding vectors and large unnecessary fields from CI for response."""
+    vectors_to_exclude = {
+        "dense_vector",
+        "embedding",
+        "sparse_vector",
+        "vector",
+        "dense_embedding",
+    }
+    return {k: v for k, v in ci.items() if k not in vectors_to_exclude}
 
 
 # ── Handler ────────────────────────────────────────────────────────────────────
@@ -403,11 +406,11 @@ def handler(event: dict, context: Any) -> dict:
     for batch_idx, batch_resp in enumerate(all_results):
         batch_results = batch_resp.get("results", [])
         
-        # Attach raw CI data from the original raw_cis (not enriched)
+        # Attach raw CI data from the original raw_cis (not enriched), cleaned of vectors
         for result in batch_results:
             ci_id = result.get("ci_id") or result.get("id")
             if ci_id and ci_id in raw_ci_map:
-                result["raw_ci"] = raw_ci_map[ci_id]
+                result["raw_ci"] = _clean_ci_vectors(raw_ci_map[ci_id])
             flat_results.append(result)
         
         batch_completed = batch_resp.get("completed_cis", 0)

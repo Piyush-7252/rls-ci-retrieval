@@ -897,7 +897,17 @@ def _hit_with_provenance(hit: dict) -> dict:
         "agg_score_breakdown":   hit.get("agg_score_breakdown"),
         "indexed_object":        _indexed_object(hit),
     }
-    base = {k: v for k, v in hit.items() if k != "matched_object"}
+    # Remove embedding vectors and other unnecessary large fields
+    vectors_to_exclude = {
+        "matched_object",  # Already handled separately
+        "dense_vector",
+        "embedding",
+        "sparse_vector",
+        "vector",
+        "dense_embedding",
+        "context",  # Context expanded separately in indexed_object
+    }
+    base = {k: v for k, v in hit.items() if k not in vectors_to_exclude}
     return {**base, **extra}
 
 
