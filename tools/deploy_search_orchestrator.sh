@@ -32,7 +32,7 @@ RESULTS_BUCKET="${RESULTS_BUCKET:-rls-file-bucket-eu}"
 RESULTS_PREFIX="${RESULTS_PREFIX:-search-results}"
 
 # Resolve WORKER_LAMBDA_ARN automatically if not provided.
-WORKER_LAMBDA_NAME="${WORKER_LAMBDA_NAME:-rls-search-worker}"
+WORKER_LAMBDA_NAME="${WORKER_LAMBDA_NAME:-rls-ci-retrieval-search-worker}"
 if [[ -z "${WORKER_LAMBDA_ARN:-}" ]]; then
   echo "WORKER_LAMBDA_ARN not set — resolving from function '${WORKER_LAMBDA_NAME}'..."
   WORKER_LAMBDA_ARN="$(aws lambda get-function-configuration \
