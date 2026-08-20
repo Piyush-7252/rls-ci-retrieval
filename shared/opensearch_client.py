@@ -16,7 +16,7 @@ _os_client = None
 def get_opensearch_client():
     """
     Get or create a singleton OpenSearch client with proper connection pool sizing.
-    Sets urllib3 HTTPConnectionPool.maxsize to OPENSEARCH_MAXSIZE before creating client.
+    Uses opensearchpy's maxsize parameter and configures HTTPAdapter pool.
     """
     global _os_client
     if _os_client is None:
@@ -34,25 +34,30 @@ def get_opensearch_client():
             session_token=frozen.token
         )
         
+        # Create a custom connection class that configures HTTPAdapter pool sizes
+        class PooledRequestsHttpConnection(RequestsHttpConnection):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                # Configure HTTPAdapter with custom pool sizes
+                from requests.adapters import HTTPAdapter
+                adapter = HTTPAdapter(
+                    pool_connections=OPENSEARCH_MAXSIZE,
+                    pool_maxsize=OPENSEARCH_MAXSIZE,
+                )
+                self.session.mount("https://", adapter)
+                self.session.mount("http://", adapter)
+        
         _os_client = OpenSearch(
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
             http_auth=awsauth,
             use_ssl=True,
             verify_certs=True,
-            connection_class=RequestsHttpConnection,
+            connection_class=PooledRequestsHttpConnection,
             timeout=30,
             max_retries=2,
             retry_on_timeout=True,
             maxsize=OPENSEARCH_MAXSIZE,  # OpenSearch client's connection pool size
         )
-        
-        # Configure HTTPAdapter pool size on the requests session inside each connection
-        from requests.adapters import HTTPAdapter
-        for conn in _os_client.transport.connection_pool.connections:
-            if hasattr(conn, "session"):
-                # Set both HTTP and HTTPS adapter pool sizes to match OPENSEARCH_MAXSIZE
-                conn.session.mount("https://", HTTPAdapter(pool_connections=OPENSEARCH_MAXSIZE, pool_maxsize=OPENSEARCH_MAXSIZE))
-                conn.session.mount("http://",  HTTPAdapter(pool_connections=OPENSEARCH_MAXSIZE, pool_maxsize=OPENSEARCH_MAXSIZE))
     
     return _os_client
 
