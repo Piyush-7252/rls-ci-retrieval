@@ -332,6 +332,8 @@ def handler(event: dict, context: Any) -> dict:
 
     # ── Load enriched CIs ───────────────────────────────────────────────────
     t0         = time.perf_counter()
+    # Create mapping of raw CIs by ID for later retrieval
+    raw_ci_map = {ci.get("id"): ci for ci in raw_cis}
     n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
     enriched   = _load_cis_parallel(raw_cis, n_lookup_workers)
     if not enriched:
@@ -400,12 +402,12 @@ def handler(event: dict, context: Any) -> dict:
     
     for batch_idx, batch_resp in enumerate(all_results):
         batch_results = batch_resp.get("results", [])
-        batch_cis = batches[batch_idx] if batch_idx < len(batches) else []
         
-        # Enrich each result with raw CI data
-        for ci_idx, result in enumerate(batch_results):
-            if ci_idx < len(batch_cis):
-                result["raw_ci"] = batch_cis[ci_idx]
+        # Attach raw CI data from the original raw_cis (not enriched)
+        for result in batch_results:
+            ci_id = result.get("ci_id") or result.get("id")
+            if ci_id and ci_id in raw_ci_map:
+                result["raw_ci"] = raw_ci_map[ci_id]
             flat_results.append(result)
         
         batch_completed = batch_resp.get("completed_cis", 0)
@@ -414,7 +416,7 @@ def handler(event: dict, context: Any) -> dict:
         total_worker_failed += batch_failed
         
         # For expected_cis: use actual count from original batches
-        expected_batch_cis = len(batch_cis)
+        expected_batch_cis = len(batches[batch_idx]) if batch_idx < len(batches) else 0
         
         # Build per-batch summary with execution time
         batch_status = "FAILED" if batch_idx in failed_batches else (
