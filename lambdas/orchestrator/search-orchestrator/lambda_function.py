@@ -367,7 +367,7 @@ def handler(event: dict, context: Any) -> dict:
     logger.info("[Orchestrator] parallelism: %d batches max", n_invoke_workers)
 
     all_results:  list[dict]             = [{}] * n_batches
-    all_walls:    list[dict[str, float]] = []
+    batch_times:  dict[int, float]       = {}     # Track execution time per batch
     failed_batches: set[int]             = set()  # Track which batches failed
     errors:       list[dict]             = []     # Track batch_idx + error
 
@@ -378,19 +378,21 @@ def handler(event: dict, context: Any) -> dict:
             try:
                 batch_response = future.result()
                 all_results[idx] = batch_response
-                all_walls.append(batch_response.get("stage_wall", {}))
+                # Store batch execution time
+                batch_times[idx] = batch_response.get("wall_time", 0.0)
                 logger.info("[Orchestrator] batch %d/%d done (%.1fs)",
                          idx + 1, n_batches,
                          batch_response.get("wall_time", 0.0))
             except Exception as exc:
                 logger.error("[Orchestrator] batch %d failed: %s", idx, exc)
                 failed_batches.add(idx)
+                batch_times[idx] = 0.0  # Mark failed batch with 0 time
                 errors.append({
                     "batch_idx": idx,
                     "error": str(exc),
                 })
 
-    # Flatten per-CI results in original order
+    # Flatten per-CI results in original order, enriching with raw CI data
     flat_results: list[dict] = []
     total_worker_completed = 0
     total_worker_failed = 0
@@ -398,18 +400,23 @@ def handler(event: dict, context: Any) -> dict:
     
     for batch_idx, batch_resp in enumerate(all_results):
         batch_results = batch_resp.get("results", [])
-        flat_results.extend(batch_results)
+        batch_cis = batches[batch_idx] if batch_idx < len(batches) else []
+        
+        # Enrich each result with raw CI data
+        for ci_idx, result in enumerate(batch_results):
+            if ci_idx < len(batch_cis):
+                result["raw_ci"] = batch_cis[ci_idx]
+            flat_results.append(result)
         
         batch_completed = batch_resp.get("completed_cis", 0)
         batch_failed = batch_resp.get("failed_cis", 0)
         total_worker_completed += batch_completed
         total_worker_failed += batch_failed
         
-        # For expected_cis: use actual count from original batches, not from response
-        # (in case Worker completely fails, batch_resp will be empty)
-        expected_batch_cis = len(batches[batch_idx]) if batch_idx < len(batches) else 0
+        # For expected_cis: use actual count from original batches
+        expected_batch_cis = len(batch_cis)
         
-        # Build per-batch summary for debugging
+        # Build per-batch summary with execution time
         batch_status = "FAILED" if batch_idx in failed_batches else (
             "PARTIAL" if batch_failed > 0 else "COMPLETED"
         )
@@ -419,11 +426,11 @@ def handler(event: dict, context: Any) -> dict:
             "expected_cis": expected_batch_cis,
             "completed_cis": batch_completed,
             "failed_cis": batch_failed,
+            "execution_time_ms": round(batch_times.get(batch_idx, 0.0) * 1000, 1),
             "ci_failures": batch_resp.get("ci_failures", []),  # Detailed CI failures from Worker
         })
 
     wall_time = round(time.perf_counter() - t0, 3)
-    stage_wall = _merge_stage_walls(all_walls)
 
     total_hits = sum(len(r.get("final_hits", [])) for r in flat_results)
     
@@ -449,6 +456,15 @@ def handler(event: dict, context: Any) -> dict:
         total_cis_at_orchestrator, total_worker_completed, total_worker_failed, len(failed_batches),
     )
 
+    # Build failed_batches list with execution times
+    failed_batches_with_times = []
+    for batch_idx in sorted(failed_batches):
+        failed_batches_with_times.append({
+            "batch_idx": batch_idx,
+            "execution_time_ms": round(batch_times.get(batch_idx, 0.0) * 1000, 1),
+            "error": next((e.get("error") for e in errors if e.get("batch_idx") == batch_idx), None),
+        })
+    
     response = {
         "search_id":       search_id,
         "document_id":     document_id,
@@ -458,10 +474,9 @@ def handler(event: dict, context: Any) -> dict:
         "failed_cis":      total_worker_failed,
         "n_cis":           total_cis_at_orchestrator,
         "n_batches":       n_batches,
-        "failed_batches":  list(sorted(failed_batches)) if failed_batches else [],
-        "batch_summary":   batch_summary,  # NEW: per-batch breakdown
+        "failed_batches":  failed_batches_with_times if failed_batches else [],
+        "batch_summary":   batch_summary,
         "results":         flat_results,
-        "stage_wall":      stage_wall,
         "wall_time":       wall_time,
     }
     if errors:
@@ -490,7 +505,8 @@ def handler(event: dict, context: Any) -> dict:
             "failed_cis":     total_worker_failed,
             "total_hits":     total_hits,
             "wall_time":      wall_time,
-            "batch_summary":  batch_summary,  # NEW: per-batch breakdown for CLI/UI
+            "batch_summary":  batch_summary,
+            "failed_batches": failed_batches_with_times if failed_batches else [],
             "s3_bucket":      RESULTS_BUCKET,
             "s3_key":         s3_key,
         }
