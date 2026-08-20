@@ -302,7 +302,7 @@ def handler(event: dict, context: Any) -> dict:
             "batch_idx":        idx,
             "cis":              batch,
             "document_id":      document_id,
-            "tenant":           tenant["name"],  # Pass tenant for worker logging context
+            "tenant_name":      tenant["name"],  # Pass tenant for worker logging context
             "document_context": doc_context,
             "skip_rerank":      skip_rerank,
             "skip_verify":      skip_verify,

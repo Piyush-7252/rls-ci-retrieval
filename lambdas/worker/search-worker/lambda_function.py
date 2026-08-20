@@ -43,7 +43,6 @@ import importlib.util
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
@@ -52,7 +51,6 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from shared.utility import getTenantFromEvent
 
 
 logger = logging.getLogger(__name__)
@@ -120,7 +118,6 @@ EMBEDDING_MODEL        = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-t
 # Concurrency control (prevent overwhelming OpenSearch with nested thread pools)
 SEARCH_CI_WORKERS      = int(os.environ.get("SEARCH_CI_WORKERS", "5"))      # CIs per Worker
 RETRIEVER_WORKERS      = int(os.environ.get("RETRIEVER_WORKERS", "4"))      # Retrievers per CI
-_EC_MAX_BATCH          = int(os.environ.get("EC_MAX_BATCH", "30"))
 SEARCH_RESULTS_DEBUG_BUCKET = os.environ.get("SEARCH_RESULTS_DEBUG_BUCKET", "rls-file-bucket-eu")
 RESULTS_DEBUG_PREFIX   = os.environ.get("RESULTS_DEBUG_PREFIX", "search-results")
 # ── Lazy singletons ────────────────────────────────────────────────────────────
@@ -591,7 +588,7 @@ def _safe_stage_wrapper(stage_key: str, stage_fn, req: dict) -> dict:
 
 
 def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
-                  n_workers: int, tenant: str) -> tuple[list[dict], dict[str, float]]:
+                  n_workers: int, tenant_name: str) -> tuple[list[dict], dict[str, float]]:
     """Run stage-parallel pipeline, return (all_reqs, stage_wall)."""
     # Reranker uses max_workers=1 to serialise CrossEncoder.predict() calls.
     STAGES = [
@@ -624,11 +621,11 @@ def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
                              stage_key, stage_wall[stage_key], active)
         else:
             logger.info("[SearchWorker] for tenant %s stage %s done in %.1fs (%d active)",
-                        tenant, stage_key, stage_wall[stage_key], active)
+                        tenant_name, stage_key, stage_wall[stage_key], active)
     if _SEARCH_LOG:
         _SEARCH_LOG.info("[SearchWorker] stage wall summary: %s", stage_wall)
     else:
-        logger.info("[SearchWorker] for tenant %s stage wall summary: %s", tenant, stage_wall)
+        logger.info("[SearchWorker] for tenant %s stage wall summary: %s", tenant_name, stage_wall)
     return all_reqs, stage_wall
 
 
@@ -644,18 +641,17 @@ def _save_results_debug_s3(all_results: list[dict], event, wall_time: float = 0.
     if ci_failures is None:
         ci_failures = []
     
-    batch_idx = f"{event.batch_idx}"
-    search_id = f"{event.search_id}"
-    document_id = f"{event.document_id}"
-    tenant = getTenantFromEvent(event)
+    batch_idx = event.get('batch_idx')
+    search_id = event.get('search_id')
+    document_id = event.get('document_id')
+    tenant_name = event.get("tenant_name", "")
     debug_json = {
         "run": {
             "timestamp":   datetime.now().isoformat(),
             "document_id": document_id,
-            "ci_file":     str(event.ci_file),
             "opensearch":  OPENSEARCH_ENDPOINT,
-            "skip_rerank": event.skip_rerank,
-            "skip_verify": event.skip_verify,
+            "skip_rerank": event.get("skip_rerank", False),
+            "skip_verify": event.get("skip_verify", False),
         },
         "concurrency": {
             "ci_workers":      SEARCH_CI_WORKERS,
@@ -803,7 +799,7 @@ def _save_results_debug_s3(all_results: list[dict], event, wall_time: float = 0.
         "combined_est_cost_usd": round(v_cost + ec_cost, 4),
     }
 
-    s3_url = _upload_debug_json_to_s3(debug_json, search_id, batch_idx, document_id, tenant_name=tenant['name'])
+    s3_url = _upload_debug_json_to_s3(debug_json, search_id, batch_idx, document_id, tenant_name)
     return s3_url
 
 
@@ -1243,15 +1239,10 @@ def handler(event: dict, context: Any) -> dict:
     batch_idx   = event.get("batch_idx", 0)
     enriched_cis = event.get("cis", [])
     document_id  = event.get("document_id", "")
-    tenant_name  = event.get("tenant", "")
+    tenant_name  = event.get("tenant_name", "")
     doc_context  = event.get("document_context", {})
     skip_rerank  = bool(event.get("skip_rerank", False))
     skip_verify  = bool(event.get("skip_verify",  False))
-    
-    # Fallback to getTenantFromEvent if tenant not in payload
-    if not tenant_name:
-        tenant = getTenantFromEvent(event)
-        tenant_name = tenant["name"]
     
     n_workers    = SEARCH_CI_WORKERS
 
@@ -1283,7 +1274,7 @@ def handler(event: dict, context: Any) -> dict:
     ]
 
     t_total = time.perf_counter()
-    all_reqs, stage_wall = _run_pipeline(all_reqs, skip_rerank, skip_verify, n_workers, tenant)
+    all_reqs, stage_wall = _run_pipeline(all_reqs, skip_rerank, skip_verify, n_workers, tenant_name)
     wall_time = round(time.perf_counter() - t_total, 3)
 
     # ── Track CI-level success/failure ─────────────────────────────────────────
