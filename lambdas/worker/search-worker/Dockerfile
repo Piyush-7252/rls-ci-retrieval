@@ -10,14 +10,6 @@ COPY lambdas/worker/search-worker/requirements.txt ${LAMBDA_TASK_ROOT}/requireme
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
-# Bake BAAI/bge-reranker-base into the image at build time.
-# At Lambda runtime the reranker copies this to /tmp before loading
-# (same pattern as GLiNER in the NER lambda).
-ENV HF_HOME=/var/task/models
-RUN python3 -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-base')" && \
-    find /var/task/models -type f -exec chmod a+r {} + && \
-    find /var/task/models -type d -exec chmod a+rx {} +
-
 COPY shared ${LAMBDA_TASK_ROOT}/shared
 COPY lambdas ${LAMBDA_TASK_ROOT}/lambdas
 COPY lambdas/worker/search-worker/lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
