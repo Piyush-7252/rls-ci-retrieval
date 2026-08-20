@@ -396,19 +396,17 @@ def _s4_context_expand(req: dict) -> dict:
 
 
 def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
+    """Reranking stage — currently always skips reranker for cold start reduction."""
     if req.get("_failed") or req.get("_early_exit"):
         return req
     t0 = time.perf_counter()
-    if skip_rerank:
-        expanded = req.get("expanded_candidates", [])
-        req["ranked_candidates"] = [
-            # Set score above MIN_RERANK_SCORE (3.0) so all candidates reach Claude
-            {**c, "cross_encoder_score": 10.0}
-            for c in expanded
-        ]
-    else:
-        mod = _load("search/reranker", "search_reranker")
-        req = mod._process(req)
+    # Skip reranker entirely (skip_rerank always True) — set uniform score
+    expanded = req.get("expanded_candidates", [])
+    req["ranked_candidates"] = [
+        # Set score above MIN_RERANK_SCORE (3.0) so all candidates reach Claude
+        {**c, "cross_encoder_score": 10.0}
+        for c in expanded
+    ]
     req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
 
     # 5.5 Numeric gate
