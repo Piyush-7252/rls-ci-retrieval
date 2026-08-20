@@ -28,12 +28,6 @@ def get_opensearch_client():
         # Disable urllib3 warnings
         urllib3.disable_warnings()
         
-        # Set urllib3 connection pool size BEFORE creating OpenSearch client
-        # This is the actual connection pool that was showing "pool size: 10"
-        from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
-        HTTPConnectionPool.maxsize = OPENSEARCH_MAXSIZE
-        HTTPSConnectionPool.maxsize = OPENSEARCH_MAXSIZE
-        
         frozen  = boto3.Session().get_credentials().get_frozen_credentials()
         awsauth = AWS4Auth(
             frozen.access_key, frozen.secret_key, AWS_REGION, "es",
@@ -51,6 +45,14 @@ def get_opensearch_client():
             retry_on_timeout=True,
             maxsize=OPENSEARCH_MAXSIZE,  # OpenSearch client's connection pool size
         )
+        
+        # Configure HTTPAdapter pool size on the requests session inside each connection
+        from requests.adapters import HTTPAdapter
+        for conn in _os_client.transport.connection_pool.connections:
+            if hasattr(conn, "session"):
+                # Set both HTTP and HTTPS adapter pool sizes to match OPENSEARCH_MAXSIZE
+                conn.session.mount("https://", HTTPAdapter(pool_connections=OPENSEARCH_MAXSIZE, pool_maxsize=OPENSEARCH_MAXSIZE))
+                conn.session.mount("http://",  HTTPAdapter(pool_connections=OPENSEARCH_MAXSIZE, pool_maxsize=OPENSEARCH_MAXSIZE))
     
     return _os_client
 
