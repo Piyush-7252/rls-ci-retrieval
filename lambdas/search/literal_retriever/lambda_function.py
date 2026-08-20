@@ -30,26 +30,10 @@ TOP_K               = int(os.environ.get("RETRIEVER_TOP_K", "10"))
 # Exact/phrase hits are always evidence — never cap on a hard k.
 LITERAL_MAX         = int(os.environ.get("LITERAL_MAX", "200"))
 
-_os_client = None
+from shared.opensearch_client import get_opensearch_client
 
 def _get_os():
-    global _os_client
-    if _os_client is None:
-        import boto3
-        from opensearchpy import OpenSearch, RequestsHttpConnection
-        from requests_aws4auth import AWS4Auth
-        frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
-                          session_token=frozen.token)
-        _os_client = OpenSearch(
-            hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-            http_auth=awsauth, use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-            max_retries=2,
-            retry_on_timeout=True,
-        )
-    return _os_client
+    return get_opensearch_client()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

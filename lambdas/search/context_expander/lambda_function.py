@@ -41,39 +41,10 @@ AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 CONTEXT_CHARS          = int(os.environ.get("CONTEXT_CHARS", "500"))
 CONTEXT_WINDOW         = int(os.environ.get("CONTEXT_WINDOW", "3"))   # objects before+after match
 OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
-_aws: dict = {}
-_os_client = None
-
-def _get(service: str):
-    if service not in _aws:
-        import boto3
-        _aws[service] = boto3.client(service)
-    return _aws[service]
 
 def _get_os():
-    global _os_client
-    if _os_client is None:
-        import boto3
-        from opensearchpy import OpenSearch, RequestsHttpConnection
-        from requests_aws4auth import AWS4Auth
-        frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
-                          session_token=frozen.token)
-        _os_client = OpenSearch(
-            hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-            http_auth=awsauth, use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
-            timeout=30,
-            max_retries=2,
-            retry_on_timeout=True,
-            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
-        )
-        from requests.adapters import HTTPAdapter as _HA
-        for _conn in _os_client.transport.connection_pool.connections:
-            if hasattr(_conn, "session"):
-                _conn.session.mount("https://", _HA(pool_maxsize=64, pool_connections=16))
-                _conn.session.mount("http://",  _HA(pool_maxsize=64, pool_connections=16))
-    return _os_client
+    from shared.opensearch_client import get_opensearch_client
+    return get_opensearch_client()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

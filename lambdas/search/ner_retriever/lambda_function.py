@@ -30,23 +30,10 @@ def _adaptive_k(page_count: int, base_k: int = 10) -> int:
     if page_count < 10_000: return max(base_k, 50)
     return max(base_k, 75)
 
-_os_client = None
+from shared.opensearch_client import get_opensearch_client
 
 def _get_os():
-    global _os_client
-    if _os_client is None:
-        import boto3
-        from opensearchpy import OpenSearch, RequestsHttpConnection
-        from requests_aws4auth import AWS4Auth
-        frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
-                          session_token=frozen.token)
-        _os_client = OpenSearch(
-            hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
-            http_auth=awsauth, use_ssl=True, verify_certs=True,
-            connection_class=RequestsHttpConnection,
-        )
-    return _os_client
+    return get_opensearch_client()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
