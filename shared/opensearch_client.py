@@ -30,7 +30,7 @@ def get_opensearch_client():
         
         # Set urllib3 connection pool size BEFORE creating OpenSearch client
         # This is the actual connection pool that was showing "pool size: 10"
-        from urllib3.util.connection import HTTPConnectionPool, HTTPSConnectionPool
+        from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
         HTTPConnectionPool.maxsize = OPENSEARCH_MAXSIZE
         HTTPSConnectionPool.maxsize = OPENSEARCH_MAXSIZE
         
