@@ -233,8 +233,10 @@ def _invoke_worker(batch_payload: dict) -> dict:
     """Synchronously invoke the Search Worker Lambda and return its response."""
     if not WORKER_LAMBDA_ARN:
         raise RuntimeError("WORKER_LAMBDA_ARN env var is not set")
+    # Extract function name from ARN (format: arn:aws:lambda:region:account:function:name)
+    function_name = WORKER_LAMBDA_ARN.split(":")[-1]
     resp = _get("lambda").invoke(
-        FunctionName   = WORKER_LAMBDA_ARN,
+        FunctionName   = function_name,
         InvocationType = "RequestResponse",
         Payload        = json.dumps(batch_payload).encode(),
     )
