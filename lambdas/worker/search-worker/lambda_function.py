@@ -48,48 +48,66 @@ import time
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar, copy_context
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# Add stdout handler so logs appear in CloudWatch
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        '[%(levelname)s]\t%(asctime)s\t%(name)s\t%(message)s'
-    )
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+# ── Logging Context Variables (thread-safe for concurrent execution) ───────
+_ctx_tenant = ContextVar("tenant", default="-")
+_ctx_document_id = ContextVar("document_id", default="-")
+_ctx_search_id = ContextVar("search_id", default="-")
+_ctx_batch_idx = ContextVar("batch_idx", default="-")
+_ctx_ci_id = ContextVar("ci_id", default="-")
 
 
-class SearchLoggerAdapter(logging.LoggerAdapter):
-    """Structured logging adapter that injects search context into every log.
+class SearchContextFilter(logging.Filter):
+    """Logging filter that injects search context into all log records.
     
-    Hierarchical context:
-      [tenant=xxx] [document=yyy] [search=zzz] [batch=n] [ci=m]
+    Automatically adds [tenant=...] [document=...] [search=...] [batch=...] [ci=...]
+    prefix to every log from any module, without requiring manual propagation.
     """
 
-    def process(self, msg, kwargs):
-        ctx = self.extra
-        prefix = (
-            f"[tenant={ctx.get('tenant', '-')}] "
-            f"[document={ctx.get('document_id', '-')}] "
-            f"[search={ctx.get('search_id', '-')}]"
-        )
-        if ctx.get("batch_idx") is not None:
-            prefix += f" [batch={ctx['batch_idx']}]"
-        if ctx.get("ci_id") is not None:
-            prefix += f" [ci={ctx['ci_id']}]"
-        return f"{prefix} {msg}", kwargs
+    def filter(self, record: logging.LogRecord) -> bool:
+        tenant = _ctx_tenant.get()
+        document_id = _ctx_document_id.get()
+        search_id = _ctx_search_id.get()
+        batch_idx = _ctx_batch_idx.get()
+        ci_id = _ctx_ci_id.get()
+        
+        prefix = f"[tenant={tenant}] [document={document_id}] [search={search_id}]"
+        if batch_idx != "-":
+            prefix += f" [batch={batch_idx}]"
+        if ci_id != "-":
+            prefix += f" [ci={ci_id}]"
+        
+        record.msg = f"{prefix} {record.msg}"
+        return True
 
 
-# Module-level logger set in handler(); used by _safe_stage_wrapper
-_SEARCH_LOG: SearchLoggerAdapter | None = None
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# Configure root logger so all dynamically loaded modules inherit the context filter
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Add context filter to all existing handlers (preserve Lambda's CloudWatch handler)
+context_filter = SearchContextFilter()
+for handler in root_logger.handlers:
+    handler.addFilter(context_filter)
+
+# If no handlers exist, create one (e.g., local testing)
+if not root_logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] [%(name)s] %(message)s'
+    )
+    handler.setFormatter(formatter)
+    handler.addFilter(context_filter)
+    root_logger.addHandler(handler)
 
 _task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
 if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
@@ -337,8 +355,13 @@ def _s2_retrieve(req: dict) -> dict:
         elapsed = round(time.perf_counter() - t0, 3)
         return strategy, result, elapsed
 
+    # Propagate ContextVar to nested retriever threads so [ci=...] appears in their logs
     with ThreadPoolExecutor(max_workers=min(RETRIEVER_WORKERS, len(valid))) as pool:
-        raw = list(pool.map(_run_one, valid))
+        futures = [
+            pool.submit(copy_context().run, _run_one, s_path)
+            for s_path in valid
+        ]
+        raw = [f.result() for f in futures]
 
     timings: dict[str, float] = {}
     retriever_results = []
@@ -544,22 +567,20 @@ def _s9_evidence_classify(req: dict, skip_verify: bool = False) -> dict:
 # ── Pipeline ───────────────────────────────────────────────────────────────────
 
 def _safe_stage_wrapper(stage_key: str, stage_fn, req: dict) -> dict:
-    """Wrap stage functions to catch exceptions and mark CI as failed."""
+    """Wrap stage functions to catch exceptions and mark CI as failed.
+    
+    Sets CI context for all logs during this CI's stage processing.
+    """
     if req.get("_failed") or req.get("_early_exit"):
         return req
+    
+    ci_id = req["ci"].get("id")
+    token = _ctx_ci_id.set(ci_id)
+    
     try:
         return stage_fn(req)
     except Exception as exc:
-        ci_id = req["ci"].get("id")
-        if _SEARCH_LOG:
-            ci_log = SearchLoggerAdapter(
-                _SEARCH_LOG.logger,
-                {**_SEARCH_LOG.extra, "ci_id": ci_id},
-            )
-            ci_log.error("[SearchWorker] failed in stage %s: %s", stage_key, exc)
-        else:
-            logger.error("[SearchWorker] CI %s failed in stage %s: %s",
-                         ci_id, stage_key, exc)
+        logger.error("[SearchWorker] failed in stage %s: %s", stage_key, exc)
         req["_failed"] = True
         req["_failure"] = {
             "stage": stage_key,
@@ -567,6 +588,8 @@ def _safe_stage_wrapper(stage_key: str, stage_fn, req: dict) -> dict:
             "error": str(exc),
         }
         return req
+    finally:
+        _ctx_ci_id.reset(token)  # Properly restore previous context
 
 
 def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
@@ -598,16 +621,10 @@ def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
                 all_reqs
             ))
         stage_wall[stage_key] = round(time.perf_counter() - t_stage, 3)
-        if _SEARCH_LOG:
-            _SEARCH_LOG.info("[SearchWorker] stage %s done in %.1fs (%d active)",
-                             stage_key, stage_wall[stage_key], active)
-        else:
-            logger.info("[SearchWorker] for tenant %s stage %s done in %.1fs (%d active)",
-                        tenant_name, stage_key, stage_wall[stage_key], active)
-    if _SEARCH_LOG:
-        _SEARCH_LOG.info("[SearchWorker] stage wall summary: %s", stage_wall)
-    else:
-        logger.info("[SearchWorker] for tenant %s stage wall summary: %s", tenant_name, stage_wall)
+        logger.info("[SearchWorker] stage %s done in %.1fs (%d active)",
+                    stage_key, stage_wall[stage_key], active)
+    
+    logger.info("[SearchWorker] stage wall summary: %s", stage_wall)
     return all_reqs, stage_wall
 
 
@@ -1199,24 +1216,16 @@ def _upload_debug_json_to_s3(debug_json: dict, search_id: str, batch_idx: int, d
             ContentType="application/json",
         )
         s3_url = f"s3://{bucket}/{s3_key}"
-        if _SEARCH_LOG:
-            _SEARCH_LOG.info("[S3] debug results uploaded to %s", s3_url)
-        else:
-            logger.info("[S3] debug results uploaded to %s", s3_url)
+        logger.info("[S3] debug results uploaded to %s", s3_url)
         return s3_url
     except Exception as exc:
-        if _SEARCH_LOG:
-            _SEARCH_LOG.warning("[S3] failed to upload debug JSON: %s", exc)
-        else:
-            logger.warning("[S3] failed to upload debug JSON: %s", exc)
+        logger.warning("[S3] failed to upload debug JSON: %s", exc)
         return ""
 
 
 # ── Lambda handler ─────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
-    global _SEARCH_LOG
-    
     search_id   = event.get("search_id", str(uuid.uuid4()))
     batch_idx   = event.get("batch_idx", 0)
     enriched_cis = event.get("cis", [])
@@ -1228,18 +1237,15 @@ def handler(event: dict, context: Any) -> dict:
     
     n_workers    = SEARCH_CI_WORKERS
 
-    # ── Create structured logger with search+batch context ────────────────────────────────────────────────────────────────
-    _SEARCH_LOG = SearchLoggerAdapter(
-        logging.getLogger("search.worker"),
-        {
-            "tenant": tenant_name,
-            "document_id": document_id,
-            "search_id": search_id,
-            "batch_idx": batch_idx,
-        },
-    )
-
-    _SEARCH_LOG.info("[SearchWorker] start cis=%d", len(enriched_cis))
+    # ── Set context variables for all logs (automatically injected by SearchContextFilter) ────────────────────────────────
+    _ctx_tenant.set(tenant_name)
+    _ctx_document_id.set(document_id)
+    _ctx_search_id.set(search_id)
+    _ctx_batch_idx.set(str(batch_idx))
+    
+    # Test log to verify this version is deployed
+    logger.info("🔥 SEARCH WORKER VERSION 2026-08-20 — context vars active")
+    logger.info("[SearchWorker] start cis=%d", len(enriched_cis))
 
     all_reqs = [
         {
@@ -1282,7 +1288,7 @@ def handler(event: dict, context: Any) -> dict:
     results = [_build_result(r) for r in completed_cis]  # Only return completed CIs
     total_hits = sum(len(r.get("final_hits", [])) for r in results)
     
-    _SEARCH_LOG.info(
+    logger.info(
         "[SearchWorker] done wall=%.1fs "
         "cis_total=%d completed=%d failed=%d hits=%d",
         wall_time,

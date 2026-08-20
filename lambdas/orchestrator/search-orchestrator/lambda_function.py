@@ -63,16 +63,54 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 from shared.utility import getTenantFromEvent
 
+# ── Logging Context Variables (thread-safe for concurrent batch execution) ───────
+_ctx_tenant = ContextVar("tenant", default="-")
+_ctx_document_id = ContextVar("document_id", default="-")
+_ctx_search_id = ContextVar("search_id", default="-")
+_ctx_batch_idx = ContextVar("batch_idx", default="-")
+
+
+class SearchContextFilter(logging.Filter):
+    """Logging filter that injects search context into all log records.
+    
+    Automatically adds [tenant=...] [document=...] [search=...] [batch=...]
+    prefix to every log from any module, without requiring manual propagation.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        tenant = _ctx_tenant.get()
+        document_id = _ctx_document_id.get()
+        search_id = _ctx_search_id.get()
+        batch_idx = _ctx_batch_idx.get()
+        
+        prefix = f"[tenant={tenant}] [document={document_id}] [search={search_id}]"
+        if batch_idx != "-":
+            prefix += f" [batch={batch_idx}]"
+        
+        record.msg = f"{prefix} {record.msg}"
+        return True
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Add stdout handler so logs appear in CloudWatch
-if not logger.handlers:
+# Configure root logger so all dynamically loaded modules inherit the context filter
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Add context filter to all existing handlers (preserve Lambda's CloudWatch handler)
+context_filter = SearchContextFilter()
+for handler in root_logger.handlers:
+    handler.addFilter(context_filter)
+
+# If no handlers exist, create one (e.g., local testing)
+if not root_logger.handlers:
     import sys
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.INFO)
@@ -80,28 +118,8 @@ if not logger.handlers:
         '[%(levelname)s]\t%(asctime)s\t%(name)s\t%(message)s'
     )
     handler.setFormatter(formatter)
-    logger.addHandler(handler)
-
-
-class SearchLoggerAdapter(logging.LoggerAdapter):
-    """Structured logging adapter that injects search context into every log.
-    
-    Hierarchical context:
-      [tenant=xxx] [document=yyy] [search=zzz] [batch=n] [ci=m]
-    """
-
-    def process(self, msg, kwargs):
-        ctx = self.extra
-        prefix = (
-            f"[tenant={ctx.get('tenant', '-')}] "
-            f"[document={ctx.get('document_id', '-')}] "
-            f"[search={ctx.get('search_id', '-')}]"
-        )
-        if ctx.get("batch_idx") is not None:
-            prefix += f" [batch={ctx['batch_idx']}]"
-        if ctx.get("ci_id") is not None:
-            prefix += f" [ci={ctx['ci_id']}]"
-        return f"{prefix} {msg}", kwargs
+    handler.addFilter(context_filter)
+    root_logger.addHandler(handler)
 
 _task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
 if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
@@ -188,8 +206,7 @@ def _get_os():
 
 # ── Document context ───────────────────────────────────────────────────────────
 
-def _load_document_context(document_id: str, log: SearchLoggerAdapter | None = None) -> dict:
-    log = log or logger
+def _load_document_context(document_id: str) -> dict:
     path = Path(DOCUMENT_ASSETS_PATH)
     if not path.exists():
         return {}
@@ -197,15 +214,14 @@ def _load_document_context(document_id: str, log: SearchLoggerAdapter | None = N
         with path.open() as fh:
             return json.load(fh).get(document_id, {})
     except Exception as exc:
-        log.warning("[Orchestrator] document_context load failed: %s", exc)
+        logger.warning("[Orchestrator] document_context load failed: %s", exc)
         return {}
 
 
 # ── CI enrichment lookup ───────────────────────────────────────────────────────
 
-def _lookup_ci(raw_ci: dict, log: SearchLoggerAdapter | None = None) -> dict | None:
+def _lookup_ci(raw_ci: dict) -> dict | None:
     """Fetch the enriched CI from the ci-objects OpenSearch index."""
-    log = log or logger
     ci_id = raw_ci.get("id")
     if ci_id is None:
         return None
@@ -213,7 +229,7 @@ def _lookup_ci(raw_ci: dict, log: SearchLoggerAdapter | None = None) -> dict | N
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
         resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(ci_id), ignore=[404])
         if not resp.get("found"):
-            log.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
+            logger.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
             return None
         doc = resp["_source"]
         enrichment_fields = {k: doc.get(k, default)
@@ -245,17 +261,16 @@ def _lookup_ci(raw_ci: dict, log: SearchLoggerAdapter | None = None) -> dict | N
             },
         }
     except Exception as exc:
-        log.warning("[Orchestrator] lookup failed ci_id=%s: %s", ci_id, exc)
+        logger.warning("[Orchestrator] lookup failed ci_id=%s: %s", ci_id, exc)
         return None
 
 
-def _load_cis_parallel(raw_cis: list[dict], n_workers: int, log: SearchLoggerAdapter | None = None) -> list[dict]:
+def _load_cis_parallel(raw_cis: list[dict], n_workers: int) -> list[dict]:
     """Bulk-fetch enriched CIs from ci-objects in parallel."""
-    log = log or logger
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        results = list(pool.map(lambda ci: _lookup_ci(ci, log), raw_cis))
+        results = list(pool.map(lambda ci: _lookup_ci(ci), raw_cis))
     enriched = [r for r in results if r is not None]
-    log.info("[Orchestrator] enriched %d/%d CIs", len(enriched), len(raw_cis))
+    logger.info("[Orchestrator] enriched %d/%d CIs", len(enriched), len(raw_cis))
     return enriched
 
 
@@ -305,27 +320,22 @@ def handler(event: dict, context: Any) -> dict:
     skip_rerank = bool(event.get("skip_rerank", False))
     skip_verify = bool(event.get("skip_verify",  False))
 
-    # ── Create structured logger with search context ──────────────────────────────────────────────
-    log = SearchLoggerAdapter(
-        logging.getLogger("search.orchestrator"),
-        {
-            "tenant": tenant["name"],
-            "document_id": document_id,
-            "search_id": search_id,
-        },
-    )
+    # ── Set logging context via ContextVar (applies to all logs automatically) ──────────────────
+    _ctx_tenant.set(tenant["name"])
+    _ctx_document_id.set(document_id)
+    _ctx_search_id.set(search_id)
 
-    log.info("[Orchestrator] start cis=%d batch_size=%d", len(raw_cis), batch_size)
+    logger.info("[Orchestrator] start cis=%d batch_size=%d", len(raw_cis), batch_size)
 
     # ── Document context ────────────────────────────────────────────────────
-    doc_context = event.get("document_context") or _load_document_context(document_id, log)
+    doc_context = event.get("document_context") or _load_document_context(document_id)
 
     # ── Load enriched CIs ───────────────────────────────────────────────────
     t0         = time.perf_counter()
     n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
-    enriched   = _load_cis_parallel(raw_cis, n_lookup_workers, log)
+    enriched   = _load_cis_parallel(raw_cis, n_lookup_workers)
     if not enriched:
-        log.warning("[Orchestrator] no enriched CIs found — returning empty result")
+        logger.warning("[Orchestrator] no enriched CIs found — returning empty result")
         return {
             "search_id": search_id, "document_id": document_id,
             "n_cis": 0, "n_batches": 0, "results": [],
@@ -335,7 +345,7 @@ def handler(event: dict, context: Any) -> dict:
     # ── Split into batches ──────────────────────────────────────────────────
     batches = [enriched[i:i + batch_size] for i in range(0, len(enriched), batch_size)]
     n_batches = len(batches)
-    log.info("[Orchestrator] %d CIs → %d batches of ≤%d", len(enriched), n_batches, batch_size)
+    logger.info("[Orchestrator] %d CIs → %d batches of ≤%d", len(enriched), n_batches, batch_size)
 
     # ── Fan-out: invoke all workers concurrently ────────────────────────────
     payloads = [
@@ -354,7 +364,7 @@ def handler(event: dict, context: Any) -> dict:
 
     # ── Concurrency: default to conservative 3 batches max (prevent OpenSearch 429s)
     n_invoke_workers = int(min(MAX_WORKERS, n_batches))
-    log.info("[Orchestrator] parallelism: %d batches max", n_invoke_workers)
+    logger.info("[Orchestrator] parallelism: %d batches max", n_invoke_workers)
 
     all_results:  list[dict]             = [{}] * n_batches
     all_walls:    list[dict[str, float]] = []
@@ -369,11 +379,11 @@ def handler(event: dict, context: Any) -> dict:
                 batch_response = future.result()
                 all_results[idx] = batch_response
                 all_walls.append(batch_response.get("stage_wall", {}))
-                log.info("[Orchestrator] batch %d/%d done (%.1fs)",
+                logger.info("[Orchestrator] batch %d/%d done (%.1fs)",
                          idx + 1, n_batches,
                          batch_response.get("wall_time", 0.0))
             except Exception as exc:
-                log.error("[Orchestrator] batch %d failed: %s", idx, exc)
+                logger.error("[Orchestrator] batch %d failed: %s", idx, exc)
                 failed_batches.add(idx)
                 errors.append({
                     "batch_idx": idx,
@@ -432,7 +442,7 @@ def handler(event: dict, context: Any) -> dict:
     else:
         status = "COMPLETED"  # Everything succeeded
     
-    log.info(
+    logger.info(
         "[Orchestrator] done wall=%.1fs status=%s "
         "cis_expected=%d cis_completed=%d cis_failed_in_worker=%d failed_batches=%d",
         wall_time, status,
@@ -468,7 +478,7 @@ def handler(event: dict, context: Any) -> dict:
             Body        = body,
             ContentType = "application/json",
         )
-        log.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
+        logger.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
                  RESULTS_BUCKET, s3_key, len(body))
         # Return lightweight summary + pointer
         summary = {
