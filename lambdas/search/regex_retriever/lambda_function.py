@@ -23,6 +23,7 @@ logger.setLevel(logging.INFO)
 
 OPENSEARCH_ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_INDEX    = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
+OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
 AWS_REGION          = os.environ.get("AWS_REGION", "us-east-1")
 TOP_K               = int(os.environ.get("RETRIEVER_TOP_K", "10"))
 FETCH_SIZE          = int(os.environ.get("REGEX_FETCH_SIZE", "200"))
@@ -45,6 +46,7 @@ def _get_os():
             timeout=30,
             max_retries=2,
             retry_on_timeout=True,
+            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
         )
     return _os_client
 

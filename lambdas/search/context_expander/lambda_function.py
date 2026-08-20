@@ -40,7 +40,7 @@ SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-obje
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 CONTEXT_CHARS          = int(os.environ.get("CONTEXT_CHARS", "500"))
 CONTEXT_WINDOW         = int(os.environ.get("CONTEXT_WINDOW", "3"))   # objects before+after match
-
+OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
 _aws: dict = {}
 _os_client = None
 
@@ -66,6 +66,7 @@ def _get_os():
             timeout=30,
             max_retries=2,
             retry_on_timeout=True,
+            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
         )
         from requests.adapters import HTTPAdapter as _HA
         for _conn in _os_client.transport.connection_pool.connections:

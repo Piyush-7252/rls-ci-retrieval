@@ -38,7 +38,6 @@ Env vars
 
 from __future__ import annotations
 
-import datetime
 import importlib.util
 import json
 import logging
@@ -49,6 +48,7 @@ import time
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -109,7 +109,7 @@ OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 OPENSEARCH_CI_INDEX    = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
 OPENSEARCH_TIMEOUT     = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))
-OPENSEARCH_MAXSIZE     = int(os.environ.get("OPENSEARCH_MAXSIZE", "64"))  # Connection pool size
+OPENSEARCH_MAXSIZE     = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size (RETRIEVER_WORKERS × max concurrent CIs + buffer)
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 BEDROCK_REGION         = os.environ.get("BEDROCK_REGION", AWS_REGION)
 VERIFIER_MODEL         = os.environ.get("VERIFIER_MODEL",

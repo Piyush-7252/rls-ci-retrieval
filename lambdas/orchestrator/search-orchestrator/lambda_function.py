@@ -35,17 +35,22 @@ Output
 Env vars
 --------
   WORKER_LAMBDA_ARN       — ARN of the Search Worker Lambda (required)
-  OPENSEARCH_ENDPOINT     — host only (no https://)
-  OPENSEARCH_CI_INDEX     — default: ci-objects
+                             e.g., arn:aws:lambda:eu-west-1:064051750322:function:rls-ci-retrieval-search-worker
+  OPENSEARCH_ENDPOINT     — host only, no https:// (required)
+                             e.g., search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com
+  OPENSEARCH_CI_INDEX     — CI objects index (default: ci-objects)
+  OPENSEARCH_MAXSIZE      — Connection pool size (default: 128)
   EMBEDDING_MODEL         — Bedrock embedding model for CI lookup fallback
-  AWS_REGION
-  MAX_WORKERS             — Concurrent Worker Lambdas (default: 3, prevents OpenSearch 429s)
-  OPENSEARCH_MAXSIZE      — Connection pool size (default: 64)
-  DOCUMENT_ASSETS_PATH    — local path to document_assets.json (optional)
-  RESULTS_BUCKET          — S3 bucket to write full result JSON (required)
-  RESULTS_PREFIX          — S3 key prefix (default: search-results)
+  AWS_REGION              — AWS region (required)
+  CI_LOOKUP_WORKERS       — Concurrent threads for CI enrichment (default: 10)
+  MAX_WORKERS             — Concurrent Worker Lambda invocations (default: 3, prevents OpenSearch 429s)
+  DOCUMENT_ASSETS_PATH    — Local path to document_assets.json (optional)
+  RESULTS_BUCKET          — S3 bucket for full result JSON (required)
+                             e.g., rls-file-bucket-eu
+  RESULTS_PREFIX          — S3 key prefix (default: rls-ci-retrieval-search-results)
   
-  Connection pool per Worker = OPENSEARCH_MAXSIZE (default 64, provides safety margin)
+  Connection pool: OPENSEARCH_MAXSIZE (default 128) provides safety margin for concurrent
+  CI lookups (up to CI_LOOKUP_WORKERS × 2 threads per invocation)
 """
 
 from __future__ import annotations
@@ -99,6 +104,8 @@ if str(ROOT) not in sys.path:
 WORKER_LAMBDA_ARN    = os.environ.get("WORKER_LAMBDA_ARN", "")
 OPENSEARCH_ENDPOINT  = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX  = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
+OPENSEARCH_TIMEOUT   = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))
+OPENSEARCH_MAXSIZE   = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
 AWS_REGION           = os.environ.get("AWS_REGION", "eu-west-1")
 EMBEDDING_MODEL      = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 DOCUMENT_ASSETS_PATH = os.environ.get(
@@ -139,9 +146,10 @@ def _get_os():
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],
             http_auth=awsauth, use_ssl=True, verify_certs=True,
             connection_class=RequestsHttpConnection,
-            timeout=30,
+            timeout=OPENSEARCH_TIMEOUT,
             max_retries=2,
             retry_on_timeout=True,
+            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
         )
     return _os_client
 

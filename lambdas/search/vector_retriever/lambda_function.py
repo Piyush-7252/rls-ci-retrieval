@@ -32,6 +32,7 @@ TIE_BUFFER             = int(os.environ.get("RETRIEVER_TIE_BUFFER", "15"))
 VECTOR_SCORE_RATIO     = float(os.environ.get("VECTOR_SCORE_RATIO", "0.0"))
 VECTOR_MAX_HITS        = int(os.environ.get("VECTOR_MAX_HITS", "100"))
 FETCH_SIZE             = int(os.environ.get("VECTOR_FETCH_SIZE", "100"))
+OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
 # Comma-separated object types to exclude from semantic-objects vector search.
 # Useful for ablation: VECTOR_EXCLUDE_TYPES=sentence  → Variant B (no sentence vectors)
 #                      VECTOR_EXCLUDE_TYPES=sentence,heading → Variant C
@@ -59,6 +60,7 @@ def _get_os():
             timeout=30,
             max_retries=2,
             retry_on_timeout=True,
+            maxsize=OPENSEARCH_MAXSIZE,  # Connection pool size
         )
     return _os_client
 
