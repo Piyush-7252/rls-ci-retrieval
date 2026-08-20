@@ -18,8 +18,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 AWS_REGION="${AWS_REGION:-eu-west-1}"
-FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-worker}"
-ECR_REPO="${ECR_REPO:-rls-ci-worker}"
+FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-retrieval-ci-worker}"
+ECR_REPO="${ECR_REPO:-rls-ci-retrieval-ci-worker}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
 LATEST_TAG="${LATEST_TAG:-latest}"
 ROLE_ARN="${ROLE_ARN:-}"
@@ -91,7 +91,7 @@ docker buildx build \
   --push \
   --cache-from "type=registry,ref=${CACHE_IMAGE_URI}" \
   --cache-to   "type=registry,ref=${CACHE_IMAGE_URI},mode=max,image-manifest=true,oci-mediatypes=true" \
-  -f "$ROOT_DIR/lambdas/ci_worker/Dockerfile" \
+  -f "$ROOT_DIR/lambdas/worker/ci-worker/Dockerfile" \
   -t "$IMAGE_URI" \
   -t "$LATEST_IMAGE_URI" \
   "$ROOT_DIR"

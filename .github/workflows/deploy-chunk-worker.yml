@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "lambdas/chunk_worker/**"
-      - "lambdas/ci_worker/**"
+      - "lambdas/worker/document-chunk-worker/**"
+      - "lambdas/worker/ci-worker/**"
+      - "lambdas/worker/search-worker/**"
+      - "lambdas/orchestrator/search-orchestrator/**"
       - "lambdas/ner/**"
       - "lambdas/normalize/**"
       - "lambdas/embedding/**"
@@ -13,8 +15,10 @@ on:
       - "lambdas/index/**"
       - "lambdas/extraction/**"
       - "shared/**"
-      - "tools/deploy_chunk_worker.sh"
+      - "tools/deploy_document_chunk_worker.sh"
       - "tools/deploy_ci_worker.sh"
+      - "tools/deploy_search_worker.sh"
+      - "tools/deploy_search_orchestrator.sh"
       - ".github/workflows/deploy-chunk-worker.yml"
   workflow_dispatch:
     inputs:
@@ -25,24 +29,28 @@ on:
         type: choice
         options:
           - all
-          - chunk_worker
-          - ci_worker
+          - document-chunk-worker
+          - ci-worker
+          - search-worker
+          - search-orchestrator
 
 jobs:
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      chunk_worker: ${{ steps.filter.outputs.chunk_worker }}
-      ci_worker:    ${{ steps.filter.outputs.ci_worker }}
+      document_chunk_worker: ${{ steps.filter.outputs.document_chunk_worker }}
+      ci_worker:            ${{ steps.filter.outputs.ci_worker }}
+      search_worker:        ${{ steps.filter.outputs.search_worker }}
+      search_orchestrator:  ${{ steps.filter.outputs.search_orchestrator }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
-            chunk_worker:
-              - 'lambdas/chunk_worker/**'
+            document_chunk_worker:
+              - 'lambdas/worker/document-chunk-worker/**'
               - 'lambdas/ner/**'
               - 'lambdas/normalize/**'
               - 'lambdas/embedding/**'
@@ -53,7 +61,7 @@ jobs:
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
             ci_worker:
-              - 'lambdas/ci_worker/**'
+              - 'lambdas/worker/ci-worker/**'
               - 'lambdas/ner/**'
               - 'lambdas/normalize/**'
               - 'lambdas/embedding/**'
@@ -61,21 +69,30 @@ jobs:
               - 'lambdas/index/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
+            search_worker:
+              - 'lambdas/worker/search-worker/**'
+              - 'lambdas/search/evidence_classification/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
+            search_orchestrator:
+              - 'lambdas/orchestrator/search-orchestrator/**'
+              - 'shared/**'
+              - '.github/workflows/deploy-chunk-worker.yml'
 
-  # ── chunk_worker ──────────────────────────────────────────────────────────────
-  deploy-chunk-worker:
-    name: Deploy chunk_worker (rls-ci-chunk-worker)
+  # ── document-chunk-worker ────────────────────────────────────────────────────────
+  deploy-document-chunk-worker:
+    name: Deploy document-chunk-worker (rls-ci-retrieval-document-chunk-worker)
     needs: changes
     if: |
-      (github.event_name == 'push' && needs.changes.outputs.chunk_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'chunk_worker'))
+      (github.event_name == 'push' && needs.changes.outputs.document_chunk_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'document-chunk-worker'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
     env:
       AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-ci-chunk-worker
-      ECR_REPO:      rls-ci-chunk-worker
+      FUNCTION_NAME: rls-ci-retrieval-document-chunk-worker
+      ECR_REPO:      rls-ci-retrieval-document-chunk-worker
 
     steps:
       - uses: actions/checkout@v4
@@ -90,23 +107,23 @@ jobs:
           ROLE_ARN: ${{ secrets.ROLE_ARN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          chmod +x tools/deploy_chunk_worker.sh
-          tools/deploy_chunk_worker.sh
+          chmod +x tools/deploy_document_chunk_worker.sh
+          tools/deploy_document_chunk_worker.sh
 
-  # ── ci_worker ─────────────────────────────────────────────────────────────────
+  # ── ci-worker ─────────────────────────────────────────────────────────────────
   deploy-ci-worker:
-    name: Deploy ci_worker (rls-ci-worker)
+    name: Deploy ci-worker (rls-ci-retrieval-ci-worker)
     needs: changes
     if: |
       (github.event_name == 'push' && needs.changes.outputs.ci_worker == 'true') ||
-      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'ci_worker'))
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'ci-worker'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     env:
       AWS_REGION:    eu-west-1
-      FUNCTION_NAME: rls-ci-worker
-      ECR_REPO:      rls-ci-worker
+      FUNCTION_NAME: rls-ci-retrieval-ci-worker
+      ECR_REPO:      rls-ci-retrieval-ci-worker
 
     steps:
       - uses: actions/checkout@v4
@@ -123,3 +140,65 @@ jobs:
         run: |
           chmod +x tools/deploy_ci_worker.sh
           tools/deploy_ci_worker.sh
+
+  # ── search-worker ─────────────────────────────────────────────────────────────────
+  deploy-search-worker:
+    name: Deploy search-worker (rls-ci-retrieval-search-worker)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.search_worker == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search-worker'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-ci-retrieval-search-worker
+      ECR_REPO:      rls-ci-retrieval-search-worker
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          chmod +x tools/deploy_search_worker.sh
+          tools/deploy_search_worker.sh
+
+  # ── search-orchestrator ────────────────────────────────────────────────────────────
+  deploy-search-orchestrator:
+    name: Deploy search-orchestrator (rls-ci-retrieval-search-orchestrator)
+    needs: changes
+    if: |
+      (github.event_name == 'push' && needs.changes.outputs.search_orchestrator == 'true') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search-orchestrator'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      AWS_REGION:    eu-west-1
+      FUNCTION_NAME: rls-ci-retrieval-search-orchestrator
+      ECR_REPO:      rls-ci-retrieval-search-orchestrator
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            eu-west-1
+      - uses: docker/setup-buildx-action@v3
+      - name: Deploy
+        env:
+          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          chmod +x tools/deploy_search_orchestrator.sh
+          tools/deploy_search_orchestrator.sh

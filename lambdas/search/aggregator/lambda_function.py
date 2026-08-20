@@ -61,8 +61,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-CONTEXT_EXPANDER_LAMBDA_ARN = os.environ.get("CONTEXT_EXPANDER_LAMBDA_ARN", "")
-
 # ── #5 Hybrid ranking weights ─────────────────────────────────────────────────
 # Weights represent how much we trust each retriever's score signal.
 # Sum intentionally < 1.0 — entity and relation bonuses fill the rest.
@@ -457,11 +455,6 @@ def handler(event: dict, context: Any) -> dict:
         raise
     logger.info("[Aggregator] done search_id=%s candidates=%d",
                 search_id, len(result["candidates"]))
-    _get("lambda").invoke(
-        FunctionName   = CONTEXT_EXPANDER_LAMBDA_ARN,
-        InvocationType = "Event",
-        Payload        = json.dumps(result).encode(),
-    )
     return result
 
 

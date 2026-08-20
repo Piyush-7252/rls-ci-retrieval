@@ -38,7 +38,6 @@ OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
 AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
-RERANKER_LAMBDA_ARN    = os.environ.get("RERANKER_LAMBDA_ARN", "")
 CONTEXT_CHARS          = int(os.environ.get("CONTEXT_CHARS", "500"))
 CONTEXT_WINDOW         = int(os.environ.get("CONTEXT_WINDOW", "3"))   # objects before+after match
 
@@ -88,12 +87,7 @@ def handler(event: dict, context: Any) -> dict:
         raise
     logger.info("[Context Expander] done search_id=%s expanded=%d",
                 search_id, len(result["expanded_candidates"]))
-    if RERANKER_LAMBDA_ARN:
-        _get("lambda").invoke(
-            FunctionName   = RERANKER_LAMBDA_ARN,
-            InvocationType = "Event",
-            Payload        = json.dumps(result).encode(),
-        )
+    
     return result
 
 

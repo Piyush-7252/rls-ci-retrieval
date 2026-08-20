@@ -128,7 +128,6 @@ except ImportError:
     _DrugRelation = None  # type: ignore
     _DRUG_RELATION_SCORE = {}  # type: ignore
 
-LLM_VERIFIER_LAMBDA_ARN = os.environ.get("LLM_VERIFIER_LAMBDA_ARN", "")
 RERANK_TOP_N             = int(os.environ.get("RERANK_TOP_N", "20"))
 # Fallback fixed top-N for large documents when CE_SCORE_THRESHOLD is not set.
 RERANK_TOP_N_LARGE       = int(os.environ.get("RERANK_TOP_N_LARGE", "35"))
@@ -297,12 +296,7 @@ def handler(event: dict, context: Any) -> dict:
     logger.info("[Reranker] done search_id=%s top_score=%.2f",
                 search_id, result["ranked_candidates"][0]["cross_encoder_score"]
                 if result["ranked_candidates"] else 0.0)
-    if LLM_VERIFIER_LAMBDA_ARN:
-        _get("lambda").invoke(
-            FunctionName   = LLM_VERIFIER_LAMBDA_ARN,
-            InvocationType = "Event",
-            Payload        = json.dumps(result).encode(),
-        )
+
     return result
 
 

@@ -89,15 +89,6 @@ logger.setLevel(logging.INFO)
 
 PAGE_GAP_THRESHOLD = int(os.environ.get("MERGE_PAGE_GAP", "1"))
 
-_aws: dict = {}
-
-def _get(service: str):
-    if service not in _aws:
-        import boto3
-        _aws[service] = boto3.client(service)
-    return _aws[service]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:

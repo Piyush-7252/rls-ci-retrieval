@@ -25,7 +25,6 @@ logger.setLevel(logging.INFO)
 
 BEDROCK_REGION       = os.environ.get("BEDROCK_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 BEDROCK_MODEL        = os.environ.get("VERIFIER_MODEL", "eu.anthropic.claude-haiku-4-5-20251001-v1:0")
-MERGER_LAMBDA_ARN    = os.environ.get("MERGER_LAMBDA_ARN", "")
 MIN_RERANK_SCORE     = float(os.environ.get("MIN_RERANK_SCORE", "0.0"))
 
 _aws: dict = {}
@@ -51,12 +50,7 @@ def handler(event: dict, context: Any) -> dict:
     verified_count = sum(1 for c in result["verified_candidates"]
                          if c.get("verdict") == "YES")
     logger.info("[LLM Verifier] done search_id=%s verified=%d", search_id, verified_count)
-    if MERGER_LAMBDA_ARN:
-        _get("lambda").invoke(
-            FunctionName   = MERGER_LAMBDA_ARN,
-            InvocationType = "Event",
-            Payload        = json.dumps(result).encode(),
-        )
+
     return result
 
 

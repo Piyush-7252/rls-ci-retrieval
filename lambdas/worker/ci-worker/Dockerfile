@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN dnf -y install gcc gcc-c++ make git && dnf clean all
 
-COPY lambdas/ci_worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
+COPY lambdas/worker/ci-worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
@@ -25,6 +25,6 @@ print('GLiNER + deberta tokenizer baked OK')" && \
 
 COPY shared ${LAMBDA_TASK_ROOT}/shared
 COPY lambdas ${LAMBDA_TASK_ROOT}/lambdas
-COPY lambdas/ci_worker/lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
+COPY lambdas/worker/ci-worker/lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
 
 CMD ["lambda_function.handler"]

@@ -60,16 +60,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_aws: dict = {}
-
-
-def _get(service: str):
-    if service not in _aws:
-        import boto3
-        _aws[service] = boto3.client(service)
-    return _aws[service]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # SentenceSpan deserialization (for geometry preservation)
 # ─────────────────────────────────────────────────────────────────────────────

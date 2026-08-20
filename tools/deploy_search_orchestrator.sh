@@ -18,8 +18,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 AWS_REGION="${AWS_REGION:-eu-west-1}"
-FUNCTION_NAME="${FUNCTION_NAME:-rls-search-orchestrator}"
-ECR_REPO="${ECR_REPO:-rls-search-orchestrator}"
+FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-retrieval-search-orchestrator}"
+ECR_REPO="${ECR_REPO:-rls-ci-retrieval-search-orchestrator}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
 LATEST_TAG="${LATEST_TAG:-latest}"
 ROLE_ARN="${ROLE_ARN:-}"
@@ -103,7 +103,7 @@ docker buildx build \
   --push \
   --cache-from "type=registry,ref=${CACHE_IMAGE_URI}" \
   --cache-to   "type=registry,ref=${CACHE_IMAGE_URI},mode=max,image-manifest=true,oci-mediatypes=true" \
-  -f "$ROOT_DIR/lambdas/search_orchestrator/Dockerfile" \
+  -f "$ROOT_DIR/lambdas/orchestrator/search-orchestrator/Dockerfile" \
   -t "$IMAGE_URI" \
   -t "$LATEST_IMAGE_URI" \
   "$ROOT_DIR"

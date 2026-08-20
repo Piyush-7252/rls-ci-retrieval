@@ -15,19 +15,21 @@ Input
     "batch_size":       int  (default: 50),
     "skip_rerank":      bool (default: false),
     "skip_verify":      bool (default: false),
-    "max_workers":      int  (default: number of batches)
 }
 
 Output
 ------
 {
-    "search_id":    str,
-    "document_id":  str,
-    "n_cis":        int,
-    "n_batches":    int,
-    "results":      list[dict],     # per-CI result with final_hits + timings
-    "stage_wall":   dict[str, float],  # max wall-clock per stage across all batches
-    "wall_time":    float
+    "search_id":      str,
+    "document_id":    str,
+    "status":         str (COMPLETED | PARTIAL | FAILED),
+    "expected_cis":   int,
+    "completed_cis":  int,
+    "failed_cis":     int,
+    "batch_summary":  list[dict],      # per-batch status with CI failures
+    "results":        list[dict],      # per-CI result with final_hits
+    "stage_wall":     dict[str, float],  # max wall-clock per stage
+    "wall_time":      float
 }
 
 Env vars
@@ -37,9 +39,13 @@ Env vars
   OPENSEARCH_CI_INDEX     — default: ci-objects
   EMBEDDING_MODEL         — Bedrock embedding model for CI lookup fallback
   AWS_REGION
+  MAX_WORKERS             — Concurrent Worker Lambdas (default: 3, prevents OpenSearch 429s)
+  OPENSEARCH_MAXSIZE      — Connection pool size (default: 64)
   DOCUMENT_ASSETS_PATH    — local path to document_assets.json (optional)
-  RESULTS_BUCKET          — S3 bucket to write full result JSON (required for Lambda invoke)
+  RESULTS_BUCKET          — S3 bucket to write full result JSON (required)
   RESULTS_PREFIX          — S3 key prefix (default: search-results)
+  
+  Connection pool per Worker = OPENSEARCH_MAXSIZE (default 64, provides safety margin)
 """
 
 from __future__ import annotations
@@ -55,8 +61,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from shared.utility import getTenantFromEvent
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+class SearchLoggerAdapter(logging.LoggerAdapter):
+    """Structured logging adapter that injects search context into every log.
+    
+    Hierarchical context:
+      [tenant=xxx] [document=yyy] [search=zzz] [batch=n] [ci=m]
+    """
+
+    def process(self, msg, kwargs):
+        ctx = self.extra
+        prefix = (
+            f"[tenant={ctx.get('tenant', '-')}] "
+            f"[document={ctx.get('document_id', '-')}] "
+            f"[search={ctx.get('search_id', '-')}]"
+        )
+        if ctx.get("batch_idx") is not None:
+            prefix += f" [batch={ctx['batch_idx']}]"
+        if ctx.get("ci_id") is not None:
+            prefix += f" [ci={ctx['ci_id']}]"
+        return f"{prefix} {msg}", kwargs
 
 _task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
 if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
@@ -70,7 +99,7 @@ if str(ROOT) not in sys.path:
 WORKER_LAMBDA_ARN    = os.environ.get("WORKER_LAMBDA_ARN", "")
 OPENSEARCH_ENDPOINT  = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX  = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
-AWS_REGION           = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION           = os.environ.get("AWS_REGION", "eu-west-1")
 EMBEDDING_MODEL      = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 DOCUMENT_ASSETS_PATH = os.environ.get(
     "DOCUMENT_ASSETS_PATH",
@@ -79,8 +108,8 @@ DOCUMENT_ASSETS_PATH = os.environ.get(
 RESULTS_BUCKET  = os.environ.get("RESULTS_BUCKET", "")
 RESULTS_PREFIX  = os.environ.get("RESULTS_PREFIX", "search-results")
 # Max CIs processed in parallel within a single worker Lambda.
-# Keep low on small OpenSearch clusters (2 search threads) to avoid 429s.
-SEARCH_CI_WORKERS = int(os.environ.get("SEARCH_CI_WORKERS", "5"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "3"))
+CI_LOOKUP_WORKERS = int(os.environ.get("CI_LOOKUP_WORKERS", "10"))
 
 _DEFAULT_BATCH_SIZE = 50
 
@@ -119,7 +148,8 @@ def _get_os():
 
 # ── Document context ───────────────────────────────────────────────────────────
 
-def _load_document_context(document_id: str) -> dict:
+def _load_document_context(document_id: str, log: SearchLoggerAdapter | None = None) -> dict:
+    log = log or logger
     path = Path(DOCUMENT_ASSETS_PATH)
     if not path.exists():
         return {}
@@ -127,14 +157,15 @@ def _load_document_context(document_id: str) -> dict:
         with path.open() as fh:
             return json.load(fh).get(document_id, {})
     except Exception as exc:
-        logger.warning("[Orchestrator] document_context load failed: %s", exc)
+        log.warning("[Orchestrator] document_context load failed: %s", exc)
         return {}
 
 
 # ── CI enrichment lookup ───────────────────────────────────────────────────────
 
-def _lookup_ci(raw_ci: dict) -> dict | None:
+def _lookup_ci(raw_ci: dict, log: SearchLoggerAdapter | None = None) -> dict | None:
     """Fetch the enriched CI from the ci-objects OpenSearch index."""
+    log = log or logger
     ci_id = raw_ci.get("id")
     if ci_id is None:
         return None
@@ -142,7 +173,7 @@ def _lookup_ci(raw_ci: dict) -> dict | None:
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
         resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(ci_id), ignore=[404])
         if not resp.get("found"):
-            logger.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
+            log.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
             return None
         doc = resp["_source"]
         enrichment_fields = {k: doc.get(k, default)
@@ -174,16 +205,17 @@ def _lookup_ci(raw_ci: dict) -> dict | None:
             },
         }
     except Exception as exc:
-        logger.warning("[Orchestrator] lookup failed ci_id=%s: %s", ci_id, exc)
+        log.warning("[Orchestrator] lookup failed ci_id=%s: %s", ci_id, exc)
         return None
 
 
-def _load_cis_parallel(raw_cis: list[dict], n_workers: int) -> list[dict]:
+def _load_cis_parallel(raw_cis: list[dict], n_workers: int, log: SearchLoggerAdapter | None = None) -> list[dict]:
     """Bulk-fetch enriched CIs from ci-objects in parallel."""
+    log = log or logger
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        results = list(pool.map(_lookup_ci, raw_cis))
+        results = list(pool.map(lambda ci: _lookup_ci(ci, log), raw_cis))
     enriched = [r for r in results if r is not None]
-    logger.info("[Orchestrator] enriched %d/%d CIs", len(enriched), len(raw_cis))
+    log.info("[Orchestrator] enriched %d/%d CIs", len(enriched), len(raw_cis))
     return enriched
 
 
@@ -226,23 +258,32 @@ def handler(event: dict, context: Any) -> dict:
     search_id   = event.get("search_id") or str(uuid.uuid4())
     raw_cis     = event.get("cis", [])
     document_id = event.get("document_id", "")
+    tenant     = getTenantFromEvent(event)
     batch_size  = int(event.get("batch_size",  _DEFAULT_BATCH_SIZE))
     skip_rerank = bool(event.get("skip_rerank", False))
     skip_verify = bool(event.get("skip_verify",  False))
-    ci_workers  = int(event.get("ci_workers", SEARCH_CI_WORKERS))
 
-    logger.info("[Orchestrator] start search_id=%s doc=%s cis=%d batch_size=%d",
-                search_id, document_id, len(raw_cis), batch_size)
+    # ── Create structured logger with search context ──────────────────────────────────────────────
+    log = SearchLoggerAdapter(
+        logging.getLogger("search.orchestrator"),
+        {
+            "tenant": tenant["name"],
+            "document_id": document_id,
+            "search_id": search_id,
+        },
+    )
+
+    log.info("[Orchestrator] start cis=%d batch_size=%d", len(raw_cis), batch_size)
 
     # ── Document context ────────────────────────────────────────────────────
-    doc_context = event.get("document_context") or _load_document_context(document_id)
+    doc_context = event.get("document_context") or _load_document_context(document_id, log)
 
     # ── Load enriched CIs ───────────────────────────────────────────────────
     t0         = time.perf_counter()
-    n_lookup_workers = min(max(len(raw_cis), 1), 50)
-    enriched   = _load_cis_parallel(raw_cis, n_lookup_workers)
+    n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
+    enriched   = _load_cis_parallel(raw_cis, n_lookup_workers, log)
     if not enriched:
-        logger.warning("[Orchestrator] no enriched CIs found — returning empty result")
+        log.warning("[Orchestrator] no enriched CIs found — returning empty result")
         return {
             "search_id": search_id, "document_id": document_id,
             "n_cis": 0, "n_batches": 0, "results": [],
@@ -252,8 +293,7 @@ def handler(event: dict, context: Any) -> dict:
     # ── Split into batches ──────────────────────────────────────────────────
     batches = [enriched[i:i + batch_size] for i in range(0, len(enriched), batch_size)]
     n_batches = len(batches)
-    logger.info("[Orchestrator] %d CIs → %d batches of ≤%d",
-                len(enriched), n_batches, batch_size)
+    log.info("[Orchestrator] %d CIs → %d batches of ≤%d", len(enriched), n_batches, batch_size)
 
     # ── Fan-out: invoke all workers concurrently ────────────────────────────
     payloads = [
@@ -262,18 +302,22 @@ def handler(event: dict, context: Any) -> dict:
             "batch_idx":        idx,
             "cis":              batch,
             "document_id":      document_id,
+            "tenant":           tenant["name"],  # Pass tenant for worker logging context
             "document_context": doc_context,
             "skip_rerank":      skip_rerank,
             "skip_verify":      skip_verify,
-            "workers":          min(len(batch), ci_workers),
         }
         for idx, batch in enumerate(batches)
     ]
 
-    n_invoke_workers = int(event.get("max_workers", n_batches))
+    # ── Concurrency: default to conservative 3 batches max (prevent OpenSearch 429s)
+    n_invoke_workers = int(min(MAX_WORKERS, n_batches))
+    log.info("[Orchestrator] parallelism: %d batches max", n_invoke_workers)
+
     all_results:  list[dict]             = [{}] * n_batches
     all_walls:    list[dict[str, float]] = []
-    errors:       list[str]              = []
+    failed_batches: set[int]             = set()  # Track which batches failed
+    errors:       list[dict]             = []     # Track batch_idx + error
 
     with ThreadPoolExecutor(max_workers=n_invoke_workers) as pool:
         futures = {pool.submit(_invoke_worker, p): p["batch_idx"] for p in payloads}
@@ -281,43 +325,100 @@ def handler(event: dict, context: Any) -> dict:
             idx = futures[future]
             try:
                 batch_response = future.result()
-                all_results[idx] = batch_response          # keyed by batch_idx
+                all_results[idx] = batch_response
                 all_walls.append(batch_response.get("stage_wall", {}))
-                logger.info("[Orchestrator] batch %d/%d done (%.1fs)",
-                            idx + 1, n_batches,
-                            batch_response.get("wall_time", 0.0))
+                log.info("[Orchestrator] batch %d/%d done (%.1fs)",
+                         idx + 1, n_batches,
+                         batch_response.get("wall_time", 0.0))
             except Exception as exc:
-                logger.error("[Orchestrator] batch %d failed: %s", idx, exc)
-                errors.append(str(exc))
+                log.error("[Orchestrator] batch %d failed: %s", idx, exc)
+                failed_batches.add(idx)
+                errors.append({
+                    "batch_idx": idx,
+                    "error": str(exc),
+                })
 
     # Flatten per-CI results in original order
     flat_results: list[dict] = []
-    for batch_resp in all_results:
-        flat_results.extend(batch_resp.get("results", []))
+    total_worker_completed = 0
+    total_worker_failed = 0
+    batch_summary: list[dict] = []
+    
+    for batch_idx, batch_resp in enumerate(all_results):
+        batch_results = batch_resp.get("results", [])
+        flat_results.extend(batch_results)
+        
+        batch_completed = batch_resp.get("completed_cis", 0)
+        batch_failed = batch_resp.get("failed_cis", 0)
+        total_worker_completed += batch_completed
+        total_worker_failed += batch_failed
+        
+        # For expected_cis: use actual count from original batches, not from response
+        # (in case Worker completely fails, batch_resp will be empty)
+        expected_batch_cis = len(batches[batch_idx]) if batch_idx < len(batches) else 0
+        
+        # Build per-batch summary for debugging
+        batch_status = "FAILED" if batch_idx in failed_batches else (
+            "PARTIAL" if batch_failed > 0 else "COMPLETED"
+        )
+        batch_summary.append({
+            "batch_idx": batch_idx,
+            "status": batch_status,
+            "expected_cis": expected_batch_cis,
+            "completed_cis": batch_completed,
+            "failed_cis": batch_failed,
+            "ci_failures": batch_resp.get("ci_failures", []),  # Detailed CI failures from Worker
+        })
 
     wall_time = round(time.perf_counter() - t0, 3)
     stage_wall = _merge_stage_walls(all_walls)
 
     total_hits = sum(len(r.get("final_hits", [])) for r in flat_results)
-    logger.info("[Orchestrator] done search_id=%s wall=%.1fs cis=%d hits=%d errors=%d",
-                search_id, wall_time, len(flat_results), total_hits, len(errors))
+    
+    # ── Determine completion status ─────────────────────────────────────────────
+    # Track both orchestrator-level (batch failures) and worker-level (CI failures)
+    total_cis_at_orchestrator = len(enriched)
+    
+    # Status logic:
+    # - FAILED: all batches failed (complete failure)
+    # - PARTIAL: some batches failed OR some CIs failed within batches
+    # - COMPLETED: all batches returned and all CIs completed
+    if failed_batches and len(failed_batches) == n_batches:
+        status = "FAILED"  # Complete failure
+    elif failed_batches or total_worker_failed > 0:
+        status = "PARTIAL"  # Some batches or CIs failed
+    else:
+        status = "COMPLETED"  # Everything succeeded
+    
+    log.info(
+        "[Orchestrator] done wall=%.1fs status=%s "
+        "cis_expected=%d cis_completed=%d cis_failed_in_worker=%d failed_batches=%d",
+        wall_time, status,
+        total_cis_at_orchestrator, total_worker_completed, total_worker_failed, len(failed_batches),
+    )
 
     response = {
-        "search_id":   search_id,
-        "document_id": document_id,
-        "n_cis":       len(enriched),
-        "n_batches":   n_batches,
-        "results":     flat_results,
-        "stage_wall":  stage_wall,
-        "wall_time":   wall_time,
-        **({"errors": errors} if errors else {}),
+        "search_id":       search_id,
+        "document_id":     document_id,
+        "status":          status,
+        "expected_cis":    total_cis_at_orchestrator,
+        "completed_cis":   total_worker_completed,
+        "failed_cis":      total_worker_failed,
+        "n_cis":           total_cis_at_orchestrator,
+        "n_batches":       n_batches,
+        "failed_batches":  list(sorted(failed_batches)) if failed_batches else [],
+        "batch_summary":   batch_summary,  # NEW: per-batch breakdown
+        "results":         flat_results,
+        "stage_wall":      stage_wall,
+        "wall_time":       wall_time,
     }
+    if errors:
+        response["errors"] = errors
 
     # ── Write full results to S3 (payload is too large for Lambda response) ──
     if RESULTS_BUCKET:
-        import datetime
-        ts      = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        s3_key  = f"{RESULTS_PREFIX}/{ts}_{search_id}_{document_id}.json"
+        s3_key = f"{RESULTS_PREFIX}/{tenant['name']}/{search_id}/{document_id}.json"
+
         body    = json.dumps(response, default=str).encode()
         _get("s3").put_object(
             Bucket      = RESULTS_BUCKET,
@@ -325,18 +426,24 @@ def handler(event: dict, context: Any) -> dict:
             Body        = body,
             ContentType = "application/json",
         )
-        logger.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
-                    RESULTS_BUCKET, s3_key, len(body))
-        # Return lightweight summary + pointer instead of 13MB payload
-        return {
-            "search_id":   search_id,
-            "document_id": document_id,
-            "n_cis":       len(enriched),
-            "total_hits":  total_hits,
-            "wall_time":   wall_time,
-            "s3_bucket":   RESULTS_BUCKET,
-            "s3_key":      s3_key,
-            **({"errors": errors} if errors else {}),
+        log.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
+                 RESULTS_BUCKET, s3_key, len(body))
+        # Return lightweight summary + pointer
+        summary = {
+            "search_id":      search_id,
+            "document_id":    document_id,
+            "status":         status,
+            "expected_cis":   total_cis_at_orchestrator,
+            "completed_cis":  total_worker_completed,
+            "failed_cis":     total_worker_failed,
+            "total_hits":     total_hits,
+            "wall_time":      wall_time,
+            "batch_summary":  batch_summary,  # NEW: per-batch breakdown for CLI/UI
+            "s3_bucket":      RESULTS_BUCKET,
+            "s3_key":         s3_key,
         }
+        if errors:
+            summary["errors"] = errors
+        return summary
 
     return response

@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 
 RUN dnf -y install gcc gcc-c++ make git && dnf clean all
 
-COPY lambdas/search_worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
+COPY lambdas/worker/search-worker/requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt
 
@@ -20,6 +20,6 @@ RUN python3 -c "from sentence_transformers import CrossEncoder; CrossEncoder('BA
 
 COPY shared ${LAMBDA_TASK_ROOT}/shared
 COPY lambdas ${LAMBDA_TASK_ROOT}/lambdas
-COPY lambdas/search_worker/lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
+COPY lambdas/worker/search-worker/lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
 
 CMD ["lambda_function.handler"]

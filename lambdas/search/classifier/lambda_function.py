@@ -39,19 +39,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# downstream: aggregator orchestrates all selected retrievers
-AGGREGATOR_LAMBDA_ARN = os.environ.get("AGGREGATOR_LAMBDA_ARN", "")
-
-# ─── lazy AWS clients ─────────────────────────────────────────────────────────
-_aws: dict = {}
-
-def _get(service: str):
-    if service not in _aws:
-        import boto3
-        _aws[service] = boto3.client(service)
-    return _aws[service]
-
-
 # ─── CI type → retrieval strategies (text-inference fallback) ────────────────
 _STRATEGIES: dict[str, list[str]] = {
     "PERSON":        ["literal", "ner", "bm25", "vector"],
@@ -297,11 +284,6 @@ def handler(event: dict, context: Any) -> dict:
                 result["classification"]["ci_type"],
                 result["classification"]["strategies"])
 
-    _get("lambda").invoke(
-        FunctionName   = AGGREGATOR_LAMBDA_ARN,
-        InvocationType = "Event",
-        Payload        = json.dumps(result).encode(),
-    )
     return result
 
 
