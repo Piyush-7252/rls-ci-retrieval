@@ -223,7 +223,7 @@ def _extract_sentence_rects(spans: list[dict], sent_start: int, sent_end: int) -
     return rects
 
 
-def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: int = 0, object_id: str | None = None, apryse_spans: list[dict] | None = None) -> list[dict]:
+def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: int = 0, object_id: str | None = None, apryse_spans: list[dict] | None = None, object_position_in_page: int = 0) -> list[dict]:
     """
     Produce display_spans for a semantic object, with geometry preservation.
 
@@ -246,6 +246,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
         apryse_spans: list of {"text": str, "rect": list, "start": int, "end": int}
                      from apryse_parser._extract_span_geometry()
                      If provided, enables per-line geometry extraction for sentences
+        object_position_in_page: position of this object's text start within page raw_text
+                     Used to calculate page_char_start/page_char_end (page-relative offsets for UI)
 
     Returns list of legacy dict format for backward compatibility:
         {"type": str, "text": str, "start": int, "end": int, "bbox": list,
@@ -279,6 +281,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
                     page=page,
                     char_start=start,
                     char_end=end,
+                    page_char_start=object_position_in_page + start,  # ← PAGE-RELATIVE
+                    page_char_end=object_position_in_page + end,      # ← PAGE-RELATIVE
                     rects=item_rects,
                     source_object_id=object_id,
                     span_type="list_item",
@@ -308,6 +312,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
             page=page,
             char_start=0,
             char_end=len(text),
+            page_char_start=object_position_in_page + 0,  # ← PAGE-RELATIVE
+            page_char_end=object_position_in_page + len(text),  # ← PAGE-RELATIVE
             rects=list_rects,
             source_object_id=object_id,
             span_type="list_item",
@@ -336,6 +342,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
             page=page,
             char_start=0,
             char_end=len(text),
+            page_char_start=object_position_in_page + 0,  # ← PAGE-RELATIVE
+            page_char_end=object_position_in_page + len(text),  # ← PAGE-RELATIVE
             rects=obj_rects,
             source_object_id=object_id,
             span_type=kind,
@@ -374,6 +382,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
                     page=page,
                     char_start=sent.start_char,
                     char_end=sent.end_char,
+                    page_char_start=object_position_in_page + sent.start_char,  # ← PAGE-RELATIVE
+                    page_char_end=object_position_in_page + sent.end_char,      # ← PAGE-RELATIVE
                     rects=sent_rects,
                     source_object_id=object_id,
                     span_type="sentence",
@@ -408,6 +418,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
                     page=page,
                     char_start=start,
                     char_end=end,
+                    page_char_start=object_position_in_page + start,  # ← PAGE-RELATIVE
+                    page_char_end=object_position_in_page + end,      # ← PAGE-RELATIVE
                     rects=part_rects,
                     source_object_id=object_id,
                     span_type="sentence",
@@ -439,6 +451,8 @@ def _make_display_spans(text: str, kind: str, bbox: list | None = None, page: in
         page=page,
         char_start=0,
         char_end=len(text),
+        page_char_start=object_position_in_page + 0,  # ← PAGE-RELATIVE
+        page_char_end=object_position_in_page + len(text),  # ← PAGE-RELATIVE
         rects=para_rects,
         source_object_id=object_id,
         span_type="sentence",
@@ -502,6 +516,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
     for page in pages:
         page_num    = page.get("page_number", 0)
         page_height = page.get("height", 792.0)
+        
         for layout_obj in page.get("paragraph_objects", []):
             text  = layout_obj.get("text", "").strip()
             rect  = layout_obj.get("rect", [])
@@ -519,6 +534,12 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
             if not text:
                 continue
 
+            # ─── DETERMINISTIC POSITION FROM PARSER ───
+            # Parser already calculated this when building page_raw_text.
+            # Each object has page_char_start/end attached directly.
+            # No tracking, no find(), no ambiguity.
+            object_position_in_page = layout_obj.get("page_char_start", 0)
+            
             raw.append({
                 "type":            kind,
                 "text":            text,
@@ -526,7 +547,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
                 "page":            page_num,
                 "bbox":            rect,
                 "searchable":      not _is_page_boilerplate(rect, page_height),
-                "display_spans":   _make_display_spans(text, kind, bbox=rect, page=page_num, apryse_spans=layout_obj.get("spans", [])),
+                "display_spans":   _make_display_spans(text, kind, bbox=rect, page=page_num, apryse_spans=layout_obj.get("spans", []), object_position_in_page=object_position_in_page),
                 "embedding":       [],
                 "entities":        [],
                 "_heading_level":  level,                    # ephemeral
@@ -572,9 +593,12 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
                 merged_text = prev["text"].rstrip() + " " + obj["text"].lstrip()
                 prev["text"]            = merged_text
                 prev["normalized_text"] = _normalize_text(merged_text)
-                # For merged paragraphs, geometry is approximate (fallback to bbox)
-                # since we're combining fragments from multiple layout objects
-                prev["display_spans"]   = _make_display_spans(merged_text, "paragraph", bbox=prev["bbox"], page=prev["page"], apryse_spans=[])
+                # PRESERVE ORIGINAL DISPLAY SPANS: Fragment merge is for semantic/embedding
+                # purposes only. Keep the original geometry from the previous object
+                # instead of regenerating from merged text. This maintains precise
+                # Apryse coordinates and follows the design principle:
+                # "HighlightExtractor selects existing geometry, not calculate it."
+                # prev["display_spans"] already has correct Apryse spans from extraction
                 continue   # swallow this fragment into the previous object
         merged.append(obj)
     raw = merged

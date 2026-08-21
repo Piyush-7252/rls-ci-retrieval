@@ -1,54 +1,45 @@
 """
-Search Pipeline — Stage 6.5: Highlight Extractor
-=================================================
-Takes the already-retrieved semantic object and selects the best
-display_span (sentence, table row, form field, bullet, signature, etc.)
-to surface in the UI.
+Search Pipeline — Stage 6.5: Highlight Extractor (Simplified)
+==============================================================
+Resolves highlight geometry from LLM-verified evidence.
 
-No embeddings.  No re-ranking.  All matching is text-only.
+No semantic re-ranking. No display span selection.
+Just: consume verified evidence, resolve highlight geometry.
 
-Design: scorer registry
------------------------
-Each scorer is an independent class that inspects a (CI, span) pair and
-returns {"score": float, "reason": str} or None.
+New Architecture
+----------------
+The LLM verifier produces verified_candidates with:
 
-Score ranges are non-overlapping so max() gives natural priority:
+  - evidence: the authoritative verified text/span
+  - literal_matches: optional precise sub-match (e.g. "N = 8")
 
-  LiteralContainmentScorer      0.90 – 1.00 either text literally contains the other
-  ExtractionEquivalentScorer    0.89       verbatim match after removing all whitespace
-  FuzzyScorer                   0.65 – 0.89 difflib SequenceMatcher ≥ 0.65
-  OntologyScorer            0.60 – 0.74 a CI synonym appears in span
-  NERScorer                 0.40 – 0.59 CI entity-type overlap
-  TokenScorer               0.00 – 0.39 Jaccard token fallback (always fires)
+HighlightExtractor now has a simple contract:
 
-Highlight contract
-------------------
-Literal retriever hits carry character offsets in ``cand["literal_matches"]``.
-They are consumed DIRECTLY in ``_process()`` — literal evidence is NOT routed
-through the scorer registry.  No rediscovery.  No re-scoring.
+  1. If literal_matches exists
+       → Find the first literal match within evidence.text
+       → Use flexible matching (handles "N=8" vs "N = 8")
+       → Calculate precise character offsets
+       → Return with line-level geometry
+  
+  2. Otherwise
+       → Use evidence span directly as-is
+       → Return its existing page/char_start/char_end/rects
 
-  literal_matches present?
-        │
-   ┌────┴────┐
-   YES        NO
-    │          │
-  offsets    scorer registry
-  directly   (LiteralContainment→Extraction→Fuzzy→Onto→NER→Token)
+Geometry Model
+--------------
+  - evidence.text = original extracted text (immutable coordinates)
+  - evidence.char_start/char_end = offsets in document
+  - evidence.rects = line-level geometry (not character-level)
+  
+For literal matches:
+  - char_start/char_end point to "N = 8" within the line
+  - rects are still line-level (WebViewer will cover the whole line)
+  - geometry_source = "literal_match_line_geometry" (honest about precision)
 
-Both paths call _pick_best_span() to select the context_sentence.
-
-Output fields
--------------
-  highlight_spans  — list[{text, start, end, source}], one entry per matched term
-  match_span       — text of the primary (first) highlight (backward compat)
-  context_sentence — best display sentence, always chosen by scorer registry
-
-To add a new scorer:
-  1. Subclass BaseScorer
-  2. Append an instance to SCORERS
-
-Nothing else changes.
+No semantic scoring. No scorer registry. No re-selection of spans.
+All decisions are made by the LLM verifier upstream.
 """
+
 
 from __future__ import annotations
 
@@ -285,6 +276,157 @@ SCORERS: list[BaseScorer] = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Highlight Geometry Resolution
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_literal_match_position(literal_text: str, evidence_text: str) -> tuple[int, int] | None:
+    """
+    Find exact position of literal_text within evidence_text.
+    Reuses LiteralContainmentScorer strategies:
+      1. Case-insensitive exact substring
+      2. Flexible whitespace/operator regex (handles "N=8" vs "N = 8")
+    
+    Returns (start_offset, end_offset) or None.
+    """
+    if not literal_text or not evidence_text:
+        return None
+    
+    lit_s = literal_text.strip()
+    if len(lit_s) > 100:
+        return None
+    
+    # Strategy 1: case-insensitive exact substring
+    idx = evidence_text.lower().find(lit_s.lower())
+    if idx >= 0:
+        return (idx, idx + len(lit_s))
+    
+    # Strategy 2: flexible whitespace/operator regex (from LiteralContainmentScorer)
+    # "N=8" → r'N\s*=\s*8' → matches "N = 8", "N=8", "N  =  8", etc.
+    pat = _build_flexible_pattern(lit_s)
+    if pat:
+        m = pat.search(evidence_text)
+        if m:
+            return (m.start(), m.end())
+    
+    return None
+
+
+def _resolve_highlight(final_hit: dict) -> dict:
+    """
+    Resolve highlight geometry from final_hit.
+    
+    Returns both object-relative and page-relative coordinates:
+      - char_start/char_end: Offsets within the evidence object  
+      - page_char_start/page_char_end: Offsets within the page text
+    
+    PAGE-LEVEL COORDINATES ARE THE PRIMARY UI INTERFACE:
+      page_text[page][page_char_start:page_char_end] == text
+    
+    PATH 1: Verified literal/numeric evidence (has literal_matches field)
+            → Try each literal match until one is found in evidence text
+            → Extract the original extracted text from evidence
+            → Calculate char offsets within evidence
+            → Calculate page offsets by adding evidence.page_char_start
+            → Return with line-level geometry (honest about precision)
+    
+    PATH 2: Everything else (no literal_matches)
+            → Use evidence span directly as-is
+            → No recalculation or semantic scoring
+    
+    If evidence field is missing, build it from matched_object or indexed_object.
+    """
+    evidence = final_hit.get("evidence")
+    
+    # Build evidence from matched_object if not provided
+    if not evidence:
+        matched_obj = final_hit.get("matched_object")
+        indexed_obj = final_hit.get("indexed_object")
+        
+        # Try matched_object first, fallback to indexed_object
+        obj = matched_obj or indexed_obj
+        if obj and obj.get("text"):
+            evidence = {
+                "text": obj.get("text", ""),
+                "page": obj.get("page", 0),
+                "char_start": 0,  # No precise offsets available from object
+                "char_end": len(obj.get("text", "")),
+                "page_char_start": 0,  # Default to 0 if not available
+                "page_char_end": len(obj.get("text", "")),
+                "rects": [],
+                "bbox": obj.get("bbox", []),
+            }
+        else:
+            # No evidence available
+            return {
+                "text": "",
+                "char_start": 0,
+                "char_end": 0,
+                "page_char_start": 0,
+                "page_char_end": 0,
+                "page": 0,
+                "rects": [],
+                "geometry_source": "none",
+            }
+    
+    evidence_text = evidence.get("text", "")
+    evidence_char_start = evidence.get("char_start", 0)
+    evidence_page_char_start = evidence.get("page_char_start", 0)
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # PATH 1: Verified literal/numeric evidence
+    # Try each literal match; use the first one found in evidence text
+    # ─────────────────────────────────────────────────────────────────────────
+    literal_matches = final_hit.get("literal_matches") or []
+    for literal_match in literal_matches:
+        match_text = literal_match.get("text", "").strip()
+        if not match_text:
+            continue
+        
+        match_pos = _find_literal_match_position(match_text, evidence_text)
+        if not match_pos:
+            continue
+        
+        local_start, local_end = match_pos
+        
+        # Return the original extracted text, not the literal match text
+        # This preserves "N = 8" if the evidence contains "N = 8"
+        # while still calculating correct offsets
+        return {
+            "text": evidence_text[local_start:local_end],
+            "char_start": evidence_char_start + local_start,
+            "char_end": evidence_char_start + local_end,
+            "page_char_start": evidence_page_char_start + local_start,  # ← PAGE-RELATIVE FOR UI
+            "page_char_end": evidence_page_char_start + local_end,      # ← PAGE-RELATIVE FOR UI
+            "page": evidence.get("page", 0),
+            "rects": evidence.get("rects", []),
+            "geometry_source": "literal_match_line_geometry",
+        }
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # PATH 2: Authoritative evidence span (no literal_matches found)
+    # ─────────────────────────────────────────────────────────────────────────
+    return {
+        "text": evidence_text,
+        "char_start": evidence_char_start,
+        "char_end": evidence.get(
+            "char_end",
+            evidence_char_start + len(evidence_text),
+        ),
+        "page_char_start": evidence_page_char_start,  # ← PAGE-RELATIVE FOR UI
+        "page_char_end": evidence.get(
+            "page_char_end",
+            evidence_page_char_start + len(evidence_text),
+        ),  # ← PAGE-RELATIVE FOR UI
+        "page": evidence.get("page", 0),
+        "rects": evidence.get("rects", []),
+        "geometry_source": evidence.get(
+            "geometry_source",
+            "evidence_span",
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Handler
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -300,228 +442,105 @@ def handler(event: dict, context: Any) -> dict:
 
 
 def _process(req: dict) -> dict:
-    ci      = req.get("ci", {})
-    ci_text = ci.get("knownCI", "")
-    ci_meta = {
-        "synonyms":  (ci.get("normalization", {}).get("expansions", [])
-                      or list(ci.get("ontology", {}).get("synonyms", {}).keys())),
-        "ent_types": {e.get("type", "") for e in ci.get("ner", {}).get("entities", [])},
-    }
+    """
+    Process verified candidates using evidence-based geometry resolution.
+    
+    For each verified candidate with verdict YES/MAYBE:
+      1. Resolve highlight geometry via _resolve_highlight()
+      2. Map result fields to legacy field names for downstream compatibility
+      3. Build highlight_spans and metadata
+    
+    No semantic re-scoring. No display span selection.
+    All decisions already made by LLM verifier upstream.
+    """
     verified = req.get("verified_candidates", [])
-    mtokens  = _extract_matched_tokens(ci_text)
-
-    # ── Pass 1: process object-based candidates ────────────────────────────────
-    # Pre-computing avoids calling _pick_best_span twice per object candidate.
-    precomputed: dict[int, dict] = {}
-    has_authoritative_object = False
-
-    for i, cand in enumerate(verified):
-        if cand.get("verdict") not in ("YES", "MAYBE"):
-            continue
-        matched_obj = cand.get("matched_object")
-        if not matched_obj:
-            continue  # text_fallback — deferred to Pass 2
-
-        # literal_matches are stored at the cluster (cand) level by the aggregator.
-        lit  = cand.get("literal_matches", [])
-        # Safety: if the selected object is a sentence that doesn't contain the
-        # literal match text, promote to a context_object that does.  This guards
-        # against stale candidates where context_expander chose on type priority
-        # alone before literal-aware object selection was introduced.
-        if lit and matched_obj.get("type") == "sentence":
-            primary_lit = (lit[0].get("text") or "").lower()
-            if primary_lit and primary_lit not in (matched_obj.get("text") or "").lower():
-                for ctx_obj in cand.get("context_objects", []):
-                    if primary_lit in (ctx_obj.get("text") or "").lower():
-                        logger.debug(
-                            "[HighlightExtractor] literal mismatch on sentence — "
-                            "promoted to %s object_id=%s search_id=%s",
-                            ctx_obj.get("type"), ctx_obj.get("object_id"),
-                            req.get("search_id"),
-                        )
-                        matched_obj = ctx_obj
-                        break
-        # Always pick the best context sentence via the scorer registry.
-        best = _pick_best_span(ci_text, ci_meta, matched_obj)
-
-        if lit:
-            # Retriever already produced character-accurate offsets.
-            # Consume them directly — no scorer involvement for match_span.
-            ret = cand.get("retriever", "")
-            highlight_spans = [
-                {"text": lm["text"], "start": lm["start"], "end": lm["end"],
-                 "source": "literal", "retriever": ret}
-                for lm in lit if lm.get("text")
-            ]
-            primary = highlight_spans[0]
-            precomputed[i] = {
-                "best":            best,
-                "highlight_spans": highlight_spans,
-                "match_span":      primary["text"],
-                "match_start":     primary["start"],
-                "match_end":       primary["end"],
-                "highlight_score":   1.0,
-                "match_reason":    "literal",
-                "is_authoritative": True,
-                "page":            matched_obj.get("page", cand.get("page_start")),
-            }
-        else:
-            exact     = _find_exact_match(ci_text, best["text"])
-            span_text = exact or best["text"]
-            precomputed[i] = {
-                "best":            best,
-                "highlight_spans": [{"text": span_text, "start": best["start"],
-                                     "end": best["end"], "source": best["reason"],
-                                     "retriever": cand.get("retriever", "")}],
-                "match_span":      span_text,
-                "match_start":     best["start"],
-                "match_end":       best["end"],
-                "highlight_score":   best["score"],
-                "match_reason":    best["reason"],
-                "is_authoritative": best["reason"] == "exact",
-                "page":            matched_obj.get("page", cand.get("page_start")),
-            }
-
-        # Suppress text-fallback candidates only when retrieval evidence is
-        # authoritative: a literal match (retriever confirmed the term) or an
-        # exact verbatim match.  OCR-equivalent matches are NOT authoritative
-        # for suppression — whitespace removal is more permissive than exact.
-        if bool(lit) or precomputed[i]["match_reason"] == "exact":
-            has_authoritative_object = True
-
-    if has_authoritative_object:
-        logger.debug("[HighlightExtractor] authoritative object hit (literal/exact) — "
-                     "skipping text_fallback candidates for search_id=%s",
-                     req.get("search_id"))
-
-    # ── Pass 2: build enriched list ────────────────────────────────────────────
+    mtokens  = _extract_matched_tokens(req.get("ci", {}).get("knownCI", ""))
     enriched = []
-    for i, cand in enumerate(verified):
-        if cand.get("verdict") in ("YES", "MAYBE"):
-            matched_obj = cand.get("matched_object")
 
-            if i in precomputed:
-                # Object path — use precomputed result from Pass 1
-                r    = precomputed[i]
-                best = r["best"]
-                cand = {
-                    **cand,
-                    "match_span":        r["match_span"],
-                    "match_span_start":  r["match_start"],
-                    "match_span_end":    r["match_end"],
-                    "highlight_spans":   r["highlight_spans"],
-                    "context_sentence":  best["text"],
-                    "match_page":        r["page"],
-                    "match_bbox":        best.get("bbox") or matched_obj.get("bbox", []),
-                    "match_rects":       best.get("rects") or [],  # per-line geometry if available
-                    "match_geometry_source": best.get("match_geometry_source", "none"),  # "apryse_span" | "object_bbox" | "none"
-                    "highlight_score":     round(r["highlight_score"], 3),
-                    "match_method":      "object",
-                    "match_reason":      r["match_reason"],
-                    "is_authoritative":  r["is_authoritative"],
-                    "matched_tokens":    mtokens,
-                    "span_debug": {
-                        "best_text":    best["text"],
-                        "best_score":   round(best["score"], 4),
-                        "best_reason":  best["reason"],
-                        "match_span":   r["match_span"],
-                        "match_reason": r["match_reason"],
-                        "highlight_score": round(r["highlight_score"], 3),
-                        "is_authoritative": r["is_authoritative"],
-                        "all_scored_spans": best.get("all_scored_spans", []),
-                    },
+    for cand in verified:
+        verdict = cand.get("verdict")
+        
+        # Only process YES/MAYBE verdicts
+        if verdict not in ("YES", "MAYBE"):
+            enriched.append(cand)
+            continue
+        
+        # Use evidence-based geometry resolution (no semantic scoring)
+        # If evidence is missing, _resolve_highlight() builds it from indexed_object/matched_object
+        geom = _resolve_highlight(cand)
+        
+        # Extract highlight text and spans
+        highlight_text = geom.get("text", "")
+        char_start = geom.get("char_start", 0)
+        char_end = geom.get("char_end", 0)
+        page_char_start = geom.get("page_char_start", 0)  # ← PAGE-RELATIVE FOR UI
+        page_char_end = geom.get("page_char_end", 0)      # ← PAGE-RELATIVE FOR UI
+        geom_source = geom.get("geometry_source", "evidence_span")
+        
+        # Authority is determined by whether evidence was verified by LLM or built from indexed_object
+        # If highlight was resolved (not "none"), it's authoritative enough to include
+        evidence = cand.get("evidence")
+        is_authoritative = bool(evidence.get("text")) if evidence else bool(highlight_text)
+        
+        # Highlight score reflects precision of geometry resolution:
+        #   1.0 = literal match with precise character-level offset (though rects are line-level)
+        #   0.9 = evidence span with original geometry preserved
+        #   0.0 = no highlight geometry resolved
+        highlight_score = (
+            1.0 if geom_source == "literal_match_line_geometry"
+            else 0.9 if geom_source == "evidence_span"
+            else 0.0
+        )
+        
+        # Build highlight_spans list (for UI rendering)
+        if highlight_text:
+            highlight_spans = [
+                {
+                    "text": highlight_text,
+                    "start": char_start,
+                    "end": char_end,
+                    "page_char_start": page_char_start,  # ← PAGE-RELATIVE FOR UI
+                    "page_char_end": page_char_end,      # ← PAGE-RELATIVE FOR UI
+                    "source": geom_source,
+                    "retriever": cand.get("retriever", ""),
                 }
-
-            elif has_authoritative_object:
-                # An authoritative object hit (literal or exact) exists.
-                # Text-fallback candidates cannot add stronger evidence.
-                cand = {
-                    **cand,
-                    "match_span":       "",
-                    "highlight_spans":  [],
-                    "highlight_score":    0.0,
-                    "match_method":     "text_fallback_skipped",
-                    "match_reason":     "skipped:exact_object_hit",
-                    "is_authoritative": False,
-                    "matched_tokens":   mtokens,
-                }
-
-            else:
-                # Text-fallback path — no matched_object.
-                # Check for literal evidence first; fall back to scorer registry.
-                chunk_text = cand.get("context", {}).get("current_text", "")
-                lit  = cand.get("literal_matches", [])
-                obj  = _chunk_to_synthetic_obj(chunk_text)
-                page = cand.get("page_start")
-                best = _pick_best_span(ci_text, ci_meta, obj)
-
-                if lit:
-                    ret = cand.get("retriever", "")
-                    highlight_spans = [
-                        {"text": lm["text"], "start": lm["start"], "end": lm["end"],
-                         "source": "literal", "retriever": ret}
-                        for lm in lit if lm.get("text")
-                    ]
-                    primary = highlight_spans[0]
-                    cand = {
-                        **cand,
-                        "match_span":        primary["text"],
-                        "match_span_start":  primary["start"],
-                        "match_span_end":    primary["end"],
-                        "highlight_spans":   highlight_spans,
-                        "context_sentence":  best["text"],
-                        "match_page":        page,
-                        "match_bbox":        [],
-                        "match_rects":       best.get("rects", []),  # geometry if available
-                        "match_geometry_source": best.get("match_geometry_source", "none"),  # quality indicator
-                        "highlight_score":     1.0,
-                        "match_method":      "text_fallback",
-                        "match_reason":      "literal",
-                        "is_authoritative":  True,
-                        "matched_tokens":    mtokens,
-                        "span_debug": {
-                            "best_text":    best["text"],
-                            "best_score":   round(best["score"], 4),
-                            "best_reason":  best["reason"],
-                            "match_span":   primary["text"],
-                            "match_reason": "literal",
-                            "highlight_score": 1.0,
-                            "is_authoritative": True,
-                            "all_scored_spans": best.get("all_scored_spans", []),
-                        },
-                    }
-                else:
-                    exact     = _find_exact_match(ci_text, best["text"])
-                    span_text = exact or best["text"]
-                    cand = {
-                        **cand,
-                        "match_span":        span_text,
-                        "match_span_start":  best["start"],
-                        "match_span_end":    best["end"],
-                        "highlight_spans":   [{"text": span_text, "start": best["start"],
-                                               "end": best["end"], "source": best["reason"],
-                                               "retriever": cand.get("retriever", "")}],
-                        "context_sentence":  best["text"],
-                        "match_page":        page,
-                        "match_bbox":        [],
-                        "match_rects":       best.get("rects", []),  # geometry if available
-                        "match_geometry_source": best.get("match_geometry_source", "none"),  # quality indicator
-                        "highlight_score":     round(best["score"], 3),
-                        "match_method":      "text_fallback",
-                        "match_reason":      best["reason"],
-                        "is_authoritative":  best["reason"] == "exact",
-                        "matched_tokens":    mtokens,
-                        "span_debug": {
-                            "best_text":    best["text"],
-                            "best_score":   round(best["score"], 4),
-                            "best_reason":  best["reason"],
-                            "match_span":   span_text,
-                            "match_reason": best["reason"],
-                            "highlight_score": round(best["score"], 3),
-                            "is_authoritative": best["reason"] == "exact",
-                            "all_scored_spans": best.get("all_scored_spans", []),
-                        },
-                    }
+            ]
+        else:
+            highlight_spans = []
+        
+        # Enrich candidate with resolved geometry
+        # Extract bbox from indexed_object if available
+        indexed_obj = cand.get("indexed_object", {})
+        match_bbox = indexed_obj.get("bbox", []) if indexed_obj else []
+        
+        cand = {
+            **cand,
+            "match_span":        highlight_text,
+            "match_span_start":  char_start,
+            "match_span_end":    char_end,
+            "match_page_char_start": page_char_start,  # ← PAGE-RELATIVE FOR UI HIGHLIGHTING
+            "match_page_char_end": page_char_end,      # ← PAGE-RELATIVE FOR UI HIGHLIGHTING
+            "highlight_spans":   highlight_spans,
+            "context_sentence":  highlight_text,  # For backward compat; same as match_span for evidence-based
+            "match_page":        geom.get("page", 0),
+            "match_bbox":        match_bbox,  # Line-level bounding box from indexed_object
+            "match_rects":       geom.get("rects", []),  # per-line geometry (line-level precision)
+            "match_geometry_source": geom_source,  # "literal_match_line_geometry" | "evidence_span" | "none"
+            "highlight_score":   highlight_score,
+            "match_method":      "evidence_based",
+            "match_reason":      geom_source,
+            "is_authoritative":  is_authoritative,
+            "matched_tokens":    mtokens,
+            "span_debug": {
+                "geometry_source": geom_source,
+                "highlight_text": highlight_text,
+                "char_start": char_start,
+                "char_end": char_end,
+                "page_char_start": page_char_start,
+                "page_char_end": page_char_end,
+                "is_authoritative": is_authoritative,
+            },
+        }
         enriched.append(cand)
 
     logger.info("[HighlightExtractor] done search_id=%s highlights=%d",

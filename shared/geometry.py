@@ -26,10 +26,12 @@ class SentenceSpan:
     coordinates (page, rects) to preserve Apryse line/span-level geometry
     through the retrieval pipeline without reverse-lookup at extraction time.
     
-    IMPORTANT: rects may be shared with adjacent sentences when the sentence
-    boundary falls within a PDF line. This is expected behavior with line-level
-    geometry resolution. The Merger validates that only accepted candidates'
-    geometry reaches the final hit.
+    IMPORTANT: Coordinate system is TWO-TIERED:
+      - Object-relative: char_start/char_end (within parent object, e.g. paragraph)
+      - Page-relative: page_char_start/page_char_end (within page text)
+    
+    Page-relative coordinates enable precise UI highlighting without reverse lookup:
+      assert page_text[page][page_char_start:page_char_end] == text
 
     Fields
     ------
@@ -37,13 +39,19 @@ class SentenceSpan:
         The actual span text.
 
     page : int
-        Page number (1-based or 0-based depending on context).
+        Page number (1-based).
 
     char_start : int
-        Character offset within the parent object's text.
+        Character offset within the parent object's text (for internal tracing).
 
     char_end : int
-        Character offset within the parent object's text.
+        Character offset within the parent object's text (for internal tracing).
+
+    page_char_start : int
+        Character offset within the page's canonical text (FOR UI HIGHLIGHTING).
+
+    page_char_end : int
+        Character offset within the page's canonical text (FOR UI HIGHLIGHTING).
 
     rects : list[list[float]]
         Apryse span/line-level display rectangles for this span.
@@ -51,7 +59,7 @@ class SentenceSpan:
         For multi-line spans: one box per line
         
         NOTE: Adjacent sentences may share rectangles when the sentence boundary
-        falls within a PDF line. This is a direct consequence of line-level
+        falls within a PDF line. This is expected behavior with line-level
         geometry from Apryse and is expected. Merging handles this correctly:
         shared rects are kept if any owning candidate is accepted.
         
@@ -75,8 +83,10 @@ class SentenceSpan:
              "as assessed by independent review committee "
              "according to RECIST 1.1.",
         page=135,
-        char_start=421,
-        char_end=487,
+        char_start=421,              # ← Within paragraph
+        char_end=487,                # ← Within paragraph
+        page_char_start=12345,        # ← Within page 135 text
+        page_char_end=12411,          # ← Within page 135 text
         rects=[
             [100.0, 200.0, 500.0, 215.0],  # line 1
             [100.0, 218.0, 510.0, 233.0],  # line 2
@@ -91,6 +101,8 @@ class SentenceSpan:
     page: int
     char_start: int
     char_end: int
+    page_char_start: int = 0        # ← NEW: For UI highlighting (page-relative)
+    page_char_end: int = 0          # ← NEW: For UI highlighting (page-relative)
     rects: list[list[float]] = field(default_factory=list)
     source_object_id: Optional[str] = None
     source_span_ids: list[str] = field(default_factory=list)
@@ -104,6 +116,8 @@ class SentenceSpan:
             "page": self.page,
             "char_start": self.char_start,
             "char_end": self.char_end,
+            "page_char_start": self.page_char_start,  # ← NEW
+            "page_char_end": self.page_char_end,      # ← NEW
             "rects": self.rects,
             "source_object_id": self.source_object_id,
             "source_span_ids": self.source_span_ids,
@@ -119,6 +133,8 @@ class SentenceSpan:
             page=d.get("page", 0),
             char_start=d.get("char_start", 0),
             char_end=d.get("char_end", 0),
+            page_char_start=d.get("page_char_start", 0),  # ← NEW
+            page_char_end=d.get("page_char_end", 0),      # ← NEW
             rects=d.get("rects", []),
             source_object_id=d.get("source_object_id"),
             source_span_ids=d.get("source_span_ids", []),

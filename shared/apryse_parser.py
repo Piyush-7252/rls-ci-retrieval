@@ -264,15 +264,45 @@ def parse_page(page: dict) -> dict:
         deduped_po.append(po)
     paragraph_objects = deduped_po
 
-    # Build raw_text in reading order: headings → paragraphs → tables → lists
+    # ────────────────────────────────────────────────────────────────────────────
+    # CRITICAL: Build raw_text and position_map DIRECTLY from paragraph_objects
+    # ────────────────────────────────────────────────────────────────────────────
+    # This ensures they are aligned with Apryse element reading order.
+    # Do NOT build from separate headings/paragraphs/tables/lists arrays —
+    # those are grouped by type and create a different ordering.
+    #
+    # Process: Iterate through paragraph_objects in their natural order,
+    # track character positions as we build the canonical page text,
+    # and attach page_char_start/page_char_end to each object.
+    #
+    # Invariant: For every object, page_text[page_char_start:page_char_end] == object.text
+    
     parts: list[str] = []
-    for h in headings:
-        parts.append(h["text"])
-    parts.extend(paragraphs)
-    for t in tables:
-        parts.append(_table_to_text(t["rows"]))
-    for lst in lists:
-        parts.extend(lst["items"])
+    position_map = {}  # Maps object_id → {"page_char_start": int, "page_char_end": int, "text": str}
+    current_pos = 0
+    
+    for obj_idx, layout_obj in enumerate(paragraph_objects):
+        obj_text = layout_obj.get("text", "")
+        if not obj_text:
+            continue
+        
+        # Record this object's position in the canonical page text
+        start_pos = current_pos
+        end_pos = current_pos + len(obj_text)
+        
+        # Attach to the object itself (for direct access in lambda)
+        layout_obj["page_char_start"] = start_pos
+        layout_obj["page_char_end"] = end_pos
+        
+        # Also record in position_map for reference
+        position_map[obj_idx] = {
+            "page_char_start": start_pos,
+            "page_char_end": end_pos,
+            "text": obj_text,
+        }
+        
+        parts.append(obj_text)
+        current_pos = end_pos + 1  # +1 for newline separator
 
     return {
         "page_number":  props.get("pageNumber", 0),
@@ -284,8 +314,9 @@ def parse_page(page: dict) -> dict:
         "footers":          footers,
         "tables":           tables,
         "lists":            lists,
-        "paragraph_objects": paragraph_objects,   # NEW: layout-aware sentence units
+        "paragraph_objects": paragraph_objects,   # ← Now includes page_char_start/end
         "raw_text":         "\n".join(p for p in parts if p),
+        "_position_map":    position_map,
         "doc_structure":    page,    # raw Apryse page — preserved verbatim
     }
 

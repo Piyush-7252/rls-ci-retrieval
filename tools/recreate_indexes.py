@@ -244,6 +244,8 @@ def _objects_mapping() -> dict:
                                 "page":                {"type": "integer"},
                                 "char_start":          {"type": "integer"},
                                 "char_end":            {"type": "integer"},
+                                "page_char_start":     {"type": "integer"},  # ← NEW: For UI highlighting
+                                "page_char_end":       {"type": "integer"},  # ← NEW: For UI highlighting
                                 "rects":               {"type": "float", "index": False},
                                 "source_object_id":    {"type": "keyword"},
                                 "source_span_ids":     {"type": "keyword"},
