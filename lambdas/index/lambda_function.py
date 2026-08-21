@@ -529,11 +529,41 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 # Preserve them in semantic-objects.  `char_start/end` above
                 # remain sentence/object-local coordinates; these fields are
                 # absolute offsets in the original PDF page text.
-                "page":              span.get("page", obj.get("page", page_start)),
-                "bbox":              [float(v) for v in span.get("bbox", obj.get("bbox", []))],
-                "page_char_start":   span.get("page_char_start"),
-                "page_char_end":     span.get("page_char_end"),
-                "display_spans":      [span],
+                "page":              (
+                    (span.get("_sentence_span") or {}).get(
+                        "page",
+                        span.get("page", obj.get("page", page_start)),
+                    )
+                ),
+                "bbox":              [
+                    float(v)
+                    for v in span.get(
+                        "bbox",
+                        (span.get("_sentence_span") or {}).get(
+                            "bbox",
+                            obj.get("bbox", []),
+                        ),
+                    )
+                ],
+
+                # IMPORTANT:
+                # The extraction/Apryse DocStructure pipeline stores the
+                # sentence's absolute PDF-page character coordinates inside
+                # span["_sentence_span"], not on the outer display span.
+                #
+                # `char_start` / `char_end` above remain sentence/object-local.
+                # These two fields are absolute offsets in the original PDF
+                # page text and are the coordinates consumed by highlighting.
+                "page_char_start": (
+                    (span.get("_sentence_span") or {}).get("page_char_start")
+                ),
+                "page_char_end": (
+                    (span.get("_sentence_span") or {}).get("page_char_end")
+                ),
+
+                # Preserve the complete upstream span, including
+                # `_sentence_span`, so the geometry is not lost again.
+                "display_spans": [span],
             })
 
     return docs
