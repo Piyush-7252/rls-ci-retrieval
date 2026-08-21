@@ -523,9 +523,17 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 # ── Sentence adjacency ────────────────────────────────────────
                 "prev_sentence_id":  prev_id,
                 "next_sentence_id":  next_id,
-                # ── Display ───────────────────────────────────────────────────
-                "page":              obj.get("page", page_start),
+                # ── Display / UI geometry ─────────────────────────────────────
+                # The extraction/Apryse DocStructure pipeline already computes
+                # page-relative character coordinates on each sentence span.
+                # Preserve them in semantic-objects.  `char_start/end` above
+                # remain sentence/object-local coordinates; these fields are
+                # absolute offsets in the original PDF page text.
+                "page":              span.get("page", obj.get("page", page_start)),
                 "bbox":              [float(v) for v in span.get("bbox", obj.get("bbox", []))],
+                "page_char_start":   span.get("page_char_start"),
+                "page_char_end":     span.get("page_char_end"),
+                "display_spans":      [span],
             })
 
     return docs
