@@ -539,6 +539,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
             # Each object has page_char_start/end attached directly.
             # No tracking, no find(), no ambiguity.
             object_position_in_page = layout_obj.get("page_char_start", 0)
+            page_char_end = layout_obj.get("page_char_end", object_position_in_page + len(text))
             
             raw.append({
                 "type":            kind,
@@ -546,6 +547,8 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
                 "normalized_text": _normalize_text(text),
                 "page":            page_num,
                 "bbox":            rect,
+                "page_char_start": object_position_in_page,  # ← TRUE PAGE-RELATIVE coordinates
+                "page_char_end":   page_char_end,            # ← TRUE PAGE-RELATIVE coordinates
                 "searchable":      not _is_page_boilerplate(rect, page_height),
                 "display_spans":   _make_display_spans(text, kind, bbox=rect, page=page_num, apryse_spans=layout_obj.get("spans", []), object_position_in_page=object_position_in_page),
                 "embedding":       [],
