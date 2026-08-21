@@ -14,6 +14,24 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+def _debug_geometry(stage, chunk):
+    for obj in chunk.get("extraction", {}).get("objects", []):
+        for span in obj.get("display_spans", []):
+            if span.get("type") != "sentence":
+                continue
+
+            if "N = 8" in span.get("text", ""):
+                ss = span.get("_sentence_span", {})
+                logger.info(
+                    "[GEOMETRY DEBUG] stage=%s chunk=%s text=%r "
+                    "sentence_span=%s page_char_start=%r page_char_end=%r",
+                    stage,
+                    chunk.get("chunk_id"),
+                    span.get("text"),
+                    ss,
+                    ss.get("page_char_start"),
+                    ss.get("page_char_end"),
+                )
 # In Lambda containers, code lives under /var/task. Use that root when present.
 _task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
 if _task_root_env and (Path(_task_root_env) / "lambdas").exists():
@@ -108,11 +126,17 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
         result = fn(*args, **kwargs)
         timings[label] = round(time.perf_counter() - t, 3)
         return result
-
+    _debug_geometry("BEFORE_NORMALIZE", chunk)
     chunk = _timed("normalize", normalize._process_document, chunk)
+    _debug_geometry("AFTER_NORMALIZE", chunk)
     chunk = _timed("ner",       ner._process_document,       chunk)
+    _debug_geometry("AFTER_NER", chunk)
     chunk = _timed("ontology",  ontology._process_document,  chunk)
+    _debug_geometry("AFTER_ONTOLOGY", chunk)
+
     chunk = _timed("embedding", embedding._process_document, chunk, lambda_ctx=context)
+    _debug_geometry("AFTER_EMBEDDING", chunk)
+    _debug_geometry("BEFORE_INDEX", chunk)
     _timed("index",     idx._process_document,       chunk)
 
     elapsed = round(time.perf_counter() - t_total, 3)
