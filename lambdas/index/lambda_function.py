@@ -373,20 +373,6 @@ def _build_chunk_doc(chunk: dict) -> dict:
 
 
 
-def _geometry_fields_from_object(obj: dict) -> dict:
-    """Copy geometry already resolved by the extraction/chunk stage.
-
-    This function deliberately performs no geometry inference.  The chunk
-    representation is the single source of truth.
-    """
-    geometry = obj.get("geometry") or {}
-    return {
-        "match_rects": list(geometry.get("rects") or []),
-        "match_geometry_source": geometry.get("geometry_source", "none"),
-        "geometry_precision": geometry.get("geometry_precision", "none"),
-        "is_authoritative": bool(geometry.get("is_authoritative", False)),
-    }
-
 def _build_object_docs(chunk: dict) -> list[dict]:
     """
     One OpenSearch doc per semantic object for the semantic-objects index.
@@ -446,7 +432,7 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             # ── Display (never embedded) ──────────────────────────────────────
             "page":          obj.get("page", page_start),
             "bbox":          [float(v) for v in obj.get("bbox", [])],
-            **_geometry_fields_from_object(obj),
+            "geometry": obj.get("geometry") or {},
             "page_char_start": obj.get("page_char_start"),
             "page_char_end":   obj.get("page_char_end"),
             "display_spans": obj.get("display_spans", []),
@@ -559,24 +545,9 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                         )
                     )
                 ],
-                "match_rects": list(
-                    (span.get("geometry") or {}).get("rects") or []
-                ),
-                "match_geometry_source": (
-                    (span.get("geometry") or {}).get(
-                        "geometry_source", "none"
-                    )
-                ),
-                "geometry_precision": (
-                    (span.get("geometry") or {}).get(
-                        "geometry_precision", "none"
-                    )
-                ),
-                "is_authoritative": bool(
-                    (span.get("geometry") or {}).get(
-                        "is_authoritative", False
-                    )
-                ),
+                # Canonical geometry from extraction/chunk construction.
+                # DO NOT rename, derive, or reinterpret fields here.
+                "geometry": span.get("geometry") or {},
                 "page_char_start": (span.get("geometry") or {}).get(
                     "page_char_start"
                 ),
