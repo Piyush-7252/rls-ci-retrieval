@@ -372,6 +372,21 @@ def _build_chunk_doc(chunk: dict) -> dict:
     }
 
 
+
+def _geometry_fields_from_object(obj: dict) -> dict:
+    """Copy geometry already resolved by the extraction/chunk stage.
+
+    This function deliberately performs no geometry inference.  The chunk
+    representation is the single source of truth.
+    """
+    geometry = obj.get("geometry") or {}
+    return {
+        "match_rects": list(geometry.get("rects") or []),
+        "match_geometry_source": geometry.get("geometry_source", "none"),
+        "geometry_precision": geometry.get("geometry_precision", "none"),
+        "is_authoritative": bool(geometry.get("is_authoritative", False)),
+    }
+
 def _build_object_docs(chunk: dict) -> list[dict]:
     """
     One OpenSearch doc per semantic object for the semantic-objects index.
@@ -431,6 +446,9 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             # ── Display (never embedded) ──────────────────────────────────────
             "page":          obj.get("page", page_start),
             "bbox":          [float(v) for v in obj.get("bbox", [])],
+            **_geometry_fields_from_object(obj),
+            "page_char_start": obj.get("page_char_start"),
+            "page_char_end":   obj.get("page_char_end"),
             "display_spans": obj.get("display_spans", []),
         })
 
@@ -524,43 +542,47 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "prev_sentence_id":  prev_id,
                 "next_sentence_id":  next_id,
                 # ── Display / UI geometry ─────────────────────────────────────
-                # The extraction/Apryse DocStructure pipeline already computes
-                # page-relative character coordinates on each sentence span.
-                # Preserve them in semantic-objects.  `char_start/end` above
-                # remain sentence/object-local coordinates; these fields are
-                # absolute offsets in the original PDF page text.
-                "page":              (
-                    (span.get("_sentence_span") or {}).get(
-                        "page",
-                        span.get("page", obj.get("page", page_start)),
+                # Geometry was fully resolved during chunk/extraction creation.
+                # Indexing only copies the already-authoritative candidate
+                # geometry; it never inspects _sentence_span/display_spans to
+                # infer or repair geometry.
+                "page": (
+                    (span.get("geometry") or {}).get(
+                        "page", span.get("page", obj.get("page", page_start))
                     )
                 ),
-                "bbox":              [
+                "bbox": [
                     float(v)
-                    for v in span.get(
-                        "bbox",
-                        (span.get("_sentence_span") or {}).get(
-                            "bbox",
-                            obj.get("bbox", []),
-                        ),
+                    for v in (
+                        (span.get("geometry") or {}).get(
+                            "bbox", span.get("bbox", obj.get("bbox", []))
+                        )
                     )
                 ],
-
-                # IMPORTANT:
-                # The extraction/Apryse DocStructure pipeline stores the
-                # sentence's absolute PDF-page character coordinates inside
-                # span["_sentence_span"], not on the outer display span.
-                #
-                # `char_start` / `char_end` above remain sentence/object-local.
-                # These two fields are absolute offsets in the original PDF
-                # page text and are the coordinates consumed by highlighting.
-                "page_char_start": (
-                    (span.get("_sentence_span") or {}).get("page_char_start")
+                "match_rects": list(
+                    (span.get("geometry") or {}).get("rects") or []
                 ),
-                "page_char_end": (
-                    (span.get("_sentence_span") or {}).get("page_char_end")
+                "match_geometry_source": (
+                    (span.get("geometry") or {}).get(
+                        "geometry_source", "none"
+                    )
                 ),
-
+                "geometry_precision": (
+                    (span.get("geometry") or {}).get(
+                        "geometry_precision", "none"
+                    )
+                ),
+                "is_authoritative": bool(
+                    (span.get("geometry") or {}).get(
+                        "is_authoritative", False
+                    )
+                ),
+                "page_char_start": (span.get("geometry") or {}).get(
+                    "page_char_start"
+                ),
+                "page_char_end": (span.get("geometry") or {}).get(
+                    "page_char_end"
+                ),
                 # Preserve the complete upstream span, including
                 # `_sentence_span`, so the geometry is not lost again.
                 "display_spans": [span],
