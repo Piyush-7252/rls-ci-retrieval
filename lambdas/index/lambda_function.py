@@ -259,6 +259,42 @@ def _process_document(chunk: dict) -> dict:
         nonlocal bulk_size_bytes
         action_s = json.dumps(action)
         doc_s    = json.dumps(doc)
+
+        # Exact payload-boundary geometry audit.  This is intentionally
+        # read-only: the canonical upstream geometry is never rebuilt,
+        # normalized, or modified here.  The log reflects the exact `doc_s`
+        # that is appended to the bulk wire payload below.
+        if action.get("index", {}).get("_index") == SEMANTIC_OBJECTS_INDEX:
+            _payload_geometry = doc.get("geometry")
+            _payload_geometry_bytes = (
+                len(json.dumps(
+                    _payload_geometry,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"))
+                if _payload_geometry
+                else 0
+            )
+            _payload_page_distribution = (
+                _payload_geometry.get("page_distribution") or []
+                if isinstance(_payload_geometry, dict)
+                else []
+            )
+            logger.info(
+                "[INDEX_GEOMETRY_PAYLOAD] "
+                "chunk=%s index=%s object_id=%s type=%s "
+                "geometry_present=%s geometry_bytes=%d "
+                "page_distribution=%d serialized_doc_bytes=%d",
+                chunk_id,
+                action["index"]["_index"],
+                action["index"]["_id"],
+                doc.get("type"),
+                bool(_payload_geometry),
+                _payload_geometry_bytes,
+                len(_payload_page_distribution),
+                len(doc_s.encode("utf-8")),
+            )
+
         bulk_body.append(action_s)
         bulk_body.append(doc_s)
         bulk_ids.append(action["index"]["_id"])
