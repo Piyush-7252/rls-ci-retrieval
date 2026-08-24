@@ -401,6 +401,16 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             "position":         obj["position"],
             "global_position":  obj.get("global_position", obj["position"]),
             "type":             obj["type"],
+            "list_id":         obj.get("list_id"),
+            "list_level":      obj.get("list_level"),
+            "list_label":      obj.get("list_label"),
+            "list_number_format": obj.get("list_number_format"),
+            "table_id":        obj.get("table_id", obj.get("table_key")),
+            "row_index":       obj.get("row_index", obj.get("row_start")),
+            "row_start":       obj.get("row_start"),
+            "col_start":       obj.get("col_start"),
+            "row_span":        obj.get("row_span"),
+            "col_span":        obj.get("col_span"),
             # ── Retrieval ─────────────────────────────────────────────────────
             "text":             obj["text"],
             "normalized_text":  obj.get("normalized_text", ""),
@@ -433,8 +443,6 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             "page":          obj.get("page", page_start),
             "bbox":          [float(v) for v in obj.get("bbox", [])],
             "geometry": obj.get("geometry") or {},
-            "page_char_start": obj.get("page_char_start"),
-            "page_char_end":   obj.get("page_char_end"),
             "display_spans": obj.get("display_spans", []),
         })
 
@@ -442,121 +450,89 @@ def _build_object_docs(chunk: dict) -> list[dict]:
 
 
 def _build_sentence_docs(chunk: dict) -> list[dict]:
-    """
-    One OpenSearch doc per sentence for fine-grained retrieval.
+    """Build sentence documents from self-contained display spans.
 
-    Sentences are display_spans of type="sentence" that received an embedding.
-    Each sentence doc inherits all enrichment fields from its parent object
-    via build_enrichment_fields(obj) — so the same enrichment schema applies
-    at chunk, object, and sentence granularity.
+    ``display_spans`` are the sentence transport units.  Each sentence span
+    carries its canonical upstream ``geometry`` directly, so indexing never
+    performs a geometry lookup, reconstruction, or text/index matching.
     """
     objects     = chunk.get("extraction", {}).get("objects", [])
     document_id = chunk["document_id"]
     chunk_id    = chunk["chunk_id"]
-    page_start  = chunk.get("page_start", 0)
-    docs        = []
+    docs = []
 
     for obj in objects:
-        if not obj.get("searchable", True):
-            continue
-        if not obj.get("indexable", True):
+        if not obj.get("searchable", True) or not obj.get("indexable", True):
             continue
 
-        object_id    = obj["object_id"]
-        obj_entities = obj.get("entities", [])
+        object_id = obj["object_id"]
         spans = [
             (idx, span)
             for idx, span in enumerate(obj.get("display_spans", []))
-            if span.get("type") == "sentence" and span.get("text") and span.get("embedding")
+            if span.get("type") == "sentence"
+            and span.get("text")
+            and span.get("embedding")
         ]
 
         for list_pos, (idx, span) in enumerate(spans):
             sentence_id = f"{object_id}_s{idx}"
-            span_start  = span.get("start", 0)
-            span_end    = span.get("end", len(span.get("text", "")))
+            geometry = span.get("geometry") or {}
 
-            # Entities overlapping this sentence's char range
-            sent_entities = [
-                e for e in obj_entities
-                if e.get("object_start", 0) < span_end
-                and e.get("object_end",   0) > span_start
-            ]
-
-            prev_id   = f"{object_id}_s{spans[list_pos - 1][0]}" if list_pos > 0             else None
-            next_id   = f"{object_id}_s{spans[list_pos + 1][0]}" if list_pos < len(spans) - 1 else None
-            prev_text = spans[list_pos - 1][1].get("text") if list_pos > 0             else None
-            next_text = spans[list_pos + 1][1].get("text") if list_pos < len(spans) - 1 else None
+            prev_id = (
+                f"{object_id}_s{spans[list_pos - 1][0]}"
+                if list_pos > 0 else None
+            )
+            next_id = (
+                f"{object_id}_s{spans[list_pos + 1][0]}"
+                if list_pos < len(spans) - 1 else None
+            )
+            prev_text = (
+                spans[list_pos - 1][1].get("text")
+                if list_pos > 0 else None
+            )
+            next_text = (
+                spans[list_pos + 1][1].get("text")
+                if list_pos < len(spans) - 1 else None
+            )
 
             docs.append({
-                # ── Identity ──────────────────────────────────────────────────
-                "object_id":         sentence_id,
-                "parent_object_id":  object_id,
-                "parent_chunk_id":   chunk_id,
-                "document_id":       document_id,
-                "type":              "sentence",
-                "char_start":        span_start,
-                "char_end":          span_end,
-                # ── Retrieval ─────────────────────────────────────────────────
-                "text":              span["text"],
-                "normalized_text":   span["text"],
-                "dense_vector":      span["embedding"],
-                "entities":          sent_entities,
-                # ── Context (never embedded — available without extra lookup) ──
-                "paragraph_text":        obj.get("text", ""),
-                "prev_sentence_text":    prev_text,
-                "next_sentence_text":    next_text,
-                # ── ClinicalObject enrichment (inherited from parent object) ──
-                # Sentences do not have their own enrichment run — they inherit
-                # everything from their parent object including effective_facts,
-                # slot_provenance, endpoint_identity, population_identity, etc.
+                "object_id": sentence_id,
+                "parent_object_id": object_id,
+                "parent_chunk_id": chunk_id,
+                "document_id": document_id,
+                "type": "sentence",
+                "text": span["text"],
+                "normalized_text": span["text"],
+                "dense_vector": span["embedding"],
+                "entities": obj.get("entities", []),
+                "paragraph_text": obj.get("text", ""),
+                "prev_sentence_text": prev_text,
+                "next_sentence_text": next_text,
                 **build_enrichment_fields(obj),
-                # ── Section context (inherited from parent object) ─────────────
-                "section":           obj.get("section"),
-                "section_number":    obj.get("section_number"),
-                "section_depth":     obj.get("section_depth"),
-                "section_level":     obj.get("section_level"),
-                "section_category":  obj.get("section_category"),
-                "heading_path":      obj.get("heading_path"),
-                "semantic_path":     obj.get("semantic_path"),
+                "section": obj.get("section"),
+                "section_number": obj.get("section_number"),
+                "section_depth": obj.get("section_depth"),
+                "section_level": obj.get("section_level"),
+                "section_category": obj.get("section_category"),
+                "heading_path": obj.get("heading_path"),
+                "semantic_path": obj.get("semantic_path"),
                 "section_confidence": obj.get("section_confidence"),
-                "parent_heading":    obj.get("parent_heading"),
+                "parent_heading": obj.get("parent_heading"),
                 "document_position": obj.get("document_position"),
-                "global_position":   obj.get("global_position", obj.get("position")),
-                "category":          obj.get("category", "clinical"),
-                "boost_weight":      obj.get("boost_weight", 1.0),
-                # ── Sentence adjacency ────────────────────────────────────────
-                "prev_sentence_id":  prev_id,
-                "next_sentence_id":  next_id,
-                # ── Display / UI geometry ─────────────────────────────────────
-                # Geometry was fully resolved during chunk/extraction creation.
-                # Indexing only copies the already-authoritative candidate
-                # geometry; it never inspects _sentence_span/display_spans to
-                # infer or repair geometry.
-                "page": (
-                    (span.get("geometry") or {}).get(
-                        "page", span.get("page", obj.get("page", page_start))
-                    )
-                ),
-                "bbox": [
-                    float(v)
-                    for v in (
-                        (span.get("geometry") or {}).get(
-                            "bbox", span.get("bbox", obj.get("bbox", []))
-                        )
-                    )
-                ],
-                # Canonical geometry from extraction/chunk construction.
-                # DO NOT rename, derive, or reinterpret fields here.
-                "geometry": span.get("geometry") or {},
-                "page_char_start": (span.get("geometry") or {}).get(
-                    "page_char_start"
-                ),
-                "page_char_end": (span.get("geometry") or {}).get(
-                    "page_char_end"
-                ),
-                # Preserve the complete upstream span, including
-                # `_sentence_span`, so the geometry is not lost again.
-                "display_spans": [span],
+                "global_position": obj.get("global_position", obj.get("position")),
+                "category": obj.get("category", "clinical"),
+                "boost_weight": obj.get("boost_weight", 1.0),
+                "list_id": obj.get("list_id"),
+                "list_level": obj.get("list_level"),
+                "list_label": obj.get("list_label"),
+                "list_number_format": obj.get("list_number_format"),
+                "table_id": obj.get("table_id", obj.get("table_key")),
+                "row_index": obj.get("row_index", obj.get("row_start")),
+                "prev_sentence_id": prev_id,
+                "next_sentence_id": next_id,
+                "page": geometry.get("page", obj.get("page", 0)),
+                "bbox": [float(v) for v in (geometry.get("bbox") or [])],
+                "geometry": geometry,
             })
 
     return docs
