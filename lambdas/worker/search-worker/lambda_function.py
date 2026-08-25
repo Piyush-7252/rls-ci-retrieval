@@ -930,6 +930,19 @@ def _indexed_object(v: dict) -> dict | None:
         # Location
         "page":               obj.get("page"),
         "bbox":               obj.get("bbox"),
+        # Canonical geometry contract from extraction/indexing. This includes
+        # page-local paragraph geometry, contributing native spans, and the
+        # exact per-page sentence text used by PDF text-search mode.
+        "geometry":           obj.get("geometry") or {},
+        "list_id":            obj.get("list_id"),
+        "list_level":         obj.get("list_level"),
+        "list_label":         obj.get("list_label"),
+        "list_number_format": obj.get("list_number_format"),
+        "table_id":           obj.get("table_id", obj.get("table_key")),            "row_index":          obj.get("row_index", obj.get("row_start")),
+        "row_start":          obj.get("row_start"),
+        "col_start":          obj.get("col_start"),
+        "row_span":           obj.get("row_span"),
+        "col_span":           obj.get("col_span"),
         "position":           obj.get("position"),
         "global_position":    obj.get("global_position"),
         "document_position":  obj.get("document_position"),
@@ -1060,7 +1073,11 @@ def _full_candidate_record(v: dict) -> dict:
         "context_sentence":     v.get("context_sentence", ""),
         "highlight_score":      v.get("highlight_score"),
         "match_method":         v.get("match_method", ""),
+        "highlight_mode":       v.get("highlight_mode", "span"),
+        "text_search_pages":    v.get("text_search_pages", []),
         "match_page":           v.get("match_page"),
+        # Canonical geometry — copied from the indexed semantic object.
+        "geometry":             obj.get("geometry") or {},
         # ── Retrieval provenance ─────────────────────────────────────────
         "retrieval_object_type":  obj.get("type"),
         "retrieval_object_id":    object_id,
@@ -1075,9 +1092,20 @@ def _full_candidate_record(v: dict) -> dict:
             "object_id":          obj.get("object_id"),
             "parent_chunk_id":    obj.get("parent_chunk_id"),
             "type":               obj.get("type"),
+            "list_id":            obj.get("list_id"),
+            "list_level":         obj.get("list_level"),
+            "list_label":         obj.get("list_label"),
+            "list_number_format": obj.get("list_number_format"),
+            "table_id":           obj.get("table_id", obj.get("table_key")),
+            "row_index":          obj.get("row_index", obj.get("row_start")),
+            "row_start":          obj.get("row_start"),
+            "col_start":          obj.get("col_start"),
+            "row_span":           obj.get("row_span"),
+            "col_span":           obj.get("col_span"),
             # Location
             "page":               obj.get("page"),
             "bbox":               obj.get("bbox"),
+            "geometry":            obj.get("geometry") or {},
             "position":           obj.get("position"),
             "global_position":    obj.get("global_position"),
             "document_position":  obj.get("document_position"),
@@ -1197,6 +1225,7 @@ def _clean_result(result: dict) -> dict:
         "skipped_hits":     skipped_hits,
         "ce_histogram":     result.get("ce_histogram"),
         "timings":          result.get("timings", {}),
+        "highlight_mode":   result.get("highlight_mode", "span"),
     }
 
 

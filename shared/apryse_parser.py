@@ -159,92 +159,108 @@ def parse_page(page: dict) -> dict:
                 footers.append(text.strip())
 
         elif el_type == "table":
-            # Extract rows WITH geometry to preserve cell-level spans
+            # Extract rows WITH geometry to preserve cell-level spans.
             rows_with_spans = _extract_table_rows_with_spans(el)
-            # Also extract basic rows for the summary data structure
             rows = _extract_table_rows(el)
             tables.append({"rect": el.get("rect", []), "rows": rows})
-            
-            # Treat each non-empty row as a layout object for sentence extraction
-            for row_data in rows_with_spans:
-                row_text = row_data["text"].strip()
+
+            # Preserve the native table -> row -> cell structure.  Content
+            # nested inside a cell (paragraph/heading/listItem) is emitted as
+            # searchable content too; it must never disappear merely because
+            # the immediate parent is a table_cell.
+            table_id = str(id(el))
+            for tr_idx, tr in enumerate(el.get("trs", [])):
+                tr_rect = tr.get("rect", [])
+                if not (isinstance(tr_rect, (list, tuple)) and len(tr_rect) >= 4):
+                    tr_rect = _union_rects([
+                        td.get("rect", [])
+                        for td in tr.get("tds", [])
+                        if isinstance(td.get("rect"), (list, tuple))
+                    ])
+
+                row_cells = []
+                row_parts = []
+                row_span_rects = []
+
+                for td_idx, td in enumerate(tr.get("tds", [])):
+                    cell_rect = td.get("rect", [])
+                    cell_id = f"{table_id}_r{tr_idx}_c{td_idx}"
+                    cell_content = _extract_table_cell_content(
+                        td.get("contents", []),
+                        table_id=table_id,
+                        row_index=tr_idx,
+                        row_start=td.get("rowStart", tr_idx),
+                        col_start=td.get("colStart", td_idx),
+                        cell_id=cell_id,
+                        parent_cell_rect=cell_rect,
+                    )
+                    cell_text = cell_content["text"]
+                    cell_spans = cell_content["spans"]
+
+                    if cell_text:
+                        paragraph_objects.append({
+                            "text": cell_text,
+                            "rect": list(cell_rect) if isinstance(cell_rect, (list, tuple)) else [],
+                            "type": "table_cell",
+                            "spans": cell_spans,
+                            "table_role": "header" if td.get("type") == "th" else "body",
+                            "row_start": td.get("rowStart", tr_idx),
+                            "row_index": tr_idx,
+                            "col_start": td.get("colStart", td_idx),
+                            "row_span": td.get("rowSpan", 1),
+                            "col_span": td.get("colSpan", 1),
+                            "_table_key": table_id,
+                            "table_id": table_id,
+                            "cell_id": cell_id,
+                        })
+                        row_parts.append(cell_text)
+                        row_cells.append(td)
+                        row_span_rects.extend(cell_spans)
+
+                    # Nested searchable content: list_item / heading / paragraph
+                    # objects retain the same table relationship and their own
+                    # native geometry.  They are NOT synthesized from cell text.
+                    paragraph_objects.extend(cell_content["objects"])
+
+                row_text = " | ".join(x for x in row_parts if x).strip()
                 if row_text:
+                    row_is_header = any(
+                        isinstance(td, dict) and td.get("type") == "th"
+                        for td in row_cells
+                    )
                     paragraph_objects.append({
                         "text": row_text,
-                        "rect": el.get("rect", []),
-                        "type": "table_row",
-                        "spans": row_data.get("spans", []),  # ← real cell spans!
+                        "rect": list(tr_rect) if isinstance(tr_rect, (list, tuple)) else [],
+                        "type": "table_header" if row_is_header else "table_row",
+                        "spans": row_span_rects,
+                        "row_start": tr_idx,
+                        "row_index": tr_idx,
+                        "_table_key": table_id,
+                        "table_id": table_id,
+                        "table_role": "header" if row_is_header else "body",
                     })
 
         elif el_type == "list":
-            items = _extract_list_items(el)
-            section_refs, all_are_refs = _parse_section_items(items)
-            if all_are_refs:
-                # Every item is a section reference.
-                # De-duplicate: only one section_marker per Y-position (several
-                # nested list elements share the same rect for the same group).
-                y_pos = el.get("rect", [0, 0])[1]
-                if not any(
-                    o.get("type") == "section_marker"
-                    and abs(o.get("rect", [0, 0])[1] - y_pos) < 2
-                    for o in paragraph_objects
-                ):
-                    best = max(section_refs, key=lambda r: r[0].count("."))
-                    paragraph_objects.append({
-                        "text":            best[0],
-                        "rect":            el.get("rect", []),
-                        "type":            "section_marker",
-                        "section_numbers": [r[0] for r in section_refs],
-                        "section_title":   best[1] or None,
-                        "spans": [],  # section markers are synthetic
-                    })
-                    # Promote each hybrid ref (number + title) to a proper heading
-                    # instead of a list object, eliminating the duplicate pair.
-                    for num, title in section_refs:
-                        if title:
-                            depth = num.count(".") + 1
-                            headings.append({"level": depth, "text": title,
-                                             "rect": el.get("rect", [])})
-                            paragraph_objects.append({
-                                "text":  title,
-                                "rect":  el.get("rect", []),
-                                "type":  "heading",
-                                "level": depth,
-                                "spans": [],  # promoted from list; geometry from list
-                            })
-            elif items:
-                lists.append({"items": items})
-                # Extract items WITH geometry to preserve body-level spans
-                items_with_spans = _extract_list_items_with_spans(el)
-                
-                # Emit ONE object for the whole list; individual items become
-                # display_spans in the extraction lambda so the whole list is
-                # embedded as a single semantic unit instead of N fragments.
-                combined = "\n".join(item_data["text"] for item_data in items_with_spans if item_data["text"].strip())
-                
-                # Collect and adjust spans: account for newline separators
-                all_list_spans = []
-                char_offset = 0
-                for item_data in items_with_spans:
-                    item_text = item_data["text"]
-                    # Adjust spans for this item
-                    for span in item_data.get("spans", []):
-                        adjusted_span = {
-                            "text": span["text"],
-                            "rect": span["rect"],
-                            "start": span["start"] + char_offset,
-                            "end": span["end"] + char_offset,
-                        }
-                        all_list_spans.append(adjusted_span)
-                    char_offset += len(item_text) + 1  # +1 for newline separator
-                
-                if combined:
-                    paragraph_objects.append({
-                        "text": combined,
-                        "rect": el.get("rect", []),
-                        "type": "list",
-                        "spans": all_list_spans,  # ← real item body spans!
-                    })
+            # Lists are structural containers. Each native listItem is emitted
+            # as its own retrieval/highlightable object. Parent list metadata is
+            # copied onto the item; geometry remains the native item/body span
+            # geometry and is resolved once in the extraction layer.
+            items_with_spans = _extract_list_items_with_spans(el)
+            for item_index, item_data in enumerate(items_with_spans):
+                item_text = (item_data.get("text") or "").strip()
+                if not item_text:
+                    continue
+                paragraph_objects.append({
+                    "text": item_text,
+                    "rect": list(item_data.get("rect") or el.get("rect", [])),
+                    "type": item_data.get("content_type", "list_item"),
+                    "spans": list(item_data.get("spans") or []),
+                    "list_id": item_data.get("list_id", el.get("listId")),
+                    "list_level": item_data.get("list_level", el.get("level")),
+                    "list_label": item_data.get("list_label", item_data.get("label")),
+                    "list_number_format": item_data.get("list_number_format", el.get("numberFormat")),
+                    "list_item_index": item_index,
+                })
 
         # graphic / image / toc / group with no text → skip
 
@@ -264,45 +280,23 @@ def parse_page(page: dict) -> dict:
         deduped_po.append(po)
     paragraph_objects = deduped_po
 
-    # ────────────────────────────────────────────────────────────────────────────
-    # CRITICAL: Build raw_text and position_map DIRECTLY from paragraph_objects
-    # ────────────────────────────────────────────────────────────────────────────
-    # This ensures they are aligned with Apryse element reading order.
-    # Do NOT build from separate headings/paragraphs/tables/lists arrays —
-    # those are grouped by type and create a different ordering.
-    #
-    # Process: Iterate through paragraph_objects in their natural order,
-    # track character positions as we build the canonical page text,
-    # and attach page_char_start/page_char_end to each object.
-    #
-    # Invariant: For every object, page_text[page_char_start:page_char_end] == object.text
-    
-    parts: list[str] = []
-    position_map = {}  # Maps object_id → {"page_char_start": int, "page_char_end": int, "text": str}
-    current_pos = 0
-    
-    for obj_idx, layout_obj in enumerate(paragraph_objects):
-        obj_text = layout_obj.get("text", "")
-        if not obj_text:
-            continue
-        
-        # Record this object's position in the canonical page text
-        start_pos = current_pos
-        end_pos = current_pos + len(obj_text)
-        
-        # Attach to the object itself (for direct access in lambda)
-        layout_obj["page_char_start"] = start_pos
-        layout_obj["page_char_end"] = end_pos
-        
-        # Also record in position_map for reference
-        position_map[obj_idx] = {
-            "page_char_start": start_pos,
-            "page_char_end": end_pos,
-            "text": obj_text,
-        }
-        
-        parts.append(obj_text)
-        current_pos = end_pos + 1  # +1 for newline separator
+    # Every native Apryse source span must carry its owning PDF page. This is
+    # essential when a semantic object is later merged across a page boundary:
+    # the object may remain one paragraph/sentence candidate, but the UI must
+    # receive page-local geometry groups.
+    page_number = props.get("pageNumber", 0)
+    for _po in paragraph_objects:
+        for _sp in (_po.get("spans") or []):
+            if isinstance(_sp, dict):
+                _sp.setdefault("page", page_number)
+
+    # Build canonical page text directly from Apryse paragraph-object order.
+    # Geometry does not depend on page-relative character offsets.
+    parts: list[str] = [
+        str(layout_obj.get("text", ""))
+        for layout_obj in paragraph_objects
+        if layout_obj.get("text")
+    ]
 
     return {
         "page_number":  props.get("pageNumber", 0),
@@ -314,9 +308,8 @@ def parse_page(page: dict) -> dict:
         "footers":          footers,
         "tables":           tables,
         "lists":            lists,
-        "paragraph_objects": paragraph_objects,   # ← Now includes page_char_start/end
+        "paragraph_objects": paragraph_objects,
         "raw_text":         "\n".join(p for p in parts if p),
-        "_position_map":    position_map,
         "doc_structure":    page,    # raw Apryse page — preserved verbatim
     }
 
@@ -324,6 +317,19 @@ def parse_page(page: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _union_rects(rects: list) -> list:
+    """Return the union bbox of existing Apryse rectangles only."""
+    valid = [r for r in rects if isinstance(r, (list, tuple)) and len(r) >= 4]
+    if not valid:
+        return []
+    return [
+        min(float(r[0]) for r in valid),
+        min(float(r[1]) for r in valid),
+        max(float(r[2]) for r in valid),
+        max(float(r[3]) for r in valid),
+    ]
+
 
 def _parse_section_items(items: list[str]) -> tuple[list[tuple[str, str]], bool]:
     """
@@ -426,31 +432,168 @@ def _spans_text(contents: list) -> str:
 
 def _extract_span_geometry(contents: list) -> list[dict]:
     """
-    Extract span elements with their geometry for sentence-level accuracy.
+    Extract Apryse leaf spans together with their native geometry.
 
-    Returns list of {"text": str, "rect": list[float], "start": int, "end": int}
-    where start/end are cumulative character offsets within the parent element.
-    
-    This enables mapping spaCy sentence character offsets to Apryse line-level
-    geometry for accurate multi-line sentence highlighting.
+    IMPORTANT:
+        This function deliberately does NOT manufacture character offsets.
+
+    The previous implementation assigned synthetic ``start``/``end`` offsets
+    by assuming that ``_spans_text()`` was always exactly:
+
+        span_1 + " " + span_2 + " " + ...
+
+    That assumption is fragile because Apryse text nodes can contain their own
+    whitespace, line breaks, hidden/empty nodes, or formatting boundaries.
+    Those synthetic offsets were later used to decide which rectangles belonged
+    to a sentence.
+
+    Geometry is now represented by the source text + its native rect only.
+    Downstream sentence construction matches the sentence text against this
+    ordered source-span stream and selects the corresponding rects. No
+    persisted character offsets are required for geometry.
+
+    Returns:
+        [
+            {"text": str, "rect": list[float], "span_index": int},
+            ...
+        ]
     """
-    spans_with_geo = []
-    char_pos = 0
-    for c in contents:
-        if c.get("type") == "span" and c.get("text", "").strip():
-            text = c.get("text", "")
-            rect = c.get("rect", [])
-            start = char_pos
-            end = char_pos + len(text)
-            spans_with_geo.append({
-                "text": text,
-                "rect": rect,
-                "start": start,
-                "end": end,
-            })
-            char_pos = end + 1  # +1 for the space inserted by _spans_text
+    spans_with_geo: list[dict] = []
+
+    for span_index, c in enumerate(contents):
+        if c.get("type") != "span":
+            continue
+
+        text = c.get("text", "")
+        if not text or not text.strip():
+            continue
+
+        rect = c.get("rect", [])
+
+        spans_with_geo.append({
+            "text": text,
+            "rect": rect,
+            "span_index": span_index,
+        })
+
     return spans_with_geo
 
+
+def _extract_table_cell_content(
+    contents: list[dict],
+    *,
+    table_id: str,
+    row_index: int,
+    row_start: int,
+    col_start: int,
+    cell_id: str,
+    parent_cell_rect: list | tuple,
+) -> dict:
+    """Preserve semantic content nested inside a table cell.
+
+    The table_cell keeps its aggregate text/geometry, while native listItems
+    inside the cell are additionally emitted as independent searchable objects.
+    Direct paragraphs/headings remain part of the cell aggregate (they are not
+    duplicated as separate table children). A listItem whose body is a heading
+    is promoted to ``heading`` using the same rule as top-level lists.
+    """
+    text_parts: list[str] = []
+    spans: list[dict] = []
+    objects: list[dict] = []
+
+    def process_list(lst: dict, inherited_meta: dict | None = None) -> None:
+        meta = {
+            "list_id": lst.get("listId", (inherited_meta or {}).get("list_id")),
+            "list_level": lst.get("level", (inherited_meta or {}).get("list_level")),
+            "list_number_format": lst.get(
+                "numberFormat", (inherited_meta or {}).get("list_number_format")
+            ),
+        }
+        for item in lst.get("items", []):
+            if item.get("type") == "list":
+                process_list(item, meta)
+                continue
+            if item.get("type") != "listItem":
+                continue
+
+            label = item.get("label", {}).get("text", "").strip()
+            item_parts: list[str] = []
+            item_spans: list[dict] = []
+            item_types: list[str] = []
+
+            body_contents = item.get("body", {}).get("contents", [])
+            if not body_contents:
+                body_contents = item.get("contents", []) or []
+
+            for child in body_contents:
+                child_kind = child.get("type", "")
+                if child_kind in ("paragraph", "heading"):
+                    child_text = _spans_text(child.get("contents", []))
+                    if child_text.strip():
+                        item_parts.append(child_text.strip())
+                        item_types.append(child_kind)
+                    item_spans.extend(_extract_span_geometry(child.get("contents", [])))
+                elif child_kind == "list":
+                    process_list(child, meta)
+                else:
+                    child_text = _recursive_text(child)
+                    if child_text.strip():
+                        item_parts.append(child_text.strip())
+                        item_types.append(child_kind or "other")
+
+            content = " ".join(item_parts).strip()
+            full_text = (
+                f"{label} {content}".strip()
+                if label and len(label) > 2
+                else (content or label)
+            )
+            if not full_text:
+                continue
+
+            item_rect = item.get("rect") or item.get("body", {}).get("rect") or parent_cell_rect or []
+            content_type = (
+                "heading"
+                if item_types and all(t == "heading" for t in item_types)
+                else "list_item"
+            )
+            objects.append({
+                "text": full_text,
+                "rect": list(item_rect) if isinstance(item_rect, (list, tuple)) else [],
+                "type": content_type,
+                "spans": item_spans,
+                "table_id": table_id,
+                "cell_id": cell_id,
+                "row_index": row_index,
+                "row_start": row_start,
+                "col_start": col_start,
+                "table_role": "body",
+                "list_id": meta.get("list_id"),
+                "list_level": meta.get("list_level"),
+                "list_label": label or None,
+                "list_number_format": meta.get("list_number_format"),
+            })
+            text_parts.append(full_text)
+            spans.extend(item_spans)
+
+    for element in contents or []:
+        kind = element.get("type", "")
+        if kind in ("paragraph", "heading"):
+            text = _spans_text(element.get("contents", []))
+            if text.strip():
+                text_parts.append(text.strip())
+            spans.extend(_extract_span_geometry(element.get("contents", [])))
+        elif kind == "list":
+            process_list(element)
+        else:
+            text = _recursive_text(element)
+            if text.strip():
+                text_parts.append(text.strip())
+
+    return {
+        "text": " ".join(p for p in text_parts if p).strip(),
+        "spans": spans,
+        "objects": objects,
+    }
 
 def _extract_table_rows_with_spans(table: dict) -> list[dict]:
     """
@@ -509,30 +652,18 @@ def _extract_table_rows_with_spans(table: dict) -> list[dict]:
                         "spans": cell_spans if cell_spans else []
                     }
         
-        # Join cells with " | " and adjust spans' character offsets
-        row_text_parts = []
+        # Join cells with " | ". Geometry is kept as native source-span
+        # geometry; no synthetic row-level character offsets are created.
         all_row_spans = []
-        char_offset = 0
-        
+
         for cell_dict in row_cells:
             if cell_dict is None:
                 cell_dict = {"text": "", "spans": []}
-            
-            cell_text = cell_dict["text"]
-            row_text_parts.append(cell_text)
-            
-            # Adjust and collect spans from this cell
-            for span in cell_dict.get("spans", []):
-                adjusted_span = {
-                    "text": span["text"],
-                    "rect": span["rect"],
-                    "start": span["start"] + char_offset,
-                    "end": span["end"] + char_offset,
-                }
-                all_row_spans.append(adjusted_span)
-            
-            char_offset += len(cell_text) + 3  # +3 for " | "
-        
+
+            all_row_spans.extend(
+                cell_dict.get("spans", [])
+            )
+
         row_text = " | ".join(c["text"] if c else "" for c in row_cells)
         if row_text.strip():
             rows_with_spans.append({
@@ -543,79 +674,83 @@ def _extract_table_rows_with_spans(table: dict) -> list[dict]:
     return rows_with_spans
 
 
-def _extract_list_items_with_spans(lst: dict) -> list[dict]:
+def _extract_list_items_with_spans(lst: dict, _parent_meta: dict | None = None) -> list[dict]:
     """
     Extract list items with body-level span geometry.
 
     Returns list of {
         "text": str,       # item text (may include label)
-        "spans": list[dict] # [{"text", "rect", "start", "end"}, ...]
+        "spans": list[dict] # [{"text", "rect", "span_index"}, ...]
     }
 
-    Character offsets account for the joined text structure.
+    Geometry is preserved directly from the Apryse source spans. No synthetic
+    character offsets are generated here.
     """
     items_with_spans = []
-    
+    parent_meta = dict(_parent_meta or {})
+    current_meta = {
+        "list_id": lst.get("listId", parent_meta.get("list_id")),
+        "list_level": lst.get("level", parent_meta.get("list_level")),
+        "list_number_format": lst.get("numberFormat", parent_meta.get("list_number_format")),
+    }
+
     for item in lst.get("items", []):
         item_type = item.get("type", "")
 
         # Nested sub-list — recurse
         if item_type == "list":
-            items_with_spans.extend(_extract_list_items_with_spans(item))
+            items_with_spans.extend(_extract_list_items_with_spans(item, current_meta))
             continue
 
         # Standard listItem
         label = item.get("label", {}).get("text", "").strip()
         
-        # Extract text and spans from body
+        # Extract text, native semantic type, and spans from body.
         content_parts = []
         content_spans = []
-        
+        content_types = []
+
         for c in item.get("body", {}).get("contents", []):
-            if c.get("type") in ("paragraph", "heading"):
+            c_type = c.get("type", "")
+            if c_type in ("paragraph", "heading"):
                 t = _spans_text(c.get("contents", []))
                 if t.strip():
                     content_parts.append(t.strip())
-                    
-                # Extract spans from this element
-                para_spans = _extract_span_geometry(c.get("contents", []))
-                content_spans.extend(para_spans)
+                    content_types.append(c_type)
+                content_spans.extend(_extract_span_geometry(c.get("contents", [])))
             else:
                 t = _recursive_text(c)
                 if t.strip():
                     content_parts.append(t.strip())
-        
-        # Fallback to item.contents if body is empty
+                    content_types.append(c_type or "other")
+
+        # Fallback to item.contents if body is empty.
         if not content_parts:
             for c in item.get("contents", []):
-                if c.get("type") in ("paragraph", "heading"):
+                c_type = c.get("type", "")
+                if c_type in ("paragraph", "heading"):
                     t = _spans_text(c.get("contents", []))
                     if t.strip():
                         content_parts.append(t.strip())
-                        para_spans = _extract_span_geometry(c.get("contents", []))
-                        content_spans.extend(para_spans)
+                        content_types.append(c_type)
+                    content_spans.extend(_extract_span_geometry(c.get("contents", [])))
                 else:
                     t = _recursive_text(c)
                     if t.strip():
                         content_parts.append(t.strip())
-        
+                        content_types.append(c_type or "other")
+
         content = " ".join(content_parts).lstrip("\t").strip()
         
         # Build final text with label if meaningful
         meaningful_label = label and len(label) > 2
         if meaningful_label:
             full_text = f"{label} {content}".strip()
-            # Adjust spans to account for label offset
-            label_offset = len(label) + 1  # label + space
-            adjusted_spans = [
-                {
-                    "text": s["text"],
-                    "rect": s["rect"],
-                    "start": s["start"] + label_offset,
-                    "end": s["end"] + label_offset,
-                }
-                for s in content_spans
-            ]
+            # The label normally has no independent Apryse text span. Keep
+            # the body geometry untouched; sentence/display matching can fall
+            # back to the parent bbox when the label prevents an exact source
+            # text match.
+            adjusted_spans = list(content_spans)
         else:
             full_text = content if content else label
             adjusted_spans = content_spans
@@ -624,6 +759,20 @@ def _extract_list_items_with_spans(lst: dict) -> list[dict]:
             items_with_spans.append({
                 "text": full_text,
                 "spans": adjusted_spans if adjusted_spans else [],
+                "rect": item.get("rect") or item.get("body", {}).get("rect") or lst.get("rect", []),
+                "label": label,
+                "list_id": current_meta.get("list_id"),
+                "list_level": current_meta.get("list_level"),
+                "list_label": label or None,
+                "list_number_format": current_meta.get("list_number_format"),
+                # Preserve the native semantic type carried by the list item's
+                # body. A listItem containing only a heading is a heading
+                # semantically; ordinary list content remains list_item.
+                "content_type": (
+                    "heading"
+                    if content_types and all(t == "heading" for t in content_types)
+                    else "list_item"
+                ),
             })
     
     return items_with_spans

@@ -41,6 +41,10 @@ AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
 CONTEXT_CHARS          = int(os.environ.get("CONTEXT_CHARS", "500"))
 CONTEXT_WINDOW         = int(os.environ.get("CONTEXT_WINDOW", "3"))   # objects before+after match
 OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
+# Maximum semantic objects/characters included in table-aware verifier context.
+# The matched table object is never replaced; this only augments its context.
+TABLE_CONTEXT_MAX_OBJECTS = int(os.environ.get("TABLE_CONTEXT_MAX_OBJECTS", "200"))
+TABLE_CONTEXT_MAX_CHARS = int(os.environ.get("TABLE_CONTEXT_MAX_CHARS", "16000"))
 
 def _get_os():
     from shared.opensearch_client import get_opensearch_client
@@ -76,6 +80,7 @@ def _process(req: dict) -> dict:
     ctx_keys:     list[tuple[str, int | None]]       = []
     _ctx_key_set: set[tuple[str, int | None]]        = set()
     page_lookups: set[tuple[str, int]]               = set()
+    table_ids: set[str]                              = set()
 
     for c in candidates:
         cid      = c.get("chunk_id", "")
@@ -85,6 +90,14 @@ def _process(req: dict) -> dict:
             idx = obj_meta.get(key)
             if idx is not None:
                 idx_needed.add(idx)
+        # Table hits need table-aware context. table_id is the canonical relationship
+        # carried by the indexed object; do not rediscover the table from text.
+        table_id = obj_meta.get("table_id")
+        if table_id and obj_meta.get("type") in {
+            "table_header", "table_row", "table_cell", "list_item"
+        }:
+            table_ids.add(str(table_id))
+
         ctx_key = (cid, obj_meta.get("global_position"))
         if ctx_key not in _ctx_key_set:
             ctx_keys.append(ctx_key)
@@ -103,10 +116,12 @@ def _process(req: dict) -> dict:
         _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed))
         _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys)
         _f_page  = _pool.submit(_msearch_neighbors_by_page, document_id, list(page_lookups))
+        _f_table = _pool.submit(_fetch_table_context, document_id, sorted(table_ids))
         chunk_cache: dict[str, dict]         = _f_chunk.result()
         idx_cache:   dict[int, str]          = _f_idx.result()
         ctx_cache:   dict[tuple, list[dict]] = _f_ctx.result()
         page_cache:  dict[tuple, str]        = _f_page.result()
+        table_cache: dict[str, list[dict]]     = _f_table.result()
     # Second mget pass for any IDs the first mget missed
     missed = [cid for cid in deduped_ids if cid not in chunk_cache]
     if missed:
@@ -120,7 +135,7 @@ def _process(req: dict) -> dict:
     )
 
     # ── Phase 3: expand each candidate from caches ────────────────────────────
-    expanded = [_expand(c, document_id, chunk_cache, idx_cache, ctx_cache, page_cache) for c in candidates]
+    expanded = [_expand(c, document_id, chunk_cache, idx_cache, ctx_cache, page_cache, table_cache) for c in candidates]
 
     if expanded:
         avg_chars = sum(e.get("current_text_chars", 0) for e in expanded) / len(expanded)
@@ -133,8 +148,13 @@ def _process(req: dict) -> dict:
     return {**req, "expanded_candidates": expanded}
 
 
-_OBJECT_TYPE_PRIORITY: dict[str, int] = {
-    "sentence": 3, "paragraph": 2, "heading": 1, "table_row": 1,
+_OBJECT_TYPE_PRIORITY = {
+    "sentence": 4,
+    "paragraph": 3,
+    "heading": 2,
+    "table_header": 2,
+    "table_row": 1,
+    "list_item": 1,
 }
 
 # ── Heading normalizer ────────────────────────────────────────────────────────
@@ -154,12 +174,14 @@ def _normalize_heading(heading: str) -> str:
 
 # ── Context object sorter ─────────────────────────────────────────────────────
 
-_CTX_TYPE_ORDER: dict[str, int] = {
-    "heading":   1,
-    "paragraph": 2,
-    "sentence":  3,
-    "table_row": 4,
-    "list":      4,
+_CTX_TYPE_ORDER = {
+    "heading": 1,
+    "table_header": 2,
+    "paragraph": 3,
+    "sentence": 4,
+    "table_row": 5,
+    "table_cell": 6,
+    "list_item": 5,
 }
 
 def _sort_context_objects(
@@ -193,6 +215,7 @@ def _expand(
     idx_cache:   dict[int, str],
     ctx_cache:   dict[tuple, list[dict]],
     page_cache:  dict[tuple, str],
+    table_cache: dict[str, list[dict]],
 ) -> dict:
     chunk_id   = candidate["chunk_id"]
     page_start = candidate.get("page_start", 0)
@@ -209,6 +232,24 @@ def _expand(
     # context_strategy describes what actually ended up in current_text.
     # Set here to "chunk_fallback"; updated once we know the matched object type.
     context_strategy = "chunk_fallback"
+
+    # Table-aware context: the matched table object remains the matched object,
+    # while the verifier receives the complete table structure around it.
+    #
+    # IMPORTANT: list_item is also table-aware. Nested list items inside a
+    # table_cell carry the same canonical table_id/cell_id relationship as
+    # table rows/cells, so a list_item hit must expand to its table context too.
+    # Do not treat it as an ordinary document-level list hit.
+    table_context_objects: list[dict] = []
+    if matched_obj and matched_obj.get("type") in {
+        "table_header", "table_row", "table_cell", "list_item"
+    }:
+        table_id = matched_obj.get("table_id")
+        if table_id:
+            table_context_objects = table_cache.get(str(table_id), [])
+            if table_context_objects:
+                current_text = _format_table_context(table_context_objects, matched_obj)
+                context_strategy = "table_full"
 
     # For sentence-level hits, build hierarchical context:
     #   normalized heading → parent paragraph (only when multi-sentence) → 3-sentence window.
@@ -260,6 +301,14 @@ def _expand(
     # Context objects from msearch cache (deduped by chunk_id + center_pos)
     center_pos      = obj_meta.get("global_position")
     context_objects = ctx_cache.get((chunk_id, center_pos), [])
+    if table_context_objects:
+        # Keep table objects together and deduplicate by object_id.
+        by_id = {o.get("object_id"): o for o in context_objects if o.get("object_id")}
+        for o in table_context_objects:
+            oid = o.get("object_id")
+            if oid:
+                by_id[oid] = o
+        context_objects = list(by_id.values())
 
     # Track why this object was selected — useful for debugging retrieval decisions:
     #   retriever_direct  — retriever set matched_object directly from semantic-objects
@@ -363,6 +412,100 @@ def _expand(
             "next_text":    next_text[:CONTEXT_CHARS]    if next_text  else "",
         },
     }
+
+
+def _format_table_context(table_objects: list[dict], matched_obj: dict) -> str:
+    """Render canonical indexed table objects into verifier context.
+
+    The matched object is always first. Header rows are preserved, followed by
+    table rows in row order. Cells are included only when a row/header has no
+    usable text, preventing cell-level duplication in normal tables.
+    """
+    objs = sorted(
+        table_objects,
+        key=lambda o: (
+            0 if o.get("object_id") == matched_obj.get("object_id") else 1,
+            0 if o.get("type") == "table_header" else 1,
+            o.get("row_index") if isinstance(o.get("row_index"), int) else 10**9,
+            o.get("global_position") if isinstance(o.get("global_position"), int) else 10**9,
+        ),
+    )
+    lines: list[str] = []
+    seen: set[str] = set()
+    for o in objs[:TABLE_CONTEXT_MAX_OBJECTS]:
+        oid = str(o.get("object_id") or "")
+        text = " ".join(str(o.get("text") or "").split())
+        typ = o.get("type") or "table_row"
+        if not text or oid in seen:
+            continue
+        seen.add(oid)
+        if typ == "table_header":
+            prefix = "HEADER"
+        elif typ == "table_row":
+            prefix = "ROW"
+        elif typ == "table_cell":
+            prefix = "CELL"
+        elif typ == "list_item":
+            # Explicitly preserve nested list semantics in verifier context.
+            # The list item is not promoted to a row/cell; it remains a list item
+            # associated with its parent table/cell.
+            prefix = "LIST_ITEM"
+        else:
+            prefix = typ.upper()
+        lines.append(f"[{prefix}] {text}")
+        if sum(len(x) + 1 for x in lines) >= TABLE_CONTEXT_MAX_CHARS:
+            break
+    return "\n".join(lines)
+
+
+def _fetch_table_context(document_id: str, table_ids: list[str]) -> dict[str, list[dict]]:
+    """Fetch complete table context for matched table objects in one msearch.
+
+    Uses the canonical table_id relationship; no text matching or geometry work
+    is performed here. Only semantic object fields needed by the verifier are
+    returned.
+    """
+    if not document_id or not table_ids:
+        return {}
+    body: list[dict] = []
+    source_fields = [
+        "object_id", "document_id", "parent_chunk_id", "global_position",
+        "type", "text",
+        # Canonical table relationships.
+        "table_id", "table_role", "row_index",
+        "cell_id", "row_start", "col_start", "row_span", "col_span",
+        # Canonical list relationships for list_item objects inside cells.
+        "list_id", "list_level", "list_label", "list_number_format",
+        "heading_path", "semantic_path",
+    ]
+    for table_id in table_ids:
+        body.append({})
+        body.append({
+            "size": TABLE_CONTEXT_MAX_OBJECTS,
+            "query": {"bool": {"filter": [
+                {"term": {"document_id": document_id}},
+                {"term": {"table_id": table_id}},
+            ]}},
+            "_source": source_fields,
+            "sort": [
+                {"row_index": {"order": "asc", "missing": "_last"}},
+                {"global_position": "asc"},
+            ],
+        })
+    try:
+        resp = _get_os().msearch(body=body, index=SEMANTIC_OBJECTS_INDEX)
+        result: dict[str, list[dict]] = {}
+        responses = resp.get("responses", [])
+        for i, table_id in enumerate(table_ids):
+            if i >= len(responses):
+                result[table_id] = []
+                continue
+            result[table_id] = [h.get("_source", {}) for h in responses[i].get("hits", {}).get("hits", [])]
+        logger.info("[Context Expander] table_context tables=%d objects=%d", len(table_ids), sum(len(v) for v in result.values()))
+        return result
+    except Exception as exc:
+        logger.warning("[Context Expander] table context msearch failed: %s", exc)
+        return {table_id: [] for table_id in table_ids}
 
 
 def _mget_chunks(chunk_ids: list[str]) -> dict[str, dict]:

@@ -892,21 +892,21 @@ _FACT_SLOT_WEIGHTS: dict[str, float] = {
 _CI_TYPE_OBJECT_BONUS: dict[str, dict[str, float]] = {
     # Narrative-first CI types — heading and paragraph slightly preferred for OBJECTIVE
     # (the paragraph under a heading carries the evidence, not the heading alone)
-    "OBJECTIVE":        {"sentence": 0.30, "paragraph": 0.30, "heading": 0.25, "chunk": 0.05, "table_row": 0.00, "list": 0.00},
-    "ENDPOINT":         {"sentence": 0.30, "paragraph": 0.25, "heading": 0.25, "chunk": 0.05, "table_row": 0.10, "list": 0.00},
-    "SAFETY":           {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_row": 0.05, "list": 0.00},
-    "EFFICACY":         {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_row": 0.10, "list": 0.00},
-    "PROTOCOL":         {"heading": 0.25, "paragraph": 0.20, "sentence": 0.20, "chunk": 0.05, "table_row": 0.05, "list": 0.00},
-    "STUDY_DESIGN":     {"heading": 0.25, "paragraph": 0.20, "sentence": 0.20, "chunk": 0.05, "table_row": 0.05, "list": 0.00},
-    "BIOMARKER":        {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_row": 0.10, "list": 0.00},
+    "OBJECTIVE":        {"sentence": 0.30, "paragraph": 0.30, "heading": 0.25, "chunk": 0.05, "table_header": 0.00, "table_row": 0.00, "list": 0.00, "list_item": 0.00},
+    "ENDPOINT":         {"sentence": 0.30, "paragraph": 0.25, "heading": 0.25, "chunk": 0.05, "table_header": 0.10, "table_row": 0.10, "list": 0.00, "list_item": 0.00},
+    "SAFETY":           {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_header": 0.05, "table_row": 0.05, "list": 0.00, "list_item": 0.00},
+    "EFFICACY":         {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_header": 0.10, "table_row": 0.10, "list": 0.00, "list_item": 0.00},
+    "PROTOCOL":         {"heading": 0.25, "paragraph": 0.20, "sentence": 0.20, "chunk": 0.05, "table_header": 0.05, "table_row": 0.05, "list": 0.00, "list_item": 0.00},
+    "STUDY_DESIGN":     {"heading": 0.25, "paragraph": 0.20, "sentence": 0.20, "chunk": 0.05, "table_header": 0.05, "table_row": 0.05, "list": 0.00, "list_item": 0.00},
+    "BIOMARKER":        {"sentence": 0.25, "paragraph": 0.20, "heading": 0.15, "chunk": 0.05, "table_header": 0.10, "table_row": 0.10, "list": 0.00, "list_item": 0.00},
     # Structured-data-first CI types — tables and lists are genuinely useful
-    "PHARMACOKINETICS": {"table_row": 0.30, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.05},
-    "PHARMACODYNAMICS": {"table_row": 0.25, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.05},
-    "DOSING":           {"table_row": 0.25, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.10},
-    "POPULATION":       {"list": 0.25, "sentence": 0.25, "paragraph": 0.20, "heading": 0.10, "chunk": 0.05, "table_row": 0.10},
+    "PHARMACOKINETICS": {"table_header": 0.30, "table_row": 0.30, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.05, "list_item": 0.05},
+    "PHARMACODYNAMICS": {"table_header": 0.25, "table_row": 0.25, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.05, "list_item": 0.05},
+    "DOSING":           {"table_header": 0.25, "table_row": 0.25, "sentence": 0.25, "paragraph": 0.15, "heading": 0.10, "chunk": 0.05, "list": 0.10, "list_item": 0.10},
+    "POPULATION":       {"list": 0.25, "list_item": 0.25, "sentence": 0.25, "paragraph": 0.20, "heading": 0.10, "chunk": 0.05, "table_header": 0.10, "table_row": 0.10},
     # Default and PHRASE: small uniform reward to narrative types; no penalty elsewhere
-    "_default":         {"sentence": 0.15, "paragraph": 0.15, "heading": 0.15, "chunk": 0.05, "table_row": 0.00, "list": 0.00},
-    "PHRASE":           {"sentence": 0.15, "paragraph": 0.15, "heading": 0.15, "chunk": 0.05, "table_row": 0.00, "list": 0.00},
+    "_default":         {"sentence": 0.15, "paragraph": 0.15, "heading": 0.15, "chunk": 0.05, "table_header": 0.00, "table_row": 0.00, "list": 0.00, "list_item": 0.00},
+    "PHRASE":           {"sentence": 0.15, "paragraph": 0.15, "heading": 0.15, "chunk": 0.05, "table_header": 0.00, "table_row": 0.00, "list": 0.00, "list_item": 0.00},
 }
 
 

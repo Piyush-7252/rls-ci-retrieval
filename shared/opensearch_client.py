@@ -6,9 +6,9 @@ Used by all retrievers and search modules to avoid code duplication.
 import os
 
 # Configuration
-OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
+OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com")
 OPENSEARCH_MAXSIZE     = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
-AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION             = os.environ.get("AWS_REGION", "eu-west-1")
 
 _os_client = None
 

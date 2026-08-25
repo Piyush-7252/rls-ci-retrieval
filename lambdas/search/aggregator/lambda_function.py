@@ -483,11 +483,16 @@ def _merge(retriever_results: list[dict]) -> list[dict]:
 
     Deduplication order (most to least specific):
       1. Exact object_id match (same semantic object returned by multiple retrievers)
-      2. Same page + bbox IoU > 0.5  (same physical layout block retrieved differently)
-      3. Text similarity > 0.85      (near-duplicate text in different objects)
-      4. chunk_id fallback            (chunk-level hits with no object)
+      2. Text similarity > 0.85 on the same page/type
+         (near-duplicate object hits when a retriever does not expose object_id)
+      3. Stable fallback identity built from object type + page + global position +
+         normalized text; chunk_id is used only when no object-level identity is available.
+
+    Geometry is intentionally excluded from candidate identity. It is canonical
+    payload, not a retrieval/aggregation signal.
     """
-    # Canonical candidates keyed by a cluster key (object_id | "page:N:bbox:..." | chunk_id)
+    # Canonical candidates keyed only by semantic identity. Geometry/bbox is never
+    # consulted for clustering.
     clusters: dict[str, dict] = {}
 
     for rr in retriever_results:
@@ -1165,52 +1170,100 @@ def _study_context_penalty(ci_type: str | None, study_context: str) -> float:
 
 def _cluster_key(hit: dict, matched_obj: dict | None,
                  existing: dict[str, dict]) -> str:
-    """
-    Find or create a cluster key for this hit.
+    """Return a geometry-free, object-stable aggregation identity.
 
     Priority:
-      1. exact object_id (object from semantic-objects)
-      2. page + bbox overlap > 0.5 with an existing cluster
-      3. text similarity > 0.85 with an existing cluster
-      4. chunk_id fallback
+      1. exact semantic object_id
+      2. same-page/type text similarity when object_id is absent
+      3. deterministic object identity from type + page + global_position + text
+      4. chunk_id only for genuine chunk-level hits with no usable object identity
+
+    ``bbox``/rects/geometry are deliberately never inspected here.
     """
     if matched_obj:
-        oid = matched_obj.get("object_id", "")
+        oid = str(matched_obj.get("object_id") or "").strip()
         if oid:
             return f"obj:{oid}"
 
-    # bbox/text clustering against existing candidates
-    page    = hit.get("page_start", 0)
-    bbox    = (matched_obj or {}).get("bbox", [])
-    snippet = hit.get("snippet", "")
+    page = _hit_page(hit, matched_obj)
+    object_type = str(
+        (matched_obj or {}).get("type")
+        or hit.get("retrieval_object_type")
+        or hit.get("object_type")
+        or ""
+    ).strip().lower()
+    snippet = _identity_text(hit, matched_obj)
 
-    for key, entry in existing.items():
-        mo = entry.get("matched_object") or {}
-        if entry.get("page_start") != page:
-            continue
-        # bbox overlap
-        if bbox and mo.get("bbox") and _bbox_iou(bbox, mo["bbox"]) > 0.5:
-            return key
-        # text similarity
-        if snippet and entry.get("snippet") and _text_sim(snippet, entry["snippet"]) > 0.85:
-            return key
+    # If this is an object-level hit but the producer omitted object_id, first
+    # merge only with a genuinely similar object on the same page/type.
+    if snippet:
+        for key, entry in existing.items():
+            if _entry_page(entry) != page:
+                continue
+            existing_obj = entry.get("matched_object") or {}
+            existing_type = str(existing_obj.get("type") or "").strip().lower()
+            if object_type and existing_type and existing_type != object_type:
+                continue
+            existing_text = _identity_text_from_entry(entry)
+            if existing_text and _text_sim(snippet, existing_text) > 0.85:
+                return key
 
-    return hit["chunk_id"]
+    if matched_obj:
+        global_position = matched_obj.get("global_position")
+        if global_position is not None:
+            return f"fallback:{object_type}:{page}:pos:{global_position}"
+        return f"fallback:{object_type}:{page}:text:{_normalize_identity_text(snippet)}"
+
+    # A retriever hit without an object is genuinely chunk-level. Keep chunk_id
+    # as the last-resort identity rather than merging unrelated hits from the same page.
+    chunk_id = str(hit.get("chunk_id") or hit.get("id") or "").strip()
+    if chunk_id:
+        return f"chunk:{chunk_id}"
+
+    return f"fallback:{object_type}:{page}:text:{_normalize_identity_text(snippet)}"
 
 
-def _bbox_iou(a: list, b: list) -> float:
-    """Intersection-over-Union for two [x1,y1,x2,y2] bboxes."""
-    if len(a) < 4 or len(b) < 4:
-        return 0.0
-    x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    if inter == 0:
-        return 0.0
-    a_area = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
-    b_area = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
-    union  = a_area + b_area - inter
-    return inter / union if union else 0.0
+def _normalize_identity_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())[:1000]
+
+
+def _identity_text(hit: dict, matched_obj: dict | None) -> str:
+    return _normalize_identity_text(
+        (matched_obj or {}).get("text")
+        or hit.get("snippet")
+        or hit.get("text")
+        or ""
+    )
+
+
+def _identity_text_from_entry(entry: dict) -> str:
+    obj = entry.get("matched_object") or {}
+    return _normalize_identity_text(
+        obj.get("text")
+        or entry.get("snippet")
+        or ""
+    )
+
+
+def _hit_page(hit: dict, matched_obj: dict | None) -> int:
+    value = (matched_obj or {}).get("page")
+    if value is None:
+        value = hit.get("page_start")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _entry_page(entry: dict) -> int:
+    obj = entry.get("matched_object") or {}
+    value = obj.get("page")
+    if value is None:
+        value = entry.get("page_start")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _text_sim(a: str, b: str) -> float:

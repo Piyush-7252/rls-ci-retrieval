@@ -15,165 +15,20 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def _debug_geometry(stage, chunk):
-    """
-    Diagnostic-only geometry invariant tracing.
-
-    IMPORTANT:
-      - Does not create, repair, transform, or infer geometry.
-      - Does not inspect page-relative character offsets.
-      - Reads only the canonical geometry already present in the chunk.
-      - Also inspects sentence display_spans because sentence geometry is
-        carried on display_spans[].geometry before indexing.
-    """
-    extraction = chunk.get("extraction") or {}
-    objects = extraction.get("objects") or []
-
-    logger.info(
-        "[GEOMETRY TRACE] stage=%s chunk=%s object_count=%d",
-        stage,
-        chunk.get("chunk_id"),
-        len(objects),
-    )
-
-    for obj in objects:
-        object_id = obj.get("object_id")
-        object_type = obj.get("type")
-        geometry = obj.get("geometry")
-
-        has_geometry = isinstance(geometry, dict) and bool(geometry)
-        page_distribution = (
-            geometry.get("page_distribution") or []
-            if isinstance(geometry, dict)
-            else []
-        )
-
-        # Canonical field names used by the current geometry contract.
-        geometry_source = (
-            geometry.get("geometry_source")
-            if isinstance(geometry, dict)
-            else None
-        )
-        geometry_precision = (
-            geometry.get("geometry_precision")
-            if isinstance(geometry, dict)
-            else None
-        )
-        authoritative = (
-            geometry.get("is_authoritative")
-            if isinstance(geometry, dict)
-            else None
-        )
-
+    """Debug only canonical geometry; never inspect page-relative character offsets."""
+    for obj in chunk.get("extraction", {}).get("objects", []):
+        geometry = obj.get("geometry") or {}
         logger.info(
-            "[GEOMETRY TRACE] stage=%s chunk=%s object=%s type=%s "
-            "geometry=%s pages=%s source=%s precision=%s authoritative=%s "
-            "display_spans=%d",
+            "[GEOMETRY DEBUG] stage=%s chunk=%s object=%s type=%s "
+            "pages=%s source=%s precision=%s",
             stage,
             chunk.get("chunk_id"),
-            object_id,
-            object_type,
-            "PRESENT" if has_geometry else "MISSING",
-            [p.get("page") for p in page_distribution],
-            geometry_source,
-            geometry_precision,
-            authoritative,
-            len(obj.get("display_spans") or []),
+            obj.get("object_id"),
+            obj.get("type"),
+            [p.get("page") for p in geometry.get("page_distribution", [])],
+            geometry.get("source"),
+            geometry.get("precision"),
         )
-
-        if has_geometry:
-            logger.info(
-                "[GEOMETRY INVARIANT] OK stage=%s chunk=%s object=%s type=%s "
-                "source=%s precision=%s page_distribution=%d",
-                stage,
-                chunk.get("chunk_id"),
-                object_id,
-                object_type,
-                geometry_source,
-                geometry_precision,
-                len(page_distribution),
-            )
-        else:
-            logger.error(
-                "[GEOMETRY INVARIANT] MISSING stage=%s chunk=%s object=%s type=%s "
-                "object_geometry=%r",
-                stage,
-                chunk.get("chunk_id"),
-                object_id,
-                object_type,
-                geometry,
-            )
-
-        # Sentence geometry is carried by display_spans[].geometry.
-        # We only observe it; we never fall back to parent geometry here.
-        display_spans = obj.get("display_spans") or []
-        for span_index, span in enumerate(display_spans):
-            if span.get("type") != "sentence":
-                continue
-
-            span_geometry = span.get("geometry")
-            span_has_geometry = (
-                isinstance(span_geometry, dict) and bool(span_geometry)
-            )
-            span_page_distribution = (
-                span_geometry.get("page_distribution") or []
-                if isinstance(span_geometry, dict)
-                else []
-            )
-
-            span_source = (
-                span_geometry.get("geometry_source")
-                if isinstance(span_geometry, dict)
-                else None
-            )
-            span_precision = (
-                span_geometry.get("geometry_precision")
-                if isinstance(span_geometry, dict)
-                else None
-            )
-
-            logger.info(
-                "[GEOMETRY SENTENCE TRACE] stage=%s chunk=%s object=%s "
-                "span_index=%d sentence_id=%s geometry=%s pages=%s "
-                "source=%s precision=%s text=%r",
-                stage,
-                chunk.get("chunk_id"),
-                object_id,
-                span_index,
-                f"{object_id}_s{span_index}",
-                "PRESENT" if span_has_geometry else "MISSING",
-                [p.get("page") for p in span_page_distribution],
-                span_source,
-                span_precision,
-                str(span.get("text") or "")[:160],
-            )
-
-            if span_has_geometry:
-                logger.info(
-                    "[GEOMETRY INVARIANT] SENTENCE_OK stage=%s chunk=%s "
-                    "object=%s span_index=%d source=%s precision=%s "
-                    "page_distribution=%d",
-                    stage,
-                    chunk.get("chunk_id"),
-                    object_id,
-                    span_index,
-                    span_source,
-                    span_precision,
-                    len(span_page_distribution),
-                )
-            else:
-                logger.error(
-                    "[GEOMETRY INVARIANT] SENTENCE_MISSING stage=%s chunk=%s "
-                    "object=%s span_index=%d sentence_id=%s span_keys=%s "
-                    "text=%r parent_geometry=%s",
-                    stage,
-                    chunk.get("chunk_id"),
-                    object_id,
-                    span_index,
-                    f"{object_id}_s{span_index}",
-                    sorted(span.keys()),
-                    str(span.get("text") or "")[:160],
-                    "PRESENT" if has_geometry else "MISSING",
-                )
 
 
 # In Lambda containers, code lives under /var/task. Use that root when present.

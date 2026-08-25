@@ -85,17 +85,16 @@ def _process(req: dict) -> dict:
             mq          = _highlight_score(ci_text, best_obj.get("text", ""))
             cand = {
                 **cand,
-                # The matched semantic object
                 "match_object_id":  best_obj.get("object_id"),
                 "match_object_type": best_obj.get("type"),
-                # The display span (sentence / row / field) for the UI
+                # Text selection only. PDF geometry remains entirely inside
+                # matched_object.geometry and is never resolved here.
                 "match_span":       best_span.get("text", best_obj.get("text", "")),
                 "match_span_start": best_span.get("start", 0),
                 "match_span_end":   best_span.get("end", 0),
-                "context_sentence": best_obj.get("text", ""),  # full object = reviewer context
+                "context_sentence": best_obj.get("text", ""),
                 "match_page":       best_obj.get("page", cand.get("page_start")),
-                "match_bbox":       best_obj.get("bbox", []),
-                "highlight_score":    round(mq, 3),
+                "highlight_score":  round(mq, 3),
                 "match_method":     method,
             }
         enriched.append(cand)

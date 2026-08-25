@@ -193,8 +193,9 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, k
         },
         "_source": [
             "object_id", "parent_chunk_id", "document_id",
-            "position", "global_position", "type", "text", "page", "bbox",
-            "display_spans",
+            "position", "global_position", "type", "text", "page", "bbox", "geometry",
+    "list_id", "list_level", "list_label", "list_number_format",
+    "table_id", "row_index", "row_start", "col_start", "row_span", "col_span",
             "section_category", "heading_path", "semantic_path",
             "section_confidence", "document_position",
             "chunk_idx", "parent_chunk_idx", "prev_chunk_idx", "next_chunk_idx",
@@ -237,7 +238,9 @@ def _build_matched_object(s: dict) -> dict:
         "text":               s["text"],
         "page":               s.get("page"),
         "bbox":               s.get("bbox", []),
-        "display_spans":      s.get("display_spans", []),
+        # Canonical geometry from extraction/chunk construction.
+        # Retriever only carries it forward; it does not infer or rename it.
+        "geometry": s.get("geometry") or {},
         "entities":           s.get("entities", []),
         # Section / semantic metadata
         "section_category":   s.get("section_category"),
@@ -296,8 +299,9 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
         },
         "_source": [
             "object_id", "parent_chunk_id", "document_id",
-            "position", "global_position", "type", "text", "page", "bbox",
-            "display_spans",
+            "position", "global_position", "type", "text", "page", "bbox", "geometry",
+    "list_id", "list_level", "list_label", "list_number_format",
+    "table_id", "row_index", "row_start", "col_start", "row_span", "col_span",
             "section_category", "heading_path", "semantic_path",
             "section_confidence", "document_position",
             "chunk_idx", "parent_chunk_idx", "prev_chunk_idx", "next_chunk_idx",

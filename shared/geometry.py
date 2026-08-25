@@ -17,6 +17,38 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
+def _precision_for_source(source: str) -> str:
+    """Return the geometry precision implied by a source label."""
+    if source == "apryse_span":
+        return "exact"
+    if source == "apryse_line":
+        return "containing"
+    if source == "object_bbox":
+        return "object"
+    return "none"
+
+
+def _authoritative_for_source(
+    source: str,
+    precision: str | None = None,
+    span_type: str | None = None,
+) -> bool:
+    """Return whether the geometry is authoritative for the semantic object.
+
+    Native Apryse source-span geometry is authoritative for every span type.
+    Object-bbox geometry is also authoritative when the candidate itself is
+    the complete semantic object (paragraph, list item, table cell/row, etc.).
+    It is deliberately non-authoritative for an NLP sentence because the bbox
+    may contain neighbouring text when the sentence does not map exactly to
+    Apryse source spans.
+    """
+    if source == "apryse_span" and (precision in (None, "", "exact")):
+        return True
+    if source == "object_bbox" and span_type not in ("sentence",):
+        return True
+    return False
+
+
 @dataclass
 class SentenceSpan:
     """
@@ -28,10 +60,10 @@ class SentenceSpan:
     
     IMPORTANT: Coordinate system is TWO-TIERED:
       - Object-relative: char_start/char_end (within parent object, e.g. paragraph)
-      - Page-relative: page_char_start/page_char_end (within page text)
+      - Page-relative: page-local character offsets (within page text)
     
     Page-relative coordinates enable precise UI highlighting without reverse lookup:
-      assert page_text[page][page_char_start:page_char_end] == text
+      Geometry is page-local through rects/page_distribution.
 
     Fields
     ------
@@ -46,11 +78,7 @@ class SentenceSpan:
 
     char_end : int
         Character offset within the parent object's text (for internal tracing).
-
-    page_char_start : int
         Character offset within the page's canonical text (FOR UI HIGHLIGHTING).
-
-    page_char_end : int
         Character offset within the page's canonical text (FOR UI HIGHLIGHTING).
 
     rects : list[list[float]]
@@ -85,8 +113,6 @@ class SentenceSpan:
         page=135,
         char_start=421,              # ← Within paragraph
         char_end=487,                # ← Within paragraph
-        page_char_start=12345,        # ← Within page 135 text
-        page_char_end=12411,          # ← Within page 135 text
         rects=[
             [100.0, 200.0, 500.0, 215.0],  # line 1
             [100.0, 218.0, 510.0, 233.0],  # line 2
@@ -101,28 +127,56 @@ class SentenceSpan:
     page: int
     char_start: int
     char_end: int
-    page_char_start: int = 0        # ← NEW: For UI highlighting (page-relative)
-    page_char_end: int = 0          # ← NEW: For UI highlighting (page-relative)
     rects: list[list[float]] = field(default_factory=list)
     source_object_id: Optional[str] = None
     source_span_ids: list[str] = field(default_factory=list)
     span_type: str = "sentence"
-    geometry_source: str = "none"  # "apryse_span" | "object_bbox" | "none"
+    geometry_source: str = "none"
+    # "apryse_span" = exact native source-span ownership
+    # "apryse_line" = containing native line/span; NOT authoritative
+    # "object_bbox" = geometry of the retrieved semantic object
+    # "parent_bbox_text_search" = bbox is only a bounded UI search region
+    # "none" = geometry unavailable
+    geometry_precision: str = "none"
+    # "exact" | "containing" | "object" | "none"
+    is_authoritative: bool = False
+    geometry_fallback_reason: Optional[str] = None
+    parent_bbox: list[list[float]] = field(default_factory=list)
+    evidence_level: str = "none"
+    # Page-local geometry groups. A single semantic object may cross a PDF page
+    # boundary; each entry is independently highlightable by the UI.
+    page_distribution: list[dict] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Keep geometry metadata internally consistent for every producer,
+        # including the extraction Lambda's existing _make_display_spans().
+        if self.geometry_precision == "none":
+            self.geometry_precision = _precision_for_source(self.geometry_source)
+        if not self.is_authoritative:
+            self.is_authoritative = _authoritative_for_source(
+                self.geometry_source,
+                self.geometry_precision,
+                self.span_type,
+            )
+        if self.evidence_level == "none":
+            self.evidence_level = self.span_type or "none"
 
     def to_dict(self) -> dict:
         """Serialize to dictionary for JSON storage."""
         return {
             "text": self.text,
             "page": self.page,
-            "char_start": self.char_start,
-            "char_end": self.char_end,
-            "page_char_start": self.page_char_start,  # ← NEW
-            "page_char_end": self.page_char_end,      # ← NEW
             "rects": self.rects,
             "source_object_id": self.source_object_id,
             "source_span_ids": self.source_span_ids,
             "span_type": self.span_type,
             "geometry_source": self.geometry_source,
+            "geometry_precision": self.geometry_precision,
+            "is_authoritative": self.is_authoritative,
+            "geometry_fallback_reason": self.geometry_fallback_reason,
+            "parent_bbox": self.parent_bbox,
+            "evidence_level": self.evidence_level,
+            "page_distribution": self.page_distribution,
         }
 
     @staticmethod
@@ -131,24 +185,40 @@ class SentenceSpan:
         return SentenceSpan(
             text=d.get("text", ""),
             page=d.get("page", 0),
-            char_start=d.get("char_start", 0),
-            char_end=d.get("char_end", 0),
-            page_char_start=d.get("page_char_start", 0),  # ← NEW
-            page_char_end=d.get("page_char_end", 0),      # ← NEW
+            char_start=0,
+            char_end=0,
             rects=d.get("rects", []),
             source_object_id=d.get("source_object_id"),
             source_span_ids=d.get("source_span_ids", []),
             span_type=d.get("span_type", "sentence"),
             geometry_source=d.get("geometry_source", "none"),
+            geometry_precision=d.get("geometry_precision", _precision_for_source(d.get("geometry_source", "none"))),
+            is_authoritative=bool(d.get("is_authoritative", _authoritative_for_source(d.get("geometry_source", "none"), d.get("geometry_precision")))),
+            geometry_fallback_reason=d.get("geometry_fallback_reason"),
+            parent_bbox=d.get("parent_bbox", []),
+            evidence_level=d.get("evidence_level", d.get("span_type", "none")),
+            page_distribution=d.get("page_distribution", []),
         )
 
+    def has_any_geometry(self) -> bool:
+        """True when this span carries any usable rectangles, including object bbox."""
+        return bool(self.rects)
+
+    def is_exact_geometry(self) -> bool:
+        """True only for exact native Apryse source-span geometry."""
+        return self.geometry_source == "apryse_span" and self.geometry_precision == "exact" and bool(self.rects)
+
     def has_geometry(self) -> bool:
-        """True if this span has explicit PDF rects (not a fallback)."""
+        """True if this span owns complete Apryse source spans exactly."""
         return self.geometry_source == "apryse_span" and len(self.rects) > 0
 
     def has_fallback_geometry(self) -> bool:
         """True if this span has parent-object bbox fallback (coarser resolution than line-level)."""
         return self.geometry_source == "object_bbox" and len(self.rects) > 0
+
+    def needs_bounded_text_search(self) -> bool:
+        """True when parent bbox is only a search boundary, not final highlight geometry."""
+        return self.geometry_source == "parent_bbox_text_search" and bool(self.parent_bbox) and bool(self.text)
 
     def as_legacy_display_span(self) -> dict:
         """
@@ -173,4 +243,5 @@ class SentenceSpan:
             "start": self.char_start,
             "end": self.char_end,
             "bbox": bbox,
+            "page_distribution": self.page_distribution,
         }

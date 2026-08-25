@@ -99,9 +99,16 @@ _CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def _obj_group(kind: str) -> str:
-    """Map an Apryse object type to a broad content group for boundary detection."""
-    if kind in ("table", "table_row"):
+def _obj_group(kind: str, obj: dict | None = None) -> str:
+    """Map an object to a broad content group for section boundary detection.
+
+    A list_item nested inside a table cell remains table content for chunking;
+    it must travel with its parent table rather than create a paragraph/list
+    boundary of its own.
+    """
+    if kind in ("table", "table_header", "table_row", "table_cell"):
+        return "table"
+    if kind == "list_item" and isinstance(obj, dict) and obj.get("table_id"):
         return "table"
     if kind == "list":
         return "list"
@@ -383,18 +390,30 @@ def build_section_chunks(
                     cur_pg_end   = pg_num
                     continue
 
-                # Flush accumulated content, then update heading stack
+                # Flush accumulated content, then update heading stack.
+                # IMPORTANT: keep the native heading object in the new section.
+                # The heading is both section metadata AND a searchable semantic
+                # object with its own canonical geometry.
                 _flush(next_pg=pg_num)
                 while heading_stack and heading_stack[-1][0] >= level:
                     heading_stack.pop()
                 heading_stack.append((level, text))
                 cur_pg_start = pg_num
                 cur_pg_end   = pg_num
+                cur_group = "paragraph"
+                cur_objects.append((pg_num, obj))
 
             elif kind != "section_marker":
                 # Split when object type group changes (paragraph ↔ table ↔ list)
-                new_group = _obj_group(kind)
-                if cur_objects and new_group != cur_group:
+                new_group = _obj_group(kind, obj)
+                # A section-start heading belongs to the section it starts.
+                # Do not strand it in a heading-only chunk when the first body
+                # object is a table/list; keep it with that section content.
+                heading_only = (
+                    cur_objects
+                    and all(o.get("type") == "heading" for _, o in cur_objects)
+                )
+                if cur_objects and new_group != cur_group and not heading_only:
                     _flush(next_pg=pg_num)
                 cur_group = new_group
 
@@ -418,7 +437,7 @@ def build_section_chunks(
     for chunk in raw_chunks:
         # Only pure table-group chunks with enough rows benefit
         non_empty = [(pg, o) for pg, o in chunk.objects if (o.get("text") or "").strip()]
-        is_table  = all(_obj_group(o.get("type", "")) == "table" for _, o in non_empty)
+        is_table  = all(_obj_group(o.get("type", ""), o) == "table" for _, o in non_empty)
         if not is_table or len(non_empty) < 3:
             topic_out.append(chunk)
             continue
@@ -473,7 +492,7 @@ def build_section_chunks(
             # Only paragraph-group chunks with enough content
             para_idxs = [
                 i for i, (_, o) in enumerate(chunk.objects)
-                if _obj_group(o.get("type", "paragraph")) == "paragraph"
+                if _obj_group(o.get("type", "paragraph"), o) == "paragraph"
                 and (o.get("text") or "").strip()
             ]
             if len(para_idxs) < 3 or chunk.word_count < max_words // 2:
