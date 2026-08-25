@@ -369,6 +369,7 @@ def _build_chunk_doc(chunk: dict) -> dict:
         "parent_chunk_idx":     chunk.get("parent_chunk_idx"),
         "prev_chunk_idx":       chunk.get("prev_chunk_idx"),
         "next_chunk_idx":       chunk.get("next_chunk_idx"),
+        "geometry":              chunk.get("geometry") or {},
     }
 
 
