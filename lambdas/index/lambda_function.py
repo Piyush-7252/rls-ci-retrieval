@@ -259,42 +259,6 @@ def _process_document(chunk: dict) -> dict:
         nonlocal bulk_size_bytes
         action_s = json.dumps(action)
         doc_s    = json.dumps(doc)
-
-        # Exact payload-boundary geometry audit.  This is intentionally
-        # read-only: the canonical upstream geometry is never rebuilt,
-        # normalized, or modified here.  The log reflects the exact `doc_s`
-        # that is appended to the bulk wire payload below.
-        if action.get("index", {}).get("_index") == SEMANTIC_OBJECTS_INDEX:
-            _payload_geometry = doc.get("geometry")
-            _payload_geometry_bytes = (
-                len(json.dumps(
-                    _payload_geometry,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8"))
-                if _payload_geometry
-                else 0
-            )
-            _payload_page_distribution = (
-                _payload_geometry.get("page_distribution") or []
-                if isinstance(_payload_geometry, dict)
-                else []
-            )
-            logger.info(
-                "[INDEX_GEOMETRY_PAYLOAD] "
-                "chunk=%s index=%s object_id=%s type=%s "
-                "geometry_present=%s geometry_bytes=%d "
-                "page_distribution=%d serialized_doc_bytes=%d",
-                chunk_id,
-                action["index"]["_index"],
-                action["index"]["_id"],
-                doc.get("type"),
-                bool(_payload_geometry),
-                _payload_geometry_bytes,
-                len(_payload_page_distribution),
-                len(doc_s.encode("utf-8")),
-            )
-
         bulk_body.append(action_s)
         bulk_body.append(doc_s)
         bulk_ids.append(action["index"]["_id"])
@@ -442,6 +406,8 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             "list_label":      obj.get("list_label"),
             "list_number_format": obj.get("list_number_format"),
             "table_id":        obj.get("table_id", obj.get("table_key")),
+            "cell_id":         obj.get("cell_id"),
+            "table_role":      obj.get("table_role"),
             "row_index":       obj.get("row_index", obj.get("row_start")),
             "row_start":       obj.get("row_start"),
             "col_start":       obj.get("col_start"),
@@ -507,7 +473,6 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
             for idx, span in enumerate(obj.get("display_spans", []))
             if span.get("type") == "sentence"
             and span.get("text")
-            and span.get("embedding")
         ]
 
         for list_pos, (idx, span) in enumerate(spans):
@@ -539,7 +504,7 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "type": "sentence",
                 "text": span["text"],
                 "normalized_text": span["text"],
-                "dense_vector": span["embedding"],
+                **({"dense_vector": span["embedding"]} if span.get("embedding") else {}),
                 "entities": obj.get("entities", []),
                 "paragraph_text": obj.get("text", ""),
                 "prev_sentence_text": prev_text,
@@ -563,6 +528,8 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "list_label": obj.get("list_label"),
                 "list_number_format": obj.get("list_number_format"),
                 "table_id": obj.get("table_id", obj.get("table_key")),
+                "cell_id": obj.get("cell_id"),
+                "table_role": obj.get("table_role"),
                 "row_index": obj.get("row_index", obj.get("row_start")),
                 "prev_sentence_id": prev_id,
                 "next_sentence_id": next_id,
