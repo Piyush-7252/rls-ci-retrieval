@@ -44,7 +44,8 @@ import boto3
 ROOT = Path(__file__).resolve().parent.parent
 _SQS_MAX_BATCH = 10          # SQS send_message_batch limit
 _SQS_MAX_BODY  = 256 * 1024  # 256 KB SQS message size limit
-
+TENANT = {"tenant_name": "RLS Test Script", "tenant_id": "1", "tenant_schema": "rls-test-script"}
+PROJECT_ID="123"
 
 def _send_batch(sqs, queue_url: str, entries: list[dict]) -> int:
     """Send a batch of SQS entries; return the count of successes."""
@@ -63,6 +64,8 @@ def dispatch(
     max_cis: int | None,
     ci_ids: list[int] | None,
     dry_run: bool,
+    tenant: dict,
+    project_id: str
 ) -> None:
     with ci_file.open() as fh:
         raw_cis = json.load(fh)
@@ -92,7 +95,11 @@ def dispatch(
 
     for raw_ci in raw_cis:
         ci_id    = raw_ci.get("id", "?")
-        body_str = json.dumps({**raw_ci, "source_type": "ci"})
+        body_str = json.dumps({**raw_ci, "source_type": "ci",
+                               "tenant_id": tenant["tenant_id"],
+                               "tenant_name": tenant["tenant_name"],
+                               "tenant_schema": tenant["tenant_schema"],
+                               "project_id": project_id})
 
         if len(body_str.encode()) > _SQS_MAX_BODY:
             print(f"  WARN: CI {ci_id} body exceeds 256 KB — skipping")
@@ -143,6 +150,8 @@ def main() -> None:
         sys.exit(1)
 
     ci_path = Path(args.ci_file)
+    tenant = TENANT
+    project_id = PROJECT_ID
     if not ci_path.is_absolute():
         ci_path = ROOT / ci_path
     if not ci_path.exists():
@@ -156,6 +165,8 @@ def main() -> None:
         max_cis   = args.max_cis,
         ci_ids    = args.ci_ids,
         dry_run   = args.dry_run,
+        tenant     = tenant,
+        project_id = project_id
     )
 
 

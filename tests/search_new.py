@@ -43,6 +43,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+TENANT = {"tenant_name": "RLS Test Script", "tenant_id": "1", "tenant_schema": "rls-test-script"}
+PROJECT_ID="123"
+
 # ── Import shared config + helpers from search.py ─────────────────────────────
 import search as _S
 
@@ -701,6 +704,10 @@ def main() -> None:
     else:
         raw_cis = raw_cis[: args.max_cis]
 
+    for ci in raw_cis:
+        ci.setdefault("tenant", TENANT)
+        ci.setdefault("project_id", PROJECT_ID)
+
     print(f"\nSearch Pipeline Test  [stage-parallel]")
     print(f"  Document  : {args.document_id}")
     print(f"  CIs loaded: {len(raw_cis)} from {ci_path.name}")
@@ -740,6 +747,8 @@ def main() -> None:
             "_failed":          False,
             "_early_exit":      False,
             "_ci_idx":          idx,
+            "tenant": raw_ci.get("tenant", None),
+            "project_id": raw_ci.get("project_id", None),
         }
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool:

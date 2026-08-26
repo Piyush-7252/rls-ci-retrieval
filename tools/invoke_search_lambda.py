@@ -55,9 +55,9 @@ log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = ROOT / "localfiles" / "search_results"
 
-DEFAULT_FUNCTION   = "rls-search-orchestrator"
+DEFAULT_FUNCTION   = "rls-ci-retrieval-search-orchestrator"
 DEFAULT_REGION     = "eu-west-1"
-DEFAULT_DOCUMENT   = "Combined_REDACTED_CSR-Full-co-jnj-64407564"
+DEFAULT_DOCUMENT   = "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209"
 DEFAULT_RESULTS_BUCKET = "rls-file-bucket-eu"
 DEFAULT_RESULTS_PREFIX = "search-results"
 
@@ -165,7 +165,7 @@ def main() -> None:
     ap.add_argument("--document-id", default=DEFAULT_DOCUMENT)
     ap.add_argument("--function",   default=DEFAULT_FUNCTION)
     ap.add_argument("--region",     default=DEFAULT_REGION)
-    ap.add_argument("--max-cis",    type=int, default=None)
+    ap.add_argument("--max-cis",    type=int, default=35)
     ap.add_argument("--batch-size", type=int, default=50)
     ap.add_argument("--skip-rerank",  action="store_true")
     ap.add_argument("--skip-verify",  action="store_true")

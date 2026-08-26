@@ -73,6 +73,10 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
             "properties": {
                 # Identity
                 "document_id":          {"type": "keyword"},
+                "tenant_id":            {"type": "keyword"},
+                "tenant_schema":        {"type": "keyword"},
+                "tenant_name":          {"type": "keyword"},
+                "project_id":           {"type": "keyword"},
                 "chunk_id":             {"type": "keyword"},
                 "chunk_idx":            {"type": "integer"},
                 "parent_chunk_idx":     {"type": "integer"},
@@ -110,6 +114,104 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
                 "sparse_vector_json":   {"type": "keyword", "index": False},
                 # Metadata
                 "embedding_model":      {"type": "keyword"},
+                "geometry":             {
+                    "type": "object",
+                    "properties": {
+                        "geometry_source":    {"type": "keyword"},
+                        "geometry_precision": {"type": "keyword"},
+                        "is_authoritative":   {"type": "boolean"},
+                        "rects":              {"type": "float", "index": False},
+                        "bbox":               {"type": "float", "index": False},
+                        "object_type":        {"type": "keyword"},
+                        "source_object_id":   {"type": "keyword"},
+                        "page":               {"type": "integer"},
+
+                        "page_distribution": {
+                            "type": "nested",
+                            "properties": {
+                                "page": {
+                                    "type": "integer"
+                                },
+
+                                # Exact portion of the semantic candidate
+                                # belonging to this page. This is the source
+                                # text used by the text-search highlight mode.
+                                "text": {
+                                    "type": "text",
+                                    "analyzer": "english",
+                                    "fields": {
+                                        "keyword": {
+                                            "type": "keyword",
+                                            "ignore_above": 512
+                                        }
+                                    }
+                                },
+
+                                "rects": {
+                                    "type": "float",
+                                    "index": False
+                                },
+                                "paragraph_bbox": {
+                                    "type": "float",
+                                    "index": False,
+                                },
+                                "bbox": {
+                                    "type": "float",
+                                    "index": False
+                                },
+                                "geometry_source": {
+                                    "type": "keyword"
+                                },
+                                "geometry_precision": {
+                                    "type": "keyword"
+                                },
+                                "is_authoritative": {
+                                    "type": "boolean"
+                                },
+                                "source_object_id": {
+                                    "type": "keyword"
+                                },
+                                "source_span_ids": {
+                                    "type": "keyword"
+                                },
+
+                                # Native Apryse spans contributing to the
+                                # semantic sentence/object on this page.
+                                # For containing geometry we intentionally keep
+                                # the complete native span text + rect even when
+                                # only part of the span belongs to the sentence.
+                                "contributing_spans": {
+                                    "type": "nested",
+                                    "properties": {
+                                        "text": {
+                                            "type": "text",
+                                            "analyzer": "english",
+                                            "fields": {
+                                                "keyword": {
+                                                    "type": "keyword",
+                                                    "ignore_above": 512
+                                                }
+                                            }
+                                        },
+                                        "rect": {
+                                            "type": "float",
+                                            "index": False
+                                        },
+                                        "span_id": {
+                                            "type": "keyword"
+                                        },
+                                        "page": {
+                                            "type": "integer"
+                                        },
+                                        "source_object_id": {
+                                            "type": "keyword"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
             }
         },
     }
@@ -149,6 +251,10 @@ def _objects_mapping() -> dict:
                 # Identity
                 "object_id":         {"type": "keyword"},
                 "document_id":       {"type": "keyword"},
+                "tenant_id":         {"type": "keyword"},
+                "tenant_schema":     {"type": "keyword"},
+                "tenant_name":       {"type": "keyword"},
+                "project_id":        {"type": "keyword"},
                 "parent_chunk_id":   {"type": "keyword"},
                 "position":          {"type": "integer"},
                 "global_position":   {"type": "integer"},
@@ -242,6 +348,7 @@ def _objects_mapping() -> dict:
                         "geometry_precision": {"type": "keyword"},
                         "is_authoritative":   {"type": "boolean"},
                         "rects":              {"type": "float", "index": False},
+                        "paragraph_bbox":     {"type": "float", "index": False},
                         "bbox":               {"type": "float", "index": False},
                         "object_type":        {"type": "keyword"},
                         "source_object_id":   {"type": "keyword"},
@@ -438,12 +545,6 @@ def _doc_counts_per_document(client, index: str) -> dict[str, int]:
     except Exception:
         # document_id is a text field — use .keyword sub-field instead
         return _agg("document_id.keyword")
-
-
-def _total_count(client, index: str) -> int:
-    if not client.indices.exists(index=index):
-        return 0
-    return client.count(index=index)["count"]
 
 
 def main(

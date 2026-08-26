@@ -26,20 +26,20 @@ WORKERS = 10
 
 RUNS: list[tuple[str, str, int]] = [
     # ── Group A: ahmedCis × 12 docs ─────────────────────────────────────────
-    ("localfiles/ci/ahmedCis.json", "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209", 34),
+    ("localfiles/ci/ahmedCis.json", "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209", 35),
     # ("localfiles/ci/ahmedCis.json", "20260727131413555_kma65kc_10991_REDACTED_SCS-FD-JNJ-64407564-AAA-498431_1245203", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131420119_56fiqkl_10992_REDACTED_PopPK-Full-64407564MMY1001-867391_1245204", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131528867_exspu63_10999_REDACTED_SAP-FD-64407564MMY1001-745917_1245323", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131537112_e8ijab8_11008_REDACTED_ISS-Pub-JNJ-64407564-AAA-884948_1245347", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131631457_4pz079j_15973_REDACTED_Protocol-Amend_5-64407564MMY3009-694326_1720663", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131636662_61zgqnl_10990_REDACTED_SCE-FD-JNJ-64407564-AAA-827851_1245113", 34),
-    ("localfiles/ci/ahmedCis.json", "20260727131644799_jjryatd_10996_REDACTED_CSR_Protocol_and_Amendments-FD-64407564MMY1001-869239_1245312", 34),
+    # ("localfiles/ci/ahmedCis.json", "20260727131644799_jjryatd_10996_REDACTED_CSR_Protocol_and_Amendments-FD-64407564MMY1001-869239_1245312", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131823070_1glpw5m_12981_REDACTED_Protocol-Amend-2-64007957MMY1008-1124499_1430988", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131828604_zg1px2h_14473_REDACTED_SAP-Amend_2-64007957MMY1001-192385_1099540", 34),
-    ("localfiles/ci/ahmedCis.json", "20260727131832855_1bchble_14475_REDACTED_CSR_Protocol_Appdx-FD-64007957MMY1001-1242306_1565113", 34),
+    # ("localfiles/ci/ahmedCis.json", "20260727131832855_1bchble_14475_REDACTED_CSR_Protocol_Appdx-FD-64007957MMY1001-1242306_1565113", 34),
     # ("localfiles/ci/ahmedCis.json", "20260727131845808_cy9r8kq_14706_Redacted-Master_ICF_Parts_1-2-64407564MMY1001-1359988", 34),
     # -----------Large with 14000 pages -------------------
-    ("localfiles/ci/ahmedCis.json", "Combined_REDACTED_CSR-Full-co-jnj-64407564", 34),
+    # ("localfiles/ci/ahmedCis.json", "Combined_REDACTED_CSR-Full-co-jnj-64407564", 34),
     # -----------Large end  -------------------
     # ── Group B: christineCIs × 5 docs ──────────────────────────────────────
     # ("localfiles/ci/christineCIs.json", "20260727133608401_s2bgig2_011_vbp15-006-study-report_Marking_and_Anon", 61),
@@ -77,6 +77,7 @@ def main() -> None:
             "--max-cis",     str(max_cis),
             "--workers",     str(WORKERS),
             "--output",      str(out_path),
+            "--skip-rerank",  # Skip reranking for speed
         ]
         print(f"[{datetime.now():%H:%M:%S}] [{idx:>2}/{total}] {ci_stem}  ×  {doc_id[:50]}...")
         t0 = time.time()

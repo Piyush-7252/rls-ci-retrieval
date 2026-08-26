@@ -48,6 +48,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from shared.geometry_trace import trace, trace_raw_apryse
+
 # ─── project root on sys.path ─────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -60,15 +62,15 @@ W = "─" * 70   # banner separator
 
 S3_BUCKET  = "rls-file-bucket-eu"
 S3_KEY     = (
-    "QA/235/documents/"
-    "20260514160115536_qi0t5r9_Combined_REDACTED_CSR-Full-64007957MMY1001_64407564MMY1001_14847pgs.pdf"
+    "Patterns Check Run/18/documents/"
+    "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209"
 )
-DOCUMENT_ID = "Combined_REDACTED_CSR-Full-co-jnj-64407564"
+DOCUMENT_ID = "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209"
 
 # Pre-computed Apryse DocStructure (all 176 pages, no demo-mode cap)
 FULL_TABLES_S3_KEY = (
-    "QA/235/extraction/"
-    "20260514160115536_qi0t5r9_Combined_REDACTED_CSR-Full-64007957MMY1001_64407564MMY1001_14847pgs/"
+    "extractions/Patterns Check Run/18/"
+    "20260726062234599_4xs0l7p_10993_REDACTED_Protocol-Amendment-1-FD-64407564MMY3002-218114_1245209/"
     "full_tables.json"
 )
 
@@ -79,7 +81,7 @@ if os.environ.get("PIPELINE_DOCUMENT_ID"):
     DOCUMENT_ID = os.environ["PIPELINE_DOCUMENT_ID"]
 if os.environ.get("PIPELINE_S3_FOLDER"):
     _s3f = os.environ["PIPELINE_S3_FOLDER"]
-    FULL_TABLES_S3_KEY = f"Patterns Check Run/18/extraction/{_s3f}/full_tables.json"
+    FULL_TABLES_S3_KEY = f"extractions/Patterns Check Run/18/{_s3f}/full_tables.json"
     S3_KEY = f"Patterns Check Run/18/extraction/{_s3f}"  # metadata only
 
 OPENSEARCH_ENDPOINT = (
@@ -249,6 +251,8 @@ def download_doc_structure() -> dict:
                     cache_path, len(data) // 1_000_000)
         raw = json.loads(data)
 
+    trace_raw_apryse("INDEX_DOCUMENT:after_docstructure_load", raw)
+
     # Merge pages from all chunks (sorted by chunkIndex) into one flat structure
     all_pages: list[dict] = []
     merged_props: dict = {}
@@ -260,7 +264,9 @@ def download_doc_structure() -> dict:
 
     total = len(all_pages)
     logger.info("Pre-computed docStructure loaded — %d pages total", total)
-    return {"properties": merged_props, "pages": all_pages}
+    merged = {"properties": merged_props, "pages": all_pages}
+    trace("INDEX_DOCUMENT:after_docstructure_merge", merged)
+    return merged
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,11 +290,15 @@ def build_chunks(doc_structure: dict, page_start: int, page_end: int,
 
     # Parse all pages in one pass — heading continuity requires the full range
     all_pages = parse_pages(doc_structure, page_start, page_end)
+    geom_state = trace("INDEX_DOCUMENT:after_parse_pages", {"pages": all_pages})
     if not all_pages:
         logger.warning("No pages extracted for range %d–%d", page_start, page_end)
         return []
 
     sections = build_section_chunks(all_pages, total_pages=len(doc_structure.get("pages", [])))
+    section_state = trace("INDEX_DOCUMENT:after_section_chunker", {
+        "objects": [obj for sec in sections for _, obj in sec.objects]
+    }, geom_state)
     if not sections:
         logger.warning("Section chunker produced no chunks for pages %d–%d",
                        page_start, page_end)
@@ -315,6 +325,11 @@ def build_chunks(doc_structure: dict, page_start: int, page_end: int,
 
         objects = extraction._build_objects(
             chunk_id, sec.virtual_pages, global_offset=global_obj_counter
+        )
+        trace(
+            f"INDEX_DOCUMENT:after_extraction_build_objects:{chunk_id}",
+            {"objects": objects},
+            section_state,
         )
         # Enrich each object with the chunk's canonical section metadata
         for obj in objects:
@@ -391,30 +406,38 @@ def enrich_chunk(chunk: dict, skip_index: bool,
     def _log(msg: str) -> None:
         lines.append(msg)
 
+    # ─ Geometry baseline immediately before enrichment ──────────────────────
+    geom_state = trace(f"INDEX_DOCUMENT:before_normalize:{chunk_id}", chunk)
+
     # ─ Normalize (pure Python) ────────────────────────────────────────────────
     _log(f"  [{chunk_id}] Normalize …")
     _t0 = time.perf_counter(); chunk = normalize._process_document(chunk)
     _pt["normalize"] = round(time.perf_counter() - _t0, 3)
+    geom_state = trace(f"INDEX_DOCUMENT:after_normalize:{chunk_id}", chunk, geom_state)
 
     # ─ NER (entities + per-object enrichment) ────────────────────────────────
     _log(f"  [{chunk_id}] NER …")
     _t0 = time.perf_counter(); chunk = ner._process_document(chunk)
     _pt["ner"] = round(time.perf_counter() - _t0, 3)
+    geom_state = trace(f"INDEX_DOCUMENT:after_ner:{chunk_id}", chunk, geom_state)
 
     # ─ Ontology (reads ner.entities — must follow NER) ─────────────────────
     _log(f"  [{chunk_id}] Ontology …")
     _t0 = time.perf_counter(); chunk = ontology._process_document(chunk)
     _pt["ontology"] = round(time.perf_counter() - _t0, 3)
+    geom_state = trace(f"INDEX_DOCUMENT:after_ontology:{chunk_id}", chunk, geom_state)
 
     # ─ Embedding (reads extraction.objects — must follow NER enrichment) ──────
     _log(f"  [{chunk_id}] Embedding …")
     _t0 = time.perf_counter(); chunk = embedding._process_document(chunk)
     _pt["embedding"] = round(time.perf_counter() - _t0, 3)
+    geom_state = trace(f"INDEX_DOCUMENT:after_embedding:{chunk_id}", chunk, geom_state)
 
     # ─ Index → OpenSearch ────────────────────────────────────────────────────
     _t0 = time.perf_counter()
     if not skip_index:
         _log(f"  [{chunk_id}] Index → OpenSearch …")
+        geom_state = trace(f"INDEX_DOCUMENT:before_index_lambda:{chunk_id}", chunk, geom_state)
         idx._process_document(chunk)
         _pt["index"] = round(time.perf_counter() - _t0, 3)
         _log(f"  [{chunk_id}] → indexed ✓")

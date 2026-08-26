@@ -24,15 +24,16 @@ REGION     = "eu-west-1"
 
 # All CI files in dispatch order (smallest → largest to warm up queue fast)
 CI_FILES = [
-    "rlsTestScriptTenantCis.json",    #  5
-    "random.json",                     # 11
-    "ahmedFalseNumaricCis.json",       # 13
-    "Anonymize_fixture.json",          # 20
-    "ProtocoI_301.json",               # 20
-    "RxPharmaProtocolv1.json",         # 20
-    "numericCis.json",                 # 22
+    # "rlsTestScriptTenantCis.json",    #  5
+    # "random.json",                     # 11
+    # "ahmedFalseNumaricCis.json",       # 13
+    # "Anonymize_fixture.json",          # 20
+    # "ProtocoI_301.json",               # 20
+    # "RxPharmaProtocolv1.json",         # 20
+    # "numericCis.json",                 # 22
     "ahmedCis.json",                   # 34
-    "christineCIs.json",               # 61
+    # "christineCIs.json",               # 61
+    # "numaric_only_ci.json",             # 400
 ]
 
 

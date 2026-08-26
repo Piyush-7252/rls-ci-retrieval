@@ -33,7 +33,7 @@ from pathlib import Path
 import boto3
 
 REGION    = "eu-west-1"
-LOG_GROUP = "/aws/lambda/rls-ci-chunk-worker"
+LOG_GROUP = "/aws/lambda/rls-ci-retrieval-document-chunk-worker"
 
 
 # ── CloudWatch fetcher ────────────────────────────────────────────────────────

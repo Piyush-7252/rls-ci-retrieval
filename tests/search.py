@@ -67,6 +67,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from shared.id_resolver import get_global_ci_id
+
 # ─── project root on sys.path ─────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -97,7 +99,8 @@ _EST_OUTPUT_TOKENS_PER_CAND   = 85    # was 30 — identity block (same_drug/stu
 _EST_EC_INPUT_TOKENS_PER_HIT  = 400   # was 300 — measured ~394 (long label list)
 _EST_EC_OUTPUT_TOKENS_PER_HIT = 40    # was 60  — measured ~41 (shorter response)
 DOCUMENT_ASSETS_FILE = str(ROOT / "localfiles" / "assets" / "document_assets.json")
-
+TENANT = {"tenant_name": "RLS Test Script", "tenant_id": "1", "tenant_schema": "rls-test-script"}
+PROJECT_ID="123"
 # ─── env vars (set before any Lambda module is imported) ─────────────────────
 os.environ.update(
     {
@@ -229,9 +232,39 @@ def _lookup_ci_from_index(raw_ci: dict, ci_id: int) -> dict | None:
     try:
         client   = _build_os_client()
         ci_index = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
-        resp     = client.get(index=ci_index, id=str(ci_id), ignore=[404])
+
+        # Never mutate the caller's raw CI.
+        lookup_ci = dict(raw_ci)
+
+        # Ensure global-ID components exist before resolving the ID.
+        if not lookup_ci.get("tenant_id"):
+            lookup_ci["tenant_id"] = TENANT["tenant_id"]
+
+        if not lookup_ci.get("tenant_name"):
+            lookup_ci["tenant_name"] = TENANT["tenant_name"]
+
+        if not lookup_ci.get("tenant_schema"):
+            lookup_ci["tenant_schema"] = TENANT["tenant_schema"]
+
+        if not lookup_ci.get("project_id"):
+            lookup_ci["project_id"] = PROJECT_ID
+
+        ci_global_id = get_global_ci_id(ci=lookup_ci)
+
+        print(
+            f"  [CI {ci_id}] looking up in ci-objects index: "
+            f"{ci_global_id}"
+        )
+
+        resp = client.get(
+            index=ci_index,
+            id=str(ci_global_id),
+            ignore=[404],
+        )
+
         if not resp.get("found"):
             return None
+
         doc = resp["_source"]
         # Merge: raw CI fields first (keeps assets, justificationText, etc.),
         # then overwrite with the enriched pipeline fields from the index.
@@ -1302,6 +1335,17 @@ def _indexed_object(v: dict) -> dict | None:
         "position":           obj.get("position"),
         "global_position":    obj.get("global_position"),
         "document_position":  obj.get("document_position"),
+        # Canonical geometry is already resolved upstream. Carry it as-is;
+        # downstream must never inspect display_spans to reconstruct geometry.
+        "geometry":           obj.get("geometry") or {},
+
+        # Normalized list/table identity.
+        "list_id":            obj.get("list_id"),
+        "list_level":         obj.get("list_level"),
+        "list_label":         obj.get("list_label"),
+        "list_number_format": obj.get("list_number_format"),
+        "table_id":           obj.get("table_id"),
+        "row_index":          obj.get("row_index"),
         # Text content
         "text":               obj.get("text"),
         "paragraph_text":     obj.get("paragraph_text"),
@@ -1862,6 +1906,9 @@ def main() -> None:
         raw_cis = [raw_cis[args.ci_index]]
     else:
         raw_cis = raw_cis[: args.max_cis]
+    for ci in raw_cis:
+        ci.setdefault("tenant", TENANT)
+        ci.setdefault("project_id", PROJECT_ID)
 
     print(f"\nSearch Pipeline Test")
     print(f"  Document  : {args.document_id}")

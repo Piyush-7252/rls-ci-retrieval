@@ -31,7 +31,7 @@ DOCUMENTS = [
     # "20260727131832855_1bchble_14475_REDACTED_CSR_Protocol_Appdx-FD-64007957MMY1001-1242306_1565113",
     # "20260727131845808_cy9r8kq_14706_Redacted-Master_ICF_Parts_1-2-64407564MMY1001-1359988",
 #    -----------Large with 14000 pages -------------------
-    # "Combined_REDACTED_CSR-Full-co-jnj-64407564",
+    # "20260824053128972_47pkfli_Combined_REDACTED_CSR-Full-64007957MMY1001_64407564MMY1001_14847pgs",
 #    -----------Large end  -------------------
     # "20260727133508767_7twc5sw_Anonymize_fixture",
     # "20260727133514575_vk1juqo_CDISC",
@@ -39,9 +39,14 @@ DOCUMENTS = [
     # "20260727133527469_x5ucao8_RXP_0521_CSR-original",
     # "20260727133531679_e78ivkk_RxPharmaProtocolv1",
     # "20260727133608401_s2bgig2_011_vbp15-006-study-report_Marking_and_Anon",
+
     # "20260727133613754_trhhhzi_018_vbp15-006-16-1-01-prot-amendments_Marking_and_Anon",
+
+
     # "20260727133623334_8s9ljsh_022_extrapolation-report-15-august-2025-0037_Marking_and_Anon",
     # "20260727133628608_8v1o5jc_023_intiquan-2024-model-rep-pooled-poppk-paed-adult-dmd_Marking_and_Anon",
+
+
     # "20260727133731703_h2242ab_035_mRNA-1083-P301-CSR-body-Final_Version_2",
 ]
 
@@ -50,7 +55,7 @@ def now_utc() -> str:
 
 def dispatch(doc_id: str, index: int, total: int, suffix: str = "") -> bool:
     s3_key          = f"{TENANT}/{PROJECT_ID}/documents/{doc_id}.pdf"
-    full_tables_key = f"extraction/{TENANT}/{PROJECT_ID}/{doc_id}/full_tables.json"
+    full_tables_key = f"extractions/{TENANT}/{PROJECT_ID}/{doc_id}/full_tables.json"
     cache_path      = CACHE_BASE / doc_id / "full_tables.json"
 
     print(f"\n{'='*70}")

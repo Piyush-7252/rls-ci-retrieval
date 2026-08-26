@@ -13,8 +13,16 @@ import boto3
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from shared.id_resolver import get_global_document_id
 
 _loaded: dict[str, types.ModuleType] = {}
+
+# SendMessageBatch has a 1 MiB total request-size limit in addition to
+# the 10-entry limit. Keep headroom for the request/entry envelope.
+SQS_BATCH_MAX_ENTRIES = 10
+SQS_BATCH_MAX_BYTES = 900_000
+TENANT = {"tenant_name": "RLS Test Script", "tenant_id": "1", "tenant_schema": "rls-test-script"}
+PROJECT_ID="123"
 
 
 def _load(rel_path: str, alias: str) -> types.ModuleType:
@@ -92,11 +100,16 @@ def _load_doc_structure(s3, bucket: str, key: str, cache_path: Path | None) -> d
 def _build_chunks(
     doc_structure: dict,
     document_id: str,
+    tenant_id: str,
+    tenant_name: str,
+    tenant_schema: str,
+    project_id: str,
     s3_bucket: str,
     s3_key: str,
     page_start: int,
     page_end: int,
     max_chunks: int = 0,
+    global_document_id: str = ""
 ) -> list[dict]:
     from shared.apryse_parser import parse_pages
     from shared.section_chunker import build_section_chunks
@@ -117,7 +130,7 @@ def _build_chunks(
     for sec in sections:
         if max_chunks > 0 and len(chunks) >= max_chunks:
             break
-        chunk_id = f"{document_id}_chunk_{len(chunks):04d}"
+        chunk_id = f"{global_document_id}_chunk_{len(chunks):04d}"
 
         objects = extraction._build_objects(
             chunk_id,
@@ -141,6 +154,10 @@ def _build_chunks(
             {
                 "source_type": "document",
                 "document_id": document_id,
+                "tenant_id": tenant_id,
+                "tenant_name": tenant_name,
+                "tenant_schema": tenant_schema,
+                "project_id": project_id,
                 "chunk_id": chunk_id,
                 "s3_bucket": s3_bucket,
                 "s3_key": s3_key,
@@ -179,14 +196,46 @@ def _send_chunk_messages(
     payload_prefix: str,
     document_id: str,
     chunks: list[dict],
+    tenant: dict,
+    project_id: str,
+    global_document_id: str
 ) -> tuple[int, int]:
+    """Send chunks while respecting BOTH SQS SendMessageBatch limits.
+
+    SQS allows at most 10 entries and 1 MiB total request size. The previous
+    implementation only enforced the entry-count limit, so 10 large-but-valid
+    messages could make the complete request exceed 1 MiB.
+
+    Large individual chunk payloads continue to be offloaded to S3 exactly as
+    before. The chunk contents themselves are never modified.
+    """
     is_fifo = queue_url.endswith(".fifo")
     sent = 0
     offloaded = 0
 
     entries: list[dict] = []
+    batch_bytes = 0
+    ENTRY_OVERHEAD_BYTES = 512
+
+    def flush() -> None:
+        nonlocal sent, entries, batch_bytes
+        if not entries:
+            return
+
+        resp = sqs.send_message_batch(
+            QueueUrl=queue_url,
+            Entries=entries,
+        )
+        failed = resp.get("Failed", [])
+        if failed:
+            raise RuntimeError(f"SQS batch send failed: {failed}")
+
+        sent += len(entries)
+        entries = []
+        batch_bytes = 0
+
     for i, chunk in enumerate(chunks):
-        body_bytes = json.dumps(chunk).encode()
+        body_bytes = json.dumps(chunk).encode("utf-8")
 
         if len(body_bytes) > 240_000:
             offloaded += 1
@@ -200,6 +249,10 @@ def _send_chunk_messages(
             body = json.dumps(
                 {
                     "document_id": document_id,
+                    "tenant_id": tenant.get("tenant_id", "-"),
+                    "tenant_name": tenant.get("tenant_name", "-"),
+                    "tenant_schema": tenant.get("tenant_schema", "-"),
+                    "project_id": project_id,
                     "chunk_id": chunk["chunk_id"],
                     "s3_payload": {
                         "bucket": payload_bucket,
@@ -208,33 +261,30 @@ def _send_chunk_messages(
                 }
             )
         else:
-            body = body_bytes.decode()
+            body = body_bytes.decode("utf-8")
 
         entry = {
             "Id": f"m{sent + i}"[-80:],
             "MessageBody": body,
         }
+
         if is_fifo:
-            entry["MessageGroupId"] = document_id
+            entry["MessageGroupId"] = global_document_id
             entry["MessageDeduplicationId"] = chunk["chunk_id"]
 
+        entry_bytes = len(body.encode("utf-8")) + ENTRY_OVERHEAD_BYTES
+
+        # Flush before adding the entry when either limit would be exceeded.
+        if entries and (
+            len(entries) >= SQS_BATCH_MAX_ENTRIES
+            or batch_bytes + entry_bytes > SQS_BATCH_MAX_BYTES
+        ):
+            flush()
+
         entries.append(entry)
+        batch_bytes += entry_bytes
 
-        if len(entries) == 10:
-            resp = sqs.send_message_batch(QueueUrl=queue_url, Entries=entries)
-            failed = resp.get("Failed", [])
-            if failed:
-                raise RuntimeError(f"SQS batch send failed: {failed}")
-            sent += len(entries)
-            entries = []
-
-    if entries:
-        resp = sqs.send_message_batch(QueueUrl=queue_url, Entries=entries)
-        failed = resp.get("Failed", [])
-        if failed:
-            raise RuntimeError(f"SQS batch send failed: {failed}")
-        sent += len(entries)
-
+    flush()
     return sent, offloaded
 
 
@@ -258,12 +308,17 @@ def main() -> None:
     parser.add_argument("--chunks-cache-dir", default=".cache",
                         help="Root dir for chunk cache (default: .cache)")
     parser.add_argument("--no-chunk-cache", action="store_true",
+                        default=True,
                         help="Ignore existing chunk cache and always rebuild")
     parser.add_argument("--suffix", default="",
                         help="Suffix appended to document_id for chunk building/indexing; "
                              "S3 and full-tables lookups still use the original document_id")
     args = parser.parse_args()
     effective_document_id = args.document_id + (args.suffix or "")
+
+    tenant = TENANT
+    project_id = PROJECT_ID
+    global_document_id = get_global_document_id(effective_document_id, tenant_id=tenant.get("tenant_id"), project_id=project_id)
 
     if not args.dry_run and not args.queue_url:
         raise SystemExit("--queue-url is required unless --dry-run is set")
@@ -330,22 +385,26 @@ def main() -> None:
         max_for_batch = chunks_remaining if chunks_remaining > 0 else 0
 
         # Try chunk cache first (skip when --no-chunk-cache or limit is active)
-        ccache_path = _chunks_cache_path(chunks_cache_dir, effective_document_id, batch_start, batch_end)
+        ccache_path = _chunks_cache_path(chunks_cache_dir, global_document_id, batch_start, batch_end)
         chunks = None
         if not args.no_chunk_cache and max_for_batch == 0:
             chunks = _load_cached_chunks(ccache_path)
             # Fallback: load original cache and patch document_id / chunk_ids in-memory
             if chunks is None and args.suffix:
-                orig_ccache = _chunks_cache_path(chunks_cache_dir, args.document_id, batch_start, batch_end)
+                orig_ccache = _chunks_cache_path(chunks_cache_dir, global_document_id, batch_start, batch_end)
                 orig_chunks = _load_cached_chunks(orig_ccache)
                 if orig_chunks is not None:
                     chunks = [
                         {
                             **c,
                             "document_id": effective_document_id,
+                            "tenant_id": tenant["tenant_id"],
+                            "tenant_name": tenant["tenant_name"],
+                            "tenant_schema": tenant["tenant_schema"],
+                            "project_id": project_id,
                             "chunk_id": (
-                                effective_document_id + c["chunk_id"][len(args.document_id):]
-                                if c.get("chunk_id", "").startswith(args.document_id)
+                                effective_document_id + c["chunk_id"][len(global_document_id):]
+                                if c.get("chunk_id", "").startswith(global_document_id)
                                 else c.get("chunk_id", "")
                             ),
                         }
@@ -357,18 +416,25 @@ def main() -> None:
             chunks = _build_chunks(
                 doc_structure=doc_structure,
                 document_id=effective_document_id,
+                tenant_id=tenant["tenant_id"],
+                tenant_name=tenant["tenant_name"],
+                tenant_schema=tenant["tenant_schema"],
+                project_id=project_id,
                 s3_bucket=args.s3_bucket,
                 s3_key=args.s3_key,
                 page_start=batch_start,
                 page_end=batch_end,
                 max_chunks=max_for_batch,
+                global_document_id=global_document_id
             )
             # Save to chunk cache (only when full range, no limit)
             if not args.no_chunk_cache and max_for_batch == 0:
                 _save_cached_chunks(ccache_path, chunks)
+        _save_cached_chunks(ccache_path, chunks)
+        # return
 
         total_chunks_built += len(chunks)
-
+        
         if args.dry_run:
             continue
 
@@ -380,6 +446,9 @@ def main() -> None:
             payload_prefix=payload_prefix,
             document_id=effective_document_id,
             chunks=chunks,
+            tenant=tenant,
+            project_id=project_id,
+            global_document_id= global_document_id
         )
         total_sent += sent
         total_offloaded += offloaded
