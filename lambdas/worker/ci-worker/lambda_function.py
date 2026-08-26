@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.id_resolver import get_global_ci_id
+from shared.server_notify import notify_ci_status
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -106,7 +107,43 @@ def _decode_payload(record_or_event: dict) -> dict:
     return payload
 
 
-def _run_ci(ci: dict, context: Any = None) -> dict:
+def _delete_existing_ci(ci: dict) -> None:
+    """Delete the tenant-scoped CI document before update/delete."""
+    idx = _load("index", "idx")
+
+    global_id = ci.get("global_id") or get_global_ci_id(
+        ci, tenant_id=ci.get("tenant_id")
+    )
+    ci["global_id"] = global_id
+
+    get_os = getattr(idx, "_get_os", None)
+    if get_os is None:
+        raise RuntimeError(
+            "CI index module must expose _get_os() for update/delete actions"
+        )
+
+    index_name = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
+    logger.info(
+        "[CIWorker] delete-existing index=%s _id=%s ci_id=%s action=%s",
+        index_name, global_id, ci.get("id"), ci.get("action"),
+    )
+
+    try:
+        get_os().delete(index=index_name, id=global_id, ignore=[404])
+    except TypeError:
+        try:
+            get_os().delete(index=index_name, id=global_id)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) != 404:
+                raise
+
+    logger.info(
+        "[CIWorker] delete-existing complete index=%s _id=%s ci_id=%s",
+        index_name, global_id, ci.get("id"),
+    )
+
+
+def _run_enrichment_and_index(ci: dict, context: Any = None) -> dict:
     normalize = _load("normalize", "normalize")
     ner       = _load("ner",       "ner")
     ontology  = _load("ontology",  "ontology")
@@ -123,13 +160,13 @@ def _run_ci(ci: dict, context: Any = None) -> dict:
         return result
 
     ci = _timed("normalize", normalize._process_ci, ci)
-    ci = _timed("ner",       ner._process_ci,       ci)
-    ci = _timed("ontology",  ontology._process_ci,  ci)
+    ci = _timed("ner",       ner._process_ci, ci)
+    ci = _timed("ontology",  ontology._process_ci, ci)
     ci = _timed("embedding", embedding._process_ci, ci)
-    _timed("index",          idx._process_ci,       ci)
+    _timed("index",          idx._process_ci, ci)
 
-    elapsed  = round(time.perf_counter() - t_total, 3)
-    ci_id    = ci.get("id", "unknown")
+    elapsed = round(time.perf_counter() - t_total, 3)
+    ci_id = ci.get("id", "unknown")
     entities = len(ci.get("ner", {}).get("entities", []))
     patterns = len(ci.get("ontology", {}).get("regex_patterns", []))
     embed_ok = bool(ci.get("embedding", {}).get("vector"))
@@ -141,23 +178,57 @@ def _run_ci(ci: dict, context: Any = None) -> dict:
     )
 
     logger.info(
-        "[CIWorker] done ci_id=%s entities=%d patterns=%d embedding=%s rss_mb=%.1f "
-        "normalize=%.3fs ner=%.3fs ontology=%.3fs embedding=%.3fs index=%.3fs total=%.3fs",
-        ci_id, entities, patterns, embed_ok, rss_mb,
+        "[CIWorker] done ci_id=%s action=%s entities=%d patterns=%d embedding=%s "
+        "rss_mb=%.1f normalize=%.3fs ner=%.3fs ontology=%.3fs "
+        "embedding=%.3fs index=%.3fs total=%.3fs",
+        ci_id, ci.get("action", "create"), entities, patterns, embed_ok, rss_mb,
         timings.get("normalize", 0), timings.get("ner", 0),
         timings.get("ontology", 0), timings.get("embedding", 0),
         timings.get("index", 0), elapsed,
     )
 
     return {
-        "ok":        True,
-        "ci_id":     ci_id,
-        "entities":  entities,
-        "patterns":  patterns,
+        "ok": True,
+        "ci_id": ci_id,
+        "action": ci.get("action", "create"),
+        "entities": entities,
+        "patterns": patterns,
         "embedding": embed_ok,
         "elapsed_s": elapsed,
-        "timings":   timings,
+        "timings": timings,
     }
+
+
+def _run_ci(ci: dict, context: Any = None) -> dict:
+    """Run create/update/delete according to the SQS payload action."""
+    action = str(ci.get("action", "create")).lower()
+
+    if action not in {"create", "update", "delete"}:
+        raise ValueError(
+            f"Unsupported CI indexing action: {action!r}; "
+            "expected create, update, or delete"
+        )
+
+    ci["action"] = action
+
+    if action == "delete":
+        started = time.perf_counter()
+        _delete_existing_ci(ci)
+        elapsed = round(time.perf_counter() - started, 3)
+        return {
+            "ok": True,
+            "ci_id": ci.get("id", "unknown"),
+            "action": "delete",
+            "elapsed_s": elapsed,
+            "timings": {"delete": elapsed},
+        }
+
+    if action == "update":
+        # Replacement semantics: remove the old indexed representation first.
+        _delete_existing_ci(ci)
+
+    # create and update both enrich and write a fresh CI document.
+    return _run_enrichment_and_index(ci, context)
 
 
 def handler(event: dict, context: Any) -> dict:
@@ -165,9 +236,39 @@ def handler(event: dict, context: Any) -> dict:
     if "Records" not in event:
         ci = _decode_payload(event)
         ci_id = ci.get("id", "unknown")
-        logger.info("[CIWorker] start (direct) ci_id=%s", ci_id)
-        result = _run_ci(ci, context)
-        return result
+        action = str(ci.get("action", "create")).lower()
+        attempt_id = ci.get("attemptId") or ci.get("attempt_id")
+
+        logger.info(
+            "[CIWorker] start (direct) ci_id=%s action=%s attempt_id=%s",
+            ci_id, action, attempt_id,
+        )
+
+        notify_ci_status(
+            ci=ci,
+            status="PROCESSING",
+            attempt_id=attempt_id,
+        )
+
+        try:
+            result = _run_ci(ci, context)
+
+            final_status = "DELETED" if action == "delete" else "INDEXED"
+            notify_ci_status(
+                ci=ci,
+                status=final_status,
+                attempt_id=attempt_id,
+            )
+            return result
+
+        except Exception as exc:
+            notify_ci_status(
+                ci=ci,
+                status="FAILED",
+                attempt_id=attempt_id,
+                error=str(exc),
+            )
+            raise
 
     # SQS batch invoke.
     failures: list[dict[str, str]] = []
@@ -188,19 +289,63 @@ def handler(event: dict, context: Any) -> dict:
                     failures.append({"itemIdentifier": message_id})
                 continue
 
+        ci = None
         try:
             ci = _decode_payload(record)
             ci_id = ci.get("id", "unknown")
-            logger.info("[CIWorker] start ci_id=%s", ci_id)
-            result = _run_ci(ci, context)
-            processed += 1
+            action = str(ci.get("action", "create")).lower()
+            attempt_id = ci.get("attemptId") or ci.get("attempt_id")
+
             logger.info(
-                "[CIWorker] done ci_id=%s elapsed_s=%s",
-                result.get("ci_id"), result.get("elapsed_s"),
+                "[CIWorker] start ci_id=%s action=%s attempt_id=%s message_id=%s",
+                ci_id, action, attempt_id, message_id,
             )
+
+            # Backend state: QUEUED -> PROCESSING.
+            # Callback failures are intentionally non-fatal.
+            notify_ci_status(
+                ci=ci,
+                status="PROCESSING",
+                attempt_id=attempt_id,
+            )
+
+            try:
+                result = _run_ci(ci, context)
+
+                final_status = "DELETED" if action == "delete" else "INDEXED"
+
+                # Backend state: PROCESSING -> INDEXED/DELETED.
+                notify_ci_status(
+                    ci=ci,
+                    status=final_status,
+                    attempt_id=attempt_id,
+                )
+
+                processed += 1
+                logger.info(
+                    "[CIWorker] done ci_id=%s action=%s status=%s elapsed_s=%s",
+                    result.get("ci_id"), action, final_status,
+                    result.get("elapsed_s"),
+                )
+
+            except Exception as exc:
+                # Backend state: PROCESSING -> FAILED.
+                notify_ci_status(
+                    ci=ci,
+                    status="FAILED",
+                    attempt_id=attempt_id,
+                    error=str(exc),
+                )
+                raise
+
         except Exception as exc:
-            logger.exception("[CIWorker] failed message_id=%s ci_id=%s error=%s",
-                             message_id, record.get("body", "")[:80], exc)
+            logger.exception(
+                "[CIWorker] failed message_id=%s ci_id=%s action=%s error=%s",
+                message_id,
+                ci.get("id", "unknown") if ci else "unknown",
+                ci.get("action", "create") if ci else "unknown",
+                exc,
+            )
             if message_id:
                 failures.append({"itemIdentifier": message_id})
 
