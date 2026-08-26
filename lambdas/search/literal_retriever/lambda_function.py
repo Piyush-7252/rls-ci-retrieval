@@ -54,8 +54,11 @@ def _process(req: dict) -> dict:
     ci_text     = req["ci"].get("knownCI", "")
     norm_text   = req["ci"].get("normalization", {}).get("normalized_text", ci_text)
     document_id = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
-    hits = _literal_search(ci_text, norm_text, document_id)
+    hits = _literal_search(ci_text, norm_text, document_id, tenant_id=tenant_id, project_id=project_id)
 
     return {
         "retriever": "literal",
@@ -102,8 +105,12 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     return unique
 
 
-def _literal_search(ci_text: str, norm_text: str, document_id: str | None) -> list[dict]:
+def _literal_search(ci_text: str, norm_text: str, document_id: str | None, tenant_id: str | None = None, project_id: str | None = None) -> list[dict]:
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
 
     body = {
         "size": LITERAL_MAX,

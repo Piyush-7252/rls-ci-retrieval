@@ -173,15 +173,18 @@ def _process(req: dict) -> dict:
     ci_stmt_type     = ci.get("statement_type", "")
     ci_study_context = ci.get("study_context", "GENERAL")
     document_id      = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     page_count = int(req.get("document_page_count", 0))
     k          = _adaptive_k(page_count, TOP_K)
 
     # Stage 1: flat-fact + statement_type + study_context search
-    fact_hits = _fact_search(ci_facts, ci_stmt_type, ci_study_context, document_id, k)
+    fact_hits = _fact_search(ci_facts, ci_stmt_type, ci_study_context, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
 
     # Stage 2: clinical-relation search (skip if no relations extracted)
-    rel_hits  = _relation_search(ci_relations, document_id, k) if ci_relations else []
+    rel_hits  = _relation_search(ci_relations, document_id, tenant_id=tenant_id, project_id=project_id, k=k) if ci_relations else []
 
     return {
         "retriever": "fact",
@@ -196,9 +199,11 @@ def _fact_search(
     ci_stmt_type:     str,
     ci_study_context: str,
     document_id:      str | None,
+    tenant_id:        str | None = None,
+    project_id:       str | None = None,
     k:                int = TOP_K,
 ) -> list[dict]:
-    body = _build_fact_query(ci_facts, ci_stmt_type, ci_study_context, document_id)
+    body = _build_fact_query(ci_facts, ci_stmt_type, ci_study_context, document_id, tenant_id=tenant_id, project_id=project_id)
     if body is None:
         logger.debug("[Fact Retriever] no usable facts — skipping stage 1")
         return []
@@ -216,6 +221,8 @@ def _build_fact_query(
     ci_stmt_type:     str,
     ci_study_context: str,
     document_id:      str | None,
+    tenant_id:        str | None = None,
+    project_id:       str | None = None,
 ) -> dict | None:
     """
     Stage 1 query: one `match` clause per entity value (not joined into a
@@ -226,6 +233,10 @@ def _build_fact_query(
         return None
 
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
     should_clauses: list[dict] = []
 
     # One clause per value, per slot — not joined
@@ -271,8 +282,8 @@ def _build_fact_query(
 
 # ─── Stage 2: clinical-relation search ─────────────────────────────────────────
 
-def _relation_search(ci_relations: list[dict], document_id: str | None, k: int = TOP_K) -> list[dict]:
-    body = _build_relation_query(ci_relations, document_id)
+def _relation_search(ci_relations: list[dict], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
+    body = _build_relation_query(ci_relations, document_id, tenant_id=tenant_id, project_id=project_id)
     if body is None:
         return []
     body["size"] = k + TIE_BUFFER
@@ -284,7 +295,7 @@ def _relation_search(ci_relations: list[dict], document_id: str | None, k: int =
     return _parse_hits(resp)
 
 
-def _build_relation_query(ci_relations: list[dict], document_id: str | None) -> dict | None:
+def _build_relation_query(ci_relations: list[dict], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None) -> dict | None:
     """
     Stage 2 query: one `bool` clause per CI relation, each anchored on the drug
     and boosted by the other entity slot and relation type.
@@ -306,6 +317,10 @@ def _build_relation_query(ci_relations: list[dict], document_id: str | None) -> 
         return None
 
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
     per_relation_clauses: list[dict] = []
 
     for rel in ci_relations:

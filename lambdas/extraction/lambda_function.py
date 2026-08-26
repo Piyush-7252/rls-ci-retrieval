@@ -42,6 +42,8 @@ Page schema  (produced by shared/apryse_parser.py)
 
 from __future__ import annotations
 
+from shared.geometry_trace import trace, trace_raw_apryse
+
 import copy
 import json
 import logging
@@ -105,9 +107,12 @@ def _process(chunk: dict) -> dict:
     chunk_id      = chunk["chunk_id"]
     pdf_bytes     = _fetch_pdf_bytes(chunk["s3_bucket"], chunk["s3_key"])
     doc_structure = _run_apryse_extraction(pdf_bytes)
+    trace_raw_apryse(f"EXTRACTION:{chunk_id}:after_apryse", doc_structure)
     pages         = parse_pages(doc_structure, chunk["page_start"], chunk["page_end"])
+    page_state    = trace(f"EXTRACTION:{chunk_id}:after_parse_pages", {"pages": pages})
     raw_text      = "\n\n".join(p["raw_text"] for p in pages)
     objects       = _build_objects(chunk_id, pages)
+    trace(f"EXTRACTION:{chunk_id}:after_build_objects", {"objects": objects})
 
     return {
         **chunk,
@@ -857,6 +862,23 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
 
             bbox = list(rect[:4]) if isinstance(rect, (list, tuple)) and len(rect) >= 4 else []
             source_spans = layout_obj.get("source_spans") or layout_obj.get("spans", [])
+            if rect and not bbox:
+                logger.error(
+                    "[GEOMETRY-LOSS] stage=EXTRACTION:_build_objects:rect_to_bbox "
+                    "page=%s type=%s text=%r rect=%r",
+                    page_num, kind, text[:100], rect,
+                )
+            if source_spans:
+                native_span_rects = sum(
+                    1 for _sp in source_spans
+                    if isinstance(_sp, dict) and _sp.get("rect")
+                )
+                if native_span_rects and not bbox:
+                    logger.error(
+                        "[GEOMETRY-LOSS] stage=EXTRACTION:_build_objects:span_to_object "
+                        "page=%s type=%s text=%r native_span_rects=%d bbox=%r",
+                        page_num, kind, text[:100], native_span_rects, bbox,
+                    )
             # CANONICAL GEOMETRY — created here, once.
             # Indexing/search only carry this object forward.
             page_distribution = _page_distribution_for_object(
@@ -1034,6 +1056,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
         merged.append(obj)
     raw = merged
 
+    trace("EXTRACTION:after_raw_object_merge", {"objects": raw})
     objects: list[dict] = []
     current_section = None
     current_section_level = None
@@ -1095,6 +1118,7 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
         })
 
 
+    trace("EXTRACTION:after_build_objects", {"objects": objects})
     return objects
 
 def _run_apryse_extraction(pdf_bytes: bytes) -> dict:

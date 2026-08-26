@@ -67,6 +67,9 @@ def handler(event: dict, context: Any) -> dict:
 def _process(req: dict) -> dict:
     ontology    = req["ci"].get("ontology", {})
     document_id = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     # Use canonical identity fields — not raw ontology expansions.
     # Canonical names are already resolved; searching for them in normalized_text
@@ -95,7 +98,7 @@ def _process(req: dict) -> dict:
 
     page_count = int(req.get("document_page_count", 0))
     k          = _adaptive_k(page_count, TOP_K)
-    hits = _ontology_search(search_terms, document_id, k)
+    hits = _ontology_search(search_terms, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
 
     return {
         "retriever": "ontology",
@@ -103,8 +106,12 @@ def _process(req: dict) -> dict:
     }
 
 
-def _ontology_search(terms: list[str], document_id: str | None, k: int = TOP_K) -> list[dict]:
+def _ontology_search(terms: list[str], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
 
     # One match clause per term — any match counts
     should_clauses = [

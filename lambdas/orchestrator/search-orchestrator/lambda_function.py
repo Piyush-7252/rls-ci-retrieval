@@ -11,6 +11,8 @@ Input
     "search_id":        str (optional, generated if absent),
     "cis":              list[dict],   # raw CIs (looked up from ci-objects index)
     "document_id":      str,
+    "tenant":           dict,
+    "project_id":        str,
     "document_context": dict (optional, derived from document_assets.json if absent),
     "batch_size":       int  (default: 50),
     "skip_rerank":      bool (default: false),
@@ -67,6 +69,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from shared.id_resolver import get_global_ci_id
 from shared.utility import getTenantFromEvent
 
 # ── Logging Context Variables (thread-safe for concurrent batch execution) ───────
@@ -220,14 +223,15 @@ def _load_document_context(document_id: str) -> dict:
 
 # ── CI enrichment lookup ───────────────────────────────────────────────────────
 
-def _lookup_ci(raw_ci: dict) -> dict | None:
+def _lookup_ci(raw_ci: dict, tenant: dict) -> dict | None:
     """Fetch the enriched CI from the ci-objects OpenSearch index."""
     ci_id = raw_ci.get("id")
     if ci_id is None:
         return None
+    global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"), project_id=raw_ci.get("project_id"))
     try:
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
-        resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(ci_id), ignore=[404])
+        resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(global_ci_id), ignore=[404])
         if not resp.get("found"):
             logger.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
             return None
@@ -265,10 +269,10 @@ def _lookup_ci(raw_ci: dict) -> dict | None:
         return None
 
 
-def _load_cis_parallel(raw_cis: list[dict], n_workers: int) -> list[dict]:
+def _load_cis_parallel(raw_cis: list[dict],tenant:dict, n_workers: int) -> list[dict]:
     """Bulk-fetch enriched CIs from ci-objects in parallel."""
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        results = list(pool.map(lambda ci: _lookup_ci(ci), raw_cis))
+        results = list(pool.map(lambda ci: _lookup_ci(ci, tenant), raw_cis))
     enriched = [r for r in results if r is not None]
     logger.info("[Orchestrator] enriched %d/%d CIs", len(enriched), len(raw_cis))
     return enriched
@@ -319,12 +323,13 @@ def handler(event: dict, context: Any) -> dict:
     raw_cis     = event.get("cis", [])
     document_id = event.get("document_id", "")
     tenant     = getTenantFromEvent(event)
+    project_id = event.get("project_id", "")
     batch_size  = int(event.get("batch_size",  _DEFAULT_BATCH_SIZE))
     skip_rerank = bool(event.get("skip_rerank", False))
     skip_verify = bool(event.get("skip_verify",  False))
 
     # ── Set logging context via ContextVar (applies to all logs automatically) ──────────────────
-    _ctx_tenant.set(tenant["name"])
+    _ctx_tenant.set(tenant["tenant_name"])
     _ctx_document_id.set(document_id)
     _ctx_search_id.set(search_id)
 
@@ -338,7 +343,7 @@ def handler(event: dict, context: Any) -> dict:
     # Create mapping of raw CIs by ID for later retrieval
     raw_ci_map = {ci.get("id"): ci for ci in raw_cis}
     n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
-    enriched   = _load_cis_parallel(raw_cis, n_lookup_workers)
+    enriched   = _load_cis_parallel(raw_cis,tenant, n_lookup_workers)
     if not enriched:
         logger.warning("[Orchestrator] no enriched CIs found — returning empty result")
         return {
@@ -359,7 +364,8 @@ def handler(event: dict, context: Any) -> dict:
             "batch_idx":        idx,
             "cis":              batch,
             "document_id":      document_id,
-            "tenant_name":      tenant["name"],  # Pass tenant for worker logging context
+            "tenant":           tenant,  # Pass tenant for worker logging context
+            "project_id":       project_id,  # Pass project_id for worker context
             "document_context": doc_context,
             "skip_rerank":      skip_rerank,
             "skip_verify":      skip_verify,

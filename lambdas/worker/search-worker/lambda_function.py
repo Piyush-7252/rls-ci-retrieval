@@ -11,6 +11,8 @@ Input
     "batch_idx":        int,
     "cis":              list[dict],   # enriched CIs (from ci-objects index)
     "document_id":      str,
+    "tenant":           dict,
+    "project_id":        str,
     "document_context": dict,
     "skip_rerank":      bool,
     "skip_verify":      bool,
@@ -593,7 +595,7 @@ def _safe_stage_wrapper(stage_key: str, stage_fn, req: dict) -> dict:
 
 
 def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
-                  n_workers: int, tenant_name: str) -> tuple[list[dict], dict[str, float]]:
+                  n_workers: int, tenant: dict) -> tuple[list[dict], dict[str, float]]:
     """Run stage-parallel pipeline, return (all_reqs, stage_wall)."""
     # Reranker uses max_workers=1 to serialise CrossEncoder.predict() calls.
     STAGES = [
@@ -643,7 +645,9 @@ def _save_results_debug_s3(all_results: list[dict], event, wall_time: float = 0.
     batch_idx = event.get('batch_idx')
     search_id = event.get('search_id')
     document_id = event.get('document_id')
-    tenant_name = event.get("tenant_name", "")
+    tenant = event.get("tenant", {})
+    tenant_name = tenant.get("tenant_name", "-")
+
     debug_json = {
         "run": {
             "timestamp":   datetime.now().isoformat(),
@@ -1269,12 +1273,14 @@ def handler(event: dict, context: Any) -> dict:
     batch_idx   = event.get("batch_idx", 0)
     enriched_cis = event.get("cis", [])
     document_id  = event.get("document_id", "")
-    tenant_name  = event.get("tenant_name", "")
+    tenant  = event.get("tenant", {})
+    project_id   = event.get("project_id", "")
     doc_context  = event.get("document_context", {})
     skip_rerank  = bool(event.get("skip_rerank", False))
     skip_verify  = bool(event.get("skip_verify",  False))
     
     n_workers    = SEARCH_CI_WORKERS
+    tenant_name   = tenant.get("tenant_name", "default")
 
     # ── Set context variables for all logs (automatically injected by SearchContextFilter) ────────────────────────────────
     _ctx_tenant.set(tenant_name)
@@ -1296,12 +1302,14 @@ def handler(event: dict, context: Any) -> dict:
             "_failed":          False,
             "_early_exit":      False,
             "_ci_idx":          i,
+            "tenant":            tenant,
+            "project_id":        project_id,
         }
         for i, ci in enumerate(enriched_cis)
     ]
 
     t_total = time.perf_counter()
-    all_reqs, stage_wall = _run_pipeline(all_reqs, skip_rerank, skip_verify, n_workers, tenant_name)
+    all_reqs, stage_wall = _run_pipeline(all_reqs, skip_rerank, skip_verify, n_workers, tenant)
     wall_time = round(time.perf_counter() - t_total, 3)
 
     # ── Track CI-level success/failure ─────────────────────────────────────────

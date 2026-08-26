@@ -70,6 +70,9 @@ def handler(event: dict, context: Any) -> dict:
 def _process(req: dict) -> dict:
     candidates  = req.get("candidates", [])
     document_id = req.get("document_id") or ""
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     if not candidates:
         return {**req, "expanded_candidates": []}
@@ -113,10 +116,10 @@ def _process(req: dict) -> dict:
     deduped_ids = list(dict.fromkeys(primary_ids))
     with _TPE(max_workers=4) as _pool:
         _f_chunk = _pool.submit(_mget_chunks, deduped_ids)
-        _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed))
-        _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys)
-        _f_page  = _pool.submit(_msearch_neighbors_by_page, document_id, list(page_lookups))
-        _f_table = _pool.submit(_fetch_table_context, document_id, sorted(table_ids))
+        _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed), tenant_id=tenant_id, project_id=project_id)
+        _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys, tenant_id=tenant_id, project_id=project_id)
+        _f_page  = _pool.submit(_msearch_neighbors_by_page, document_id, list(page_lookups), tenant_id=tenant_id, project_id=project_id)
+        _f_table = _pool.submit(_fetch_table_context, document_id, sorted(table_ids), tenant_id=tenant_id, project_id=project_id)
         chunk_cache: dict[str, dict]         = _f_chunk.result()
         idx_cache:   dict[int, str]          = _f_idx.result()
         ctx_cache:   dict[tuple, list[dict]] = _f_ctx.result()
@@ -458,7 +461,7 @@ def _format_table_context(table_objects: list[dict], matched_obj: dict) -> str:
     return "\n".join(lines)
 
 
-def _fetch_table_context(document_id: str, table_ids: list[str]) -> dict[str, list[dict]]:
+def _fetch_table_context(document_id: str, table_ids: list[str], tenant_id: str | None = None, project_id: str | None = None) -> dict[str, list[dict]]:
     """Fetch complete table context for matched table objects in one msearch.
 
     Uses the canonical table_id relationship; no text matching or geometry work
@@ -485,6 +488,9 @@ def _fetch_table_context(document_id: str, table_ids: list[str]) -> dict[str, li
             "query": {"bool": {"filter": [
                 {"term": {"document_id": document_id}},
                 {"term": {"table_id": table_id}},
+                *([{"term": {"tenant_id": tenant_id}}] if tenant_id else []),
+                *([{"term": {"project_id": project_id}}] if project_id else []),
+
             ]}},
             "_source": source_fields,
             "sort": [
@@ -527,6 +533,8 @@ def _mget_chunks(chunk_ids: list[str]) -> dict[str, dict]:
 def _msearch_neighbors_by_page(
     document_id: str,
     page_keys:   list[tuple[str, int]],  # ("page_end", val) or ("page_start", val)
+    tenant_id: str | None = None,
+    project_id: str | None = None,
 ) -> dict[tuple, str]:
     """Batch-fetch neighbor raw_text for candidates that lack chunk_idx adjacency info."""
     if not page_keys or not document_id:
@@ -539,6 +547,8 @@ def _msearch_neighbors_by_page(
             "query": {"bool": {"filter": [
                 {"term": {"document_id": document_id}},
                 {"term": {field: val}},
+                *([{"term": {"tenant_id": tenant_id}}] if tenant_id else []),
+                *([{"term": {"project_id": project_id}}] if project_id else []),
             ]}},
             "_source": ["raw_text"],
         })
@@ -553,7 +563,7 @@ def _msearch_neighbors_by_page(
         return {}
 
 
-def _msearch_by_idx(document_id: str, idx_list: list[int]) -> dict[int, str]:
+def _msearch_by_idx(document_id: str, idx_list: list[int], tenant_id: str | None = None, project_id: str | None = None) -> dict[int, str]:
     """Batch-fetch raw_text for prev/next/parent chunks by chunk_idx via msearch."""
     if not idx_list or not document_id:
         return {}
@@ -565,6 +575,8 @@ def _msearch_by_idx(document_id: str, idx_list: list[int]) -> dict[int, str]:
             "query": {"bool": {"filter": [
                 {"term": {"document_id": document_id}},
                 {"term": {"chunk_idx": idx}},
+                *([{"term": {"tenant_id": tenant_id}}] if tenant_id else []),
+                *([{"term": {"project_id": project_id}}] if project_id else []),
             ]}},
             "_source": ["raw_text"],
         })
@@ -584,6 +596,8 @@ def _msearch_by_idx(document_id: str, idx_list: list[int]) -> dict[int, str]:
 def _fetch_context_objects_merged(
     document_id: str,
     ctx_keys:    list[tuple[str, int | None]],
+    tenant_id: str | None = None,
+    project_id: str | None = None,
 ) -> dict[tuple, list[dict]]:
     """Fetch context objects for all candidates in ONE OpenSearch terms query.
 
@@ -645,6 +659,8 @@ def _fetch_context_objects_merged(
                 "query": {"bool": {"filter": [
                     {"term":  {"document_id": document_id}},
                     {"terms": {"global_position": sorted(needed)}},
+                    *([{"term": {"tenant_id": tenant_id}}] if tenant_id else []),
+                    *([{"term": {"project_id": project_id}}] if project_id else []),
                 ]}},
                 "sort": [{"global_position": "asc"}],
             },
@@ -671,160 +687,3 @@ def _fetch_context_objects_merged(
         result[key] = sorted(neighborhood, key=lambda o: o.get("global_position", 0))
 
     return result
-
-
-def _msearch_context_objects(
-    document_id: str,
-    ctx_keys:    list[tuple[str, int | None]],
-) -> dict[tuple, list[dict]]:
-    """
-    Batch-fetch context objects for all (chunk_id, center_pos) pairs via msearch.
-    Deduplication already done in _process so each key appears once.
-    """
-    if not ctx_keys:
-        return {}
-    body: list[dict] = []
-    for chunk_id, center_pos in ctx_keys:
-        body.append({})
-        if center_pos is not None:
-            body.append({
-                "size": CONTEXT_WINDOW * 2 + 1,
-                "query": {"bool": {"filter": [
-                    {"term":  {"document_id": document_id}},
-                    {"range": {"global_position": {
-                        "gte": center_pos - CONTEXT_WINDOW,
-                        "lte": center_pos + CONTEXT_WINDOW,
-                    }}},
-                ]}},
-                "sort": [{"global_position": "asc"}],
-            })
-        else:
-            body.append({
-                "size": 100,
-                "query": {"bool": {"filter": [
-                    {"term": {"parent_chunk_id": chunk_id}},
-                ]}},
-                "sort": [{"global_position": "asc"}],
-            })
-    try:
-        resp = _get_os().msearch(body=body, index=SEMANTIC_OBJECTS_INDEX)
-        return {
-            ctx_keys[i]: [h["_source"] for h in r.get("hits", {}).get("hits", [])]
-            for i, r in enumerate(resp.get("responses", []))
-        }
-    except Exception as exc:
-        logger.warning("[Context Expander] msearch context objects failed: %s", exc)
-        return {}
-
-
-def _fetch_chunk_by_idx(document_id: str | None, chunk_idx: int) -> str:
-    """
-    Exact lookup: fetch raw_text for the chunk at ``chunk_idx`` within
-    the given document.  More reliable than page-range heuristics because
-    chunk_idx is a monotone integer assigned by the section chunker.
-    """
-    if not document_id:
-        return ""
-    body = {
-        "size": 1,
-        "query": {"bool": {"filter": [
-            {"term": {"document_id": document_id}},
-            {"term": {"chunk_idx":   chunk_idx}},
-        ]}},
-        "_source": ["raw_text"],
-    }
-    try:
-        resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
-        hits = resp.get("hits", {}).get("hits", [])
-        return hits[0]["_source"].get("raw_text", "") if hits else ""
-    except Exception as exc:
-        logger.warning("[Context Expander] chunk_idx=%s lookup failed: %s", chunk_idx, exc)
-        return ""
-
-
-def _fetch_context_objects(
-    document_id: str,
-    chunk_id:    str,
-    center_pos:  int | None,
-    window:      int = CONTEXT_WINDOW,
-) -> list[dict]:
-    """
-    Fetch the window of semantic objects surrounding a matched position.
-
-    Uses global_position for the query so context expansion works seamlessly
-    across chunk boundaries (e.g. Object 198 in chunk 1, Object 199 in chunk 2).
-    Falls back to parent_chunk_id filter when global_position is unavailable.
-    """
-    if not document_id:
-        return []
-
-    if center_pos is not None:
-        # Primary: global_position range (document-wide, crosses chunk boundaries)
-        filter_clauses: list[dict] = [
-            {"term":  {"document_id": document_id}},
-            {"range": {"global_position": {"gte": center_pos - window,
-                                            "lte": center_pos + window}}},
-        ]
-        fetch_size = window * 2 + 1
-    else:
-        # Fallback for chunk-level hits with no matched object
-        filter_clauses = [{"term": {"parent_chunk_id": chunk_id}}]
-        fetch_size = 100
-
-    body = {
-        "size": fetch_size,
-        "query": {"bool": {"filter": filter_clauses}},
-        "sort":  [{"global_position": "asc"}],
-    }
-
-    try:
-        resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
-        return [h["_source"] for h in resp.get("hits", {}).get("hits", [])]
-    except Exception as exc:
-        logger.warning("[Context Expander] context objects fetch failed chunk=%s: %s", chunk_id, exc)
-        return []
-
-
-def _fetch_chunk(chunk_id: str) -> dict:
-    """Fetch raw_text for a chunk (broad display context only)."""
-    try:
-        resp = _get_os().get(index=OPENSEARCH_INDEX, id=chunk_id)
-        return resp.get("_source", {})
-    except Exception as exc:
-        logger.warning("[Context Expander] could not fetch chunk %s: %s", chunk_id, exc)
-        return {}
-
-
-def _fetch_chunk_text(chunk_id: str) -> str:
-    return _fetch_chunk(chunk_id).get("raw_text", "")
-
-
-def _fetch_neighbor(
-    document_id: str | None,
-    page_start:  int | None = None,
-    page_end:    int | None = None,
-) -> str:
-    """Fetch the chunk whose page range is adjacent to the given boundary."""
-    if not document_id:
-        return ""
-
-    filter_clauses: list[dict] = [{"term": {"document_id": document_id}}]
-    if page_start is not None:
-        filter_clauses.append({"term": {"page_start": page_start}})
-    if page_end is not None:
-        filter_clauses.append({"term": {"page_end": page_end}})
-
-    body = {
-        "size": 1,
-        "query": {"bool": {"filter": filter_clauses}},
-        "_source": ["raw_text"],
-    }
-
-    try:
-        resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
-        hits = resp.get("hits", {}).get("hits", [])
-        if hits:
-            return hits[0].get("_source", {}).get("raw_text", "")
-    except Exception as exc:
-        logger.warning("[Context Expander] neighbor fetch failed: %s", exc)
-    return ""

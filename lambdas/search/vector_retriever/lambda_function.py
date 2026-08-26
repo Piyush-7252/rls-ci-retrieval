@@ -107,6 +107,9 @@ def handler(event: dict, context: Any) -> dict:
 def _process(req: dict) -> dict:
     ci_embedding = req["ci"].get("embedding", {}).get("dense_vector", [])
     document_id  = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     if not ci_embedding:
         logger.warning("[Vector Retriever] no embedding on CI — returning empty")
@@ -120,11 +123,11 @@ def _process(req: dict) -> dict:
     import time as _time
     with _TPE(max_workers=3) as _pool:
         _ts_obj  = _time.perf_counter()
-        _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, k)
+        _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
         _ts_head = _time.perf_counter()
-        _f_head  = _pool.submit(_vector_search_objects_heading, ci_embedding, document_id, k)
+        _f_head  = _pool.submit(_vector_search_objects_heading, ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
         _ts_chunk = _time.perf_counter()
-        _f_chunk = _pool.submit(_vector_search_chunks,          ci_embedding, document_id, k)
+        _f_chunk = _pool.submit(_vector_search_chunks,          ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
         obj_hits   = _f_obj.result();   _te_obj   = _time.perf_counter()
         head_hits  = _f_head.result();  _te_head  = _time.perf_counter()
         chunk_hits = _f_chunk.result(); _te_chunk = _time.perf_counter()
@@ -164,12 +167,17 @@ def _process(req: dict) -> dict:
     }
 
 
-def _vector_search_objects(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
+def _vector_search_objects(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
     """
     Search semantic-objects index by body dense_vector.
     Returns hits with full matched_object metadata.
     """
     filter_clause   = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
+    
     must_not_clause = ([{"terms": {"type": VECTOR_EXCLUDE_TYPES}}]
                        if VECTOR_EXCLUDE_TYPES else [])
 
@@ -269,7 +277,7 @@ def _build_matched_object(s: dict) -> dict:
     }
 
 
-def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
+def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
     """
     Search semantic-objects index by heading_dense_vector.
 
@@ -281,6 +289,10 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     if not ci_embedding:
         return []
     filter_clause   = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
     must_not_clause = ([{"terms": {"type": VECTOR_EXCLUDE_TYPES}}]
                        if VECTOR_EXCLUDE_TYPES else [])
     body = {
@@ -331,9 +343,13 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     ]
 
 
-def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, k: int = TOP_K) -> list[dict]:
+def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
     """KNN search on document-chunks dense_vector (chunk-level fallback)."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
 
     body = {
         "size": k + TIE_BUFFER,

@@ -108,12 +108,15 @@ def _process(req: dict) -> dict:
     ci_text     = ci.get("knownCI", "")
     si          = ci.get("statistical_identity") or {}
     document_id = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     page_count = int(req.get("document_page_count", 0))
     k          = _adaptive_k(page_count, TOP_K)
 
     # Tier 1: structured filter query (near-zero false positives)
-    body = _build_structured_query(si, document_id)
+    body = _build_structured_query(si, document_id, tenant_id=tenant_id, project_id=project_id)
     if body is not None:
         body["size"] = k
         try:
@@ -150,7 +153,7 @@ def _process(req: dict) -> dict:
 # Tier 1 — Structured filter query
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_structured_query(si: dict, document_id: str | None) -> dict | None:
+def _build_structured_query(si: dict, document_id: str | None, tenant_id: str | None = None, project_id: str | None = None) -> dict | None:
     """
     Filter on statistical_identity.type + value fields.
 
@@ -164,6 +167,10 @@ def _build_structured_query(si: dict, document_id: str | None) -> dict | None:
     filter_clauses: list[dict] = []
     if document_id:
         filter_clauses.append({"term": {"document_id": document_id}})
+    if tenant_id:
+        filter_clauses.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clauses.append({"term": {"project_id": project_id}})
 
     # Type gate: eliminates every object of the wrong statistical kind.
     # "dose level 8" has no statistical_identity.type="sample_size" -> filtered out.

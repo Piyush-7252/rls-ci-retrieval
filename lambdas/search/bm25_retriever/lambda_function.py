@@ -103,6 +103,9 @@ def _process(req: dict) -> dict:
     norm_text   = req["ci"].get("normalization", {}).get("normalized_text", "")
     tokens      = req["ci"].get("normalization", {}).get("tokens", [])
     document_id = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     page_count  = int(req.get("document_page_count", 0))
     k           = _adaptive_k(page_count, TOP_K)
@@ -113,8 +116,8 @@ def _process(req: dict) -> dict:
     fetch_size = BM25_MAX_HITS if ratio > 0.0 else k + TIE_BUFFER
 
     # Search semantic-objects for precision; chunk index for recall
-    obj_hits   = _bm25_search_objects(norm_text, tokens, document_id, fetch_size)
-    chunk_hits = _bm25_search_chunks(norm_text, tokens, document_id, fetch_size)
+    obj_hits   = _bm25_search_objects(norm_text, tokens, document_id, tenant_id=tenant_id, project_id=project_id, fetch_size=fetch_size)
+    chunk_hits = _bm25_search_chunks(norm_text, tokens, document_id, tenant_id=tenant_id, project_id=project_id, fetch_size=fetch_size)
 
     # Object hits take priority; fill remaining slots with chunk hits not already covered
     seen_chunks: set[str] = set()
@@ -142,9 +145,13 @@ def _process(req: dict) -> dict:
     }
 
 
-def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | None, fetch_size: int = TOP_K) -> list[dict]:
+def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, fetch_size: int = TOP_K) -> list[dict]:
     """BM25 search against semantic-objects index."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {
@@ -207,9 +214,13 @@ def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | N
     return _parse_object_hits(resp)
 
 
-def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | None, fetch_size: int = TOP_K) -> list[dict]:
+def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, fetch_size: int = TOP_K) -> list[dict]:
     """BM25 fallback against document-chunks for broad recall."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
     query_text    = " ".join(tokens[:50]) if tokens else norm_text
 
     body = {

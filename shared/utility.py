@@ -13,7 +13,8 @@ def getTenantFromEvent(event: dict) -> dict:
     tenantId = tenant.get("id", "") if isinstance(tenant, dict) else ""
     tenantSchema = tenant.get("schema", "") if isinstance(tenant, dict) else ""
     return {
-        "name": tenantName,
-        "id": tenantId,
-        "schema": tenantSchema
+        "tenant_name": tenantName,
+        "tenant_id": tenantId,
+        "tenant_schema": tenantSchema,
+
     }

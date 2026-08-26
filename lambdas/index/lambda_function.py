@@ -187,10 +187,10 @@ def handler(event: dict, context: Any) -> dict:
 
 def _process_ci(ci: dict) -> dict:
     doc        = _build_ci_doc(ci)
-    ci_id_str  = str(ci["id"])
-    http_retries = _index_with_retry(OPENSEARCH_CI_INDEX, ci_id_str, doc, chunk_id=f"ci-{ci_id_str}")
+    ci_global_id = str(ci["global_id"])
+    http_retries = _index_with_retry(OPENSEARCH_CI_INDEX, ci_global_id, doc, chunk_id=f"ci-{ci_global_id}")
     if http_retries:
-        logger.warning("[Index] CI indexed after %d retries ci_id=%s", http_retries, ci_id_str)
+        logger.warning("[Index] CI indexed after %d retries ci_id=%s", http_retries, ci_global_id)
     return {"stored": True, "ci_id": ci["id"]}
 
 
@@ -226,6 +226,11 @@ def _build_ci_doc(ci: dict) -> dict:
         # build_enrichment_fields() is the SINGLE source of truth — both CI
         # and document objects get the exact same enrichment schema.
         **build_enrichment_fields(ci),
+        # ── Tenant / Project ────────────────────────────────────────────────
+        "tenant_id": ci["tenant_id"],
+        "tenant_name": ci["tenant_name"],
+        "tenant_schema": ci["tenant_schema"],
+        "project_id": ci["project_id"],
     }
 
 
@@ -370,8 +375,11 @@ def _build_chunk_doc(chunk: dict) -> dict:
         "prev_chunk_idx":       chunk.get("prev_chunk_idx"),
         "next_chunk_idx":       chunk.get("next_chunk_idx"),
         "geometry":              chunk.get("geometry") or {},
+        "tenant_id":              chunk.get("tenant_id"),
+        "tenant_name":            chunk.get("tenant_name"),
+        "tenant_schema":          chunk.get("tenant_schema"),
+        "project_id":             chunk.get("project_id"),
     }
-
 
 
 def _build_object_docs(chunk: dict) -> list[dict]:
@@ -385,6 +393,10 @@ def _build_object_docs(chunk: dict) -> list[dict]:
     objects     = chunk.get("extraction", {}).get("objects", [])
     document_id = chunk["document_id"]
     chunk_id    = chunk["chunk_id"]
+    tenant_id   = chunk.get("tenant_id")
+    tenant_name = chunk.get("tenant_name")
+    tenant_schema = chunk.get("tenant_schema")
+    project_id  = chunk.get("project_id")
     page_start  = chunk.get("page_start", 0)
     docs        = []
 
@@ -447,6 +459,10 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             "bbox":          [float(v) for v in obj.get("bbox", [])],
             "geometry": obj.get("geometry") or {},
             "display_spans": obj.get("display_spans", []),
+            "tenant_id":    tenant_id,
+            "tenant_name":  tenant_name,
+            "tenant_schema": tenant_schema,
+            "project_id":   project_id,
         })
 
     return docs
@@ -462,6 +478,10 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
     objects     = chunk.get("extraction", {}).get("objects", [])
     document_id = chunk["document_id"]
     chunk_id    = chunk["chunk_id"]
+    tenant_id   = chunk.get("tenant_id")
+    tenant_name = chunk.get("tenant_name")
+    tenant_schema = chunk.get("tenant_schema")
+    project_id  = chunk.get("project_id")
     docs = []
 
     for obj in objects:
@@ -537,6 +557,10 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "page": geometry.get("page", obj.get("page", 0)),
                 "bbox": [float(v) for v in (geometry.get("bbox") or [])],
                 "geometry": geometry,
+                "tenant_id": tenant_id,
+                "tenant_name": tenant_name,
+                "tenant_schema": tenant_schema,
+                "project_id": project_id,
             })
 
     return docs

@@ -52,6 +52,9 @@ def _process(req: dict) -> dict:
     patterns    = req["ci"].get("ontology", {}).get("regex_patterns", [])
     ci_text     = req["ci"].get("knownCI", "")
     document_id = req.get("document_id")
+    tenant = req.get("tenant")
+    project_id = req.get("project_id")
+    tenant_id = tenant.get("tenant_id")
 
     if not patterns:
         # Fallback: build patterns from raw CI text
@@ -68,7 +71,7 @@ def _process(req: dict) -> dict:
     if not compiled:
         return {"retriever": "regex", "hits": []}
 
-    hits = _regex_search(compiled, document_id)
+    hits = _regex_search(compiled, document_id, tenant_id=tenant_id, project_id=project_id)
 
     return {
         "retriever": "regex",
@@ -79,9 +82,15 @@ def _process(req: dict) -> dict:
 def _regex_search(
     patterns: list[re.Pattern],
     document_id: str | None,
+    tenant_id: str | None = None,
+    project_id: str | None = None
 ) -> list[dict]:
     """Fetch all chunks and apply Python regex to raw_text."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
+    if tenant_id:
+        filter_clause.append({"term": {"tenant_id": tenant_id}})
+    if project_id:
+        filter_clause.append({"term": {"project_id": project_id}})
 
     body = {
         "size": FETCH_SIZE,
