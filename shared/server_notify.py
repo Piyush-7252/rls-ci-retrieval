@@ -19,7 +19,7 @@ from shared.secret_manager import get_tenant_api_key
 logger = logging.getLogger(__name__)
 
 CALLBACK_URL = os.environ.get("CALLBACK_URL", "").rstrip("/")
-_CALLBACK_TIMEOUT = float(os.environ.get("CALLBACK_TIMEOUT_SECONDS", "10"))
+_CALLBACK_TIMEOUT = float(os.environ.get("CALLBACK_TIMEOUT_SECONDS", "30"))
 
 
 def notify_server(

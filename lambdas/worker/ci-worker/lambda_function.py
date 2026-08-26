@@ -290,26 +290,30 @@ def handler(event: dict, context: Any) -> dict:
                 continue
 
         ci = None
+        attempt_id = None
+        ci_id = "unknown"
+        action = "unknown"
+
         try:
-            ci = _decode_payload(record)
-            ci_id = ci.get("id", "unknown")
-            action = str(ci.get("action", "create")).lower()
-            attempt_id = ci.get("attemptId") or ci.get("attempt_id")
-
-            logger.info(
-                "[CIWorker] start ci_id=%s action=%s attempt_id=%s message_id=%s",
-                ci_id, action, attempt_id, message_id,
-            )
-
-            # Backend state: QUEUED -> PROCESSING.
-            # Callback failures are intentionally non-fatal.
-            notify_ci_status(
-                ci=ci,
-                status="PROCESSING",
-                attempt_id=attempt_id,
-            )
-
             try:
+                ci = _decode_payload(record)
+                ci_id = ci.get("id", "unknown")
+                action = str(ci.get("action", "create")).lower()
+                attempt_id = ci.get("attemptId") or ci.get("attempt_id")
+
+                logger.info(
+                    "[CIWorker] start ci_id=%s action=%s attempt_id=%s message_id=%s",
+                    ci_id, action, attempt_id, message_id,
+                )
+
+                # Backend state: QUEUED -> PROCESSING.
+                # Callback failures are intentionally non-fatal.
+                notify_ci_status(
+                    ci=ci,
+                    status="PROCESSING",
+                    attempt_id=attempt_id,
+                )
+
                 result = _run_ci(ci, context)
 
                 final_status = "DELETED" if action == "delete" else "INDEXED"
@@ -329,21 +333,32 @@ def handler(event: dict, context: Any) -> dict:
                 )
 
             except Exception as exc:
-                # Backend state: PROCESSING -> FAILED.
-                notify_ci_status(
-                    ci=ci,
-                    status="FAILED",
-                    attempt_id=attempt_id,
-                    error=str(exc),
-                )
+                # If the payload was decoded successfully, we have enough
+                # context to move the backend state to FAILED. For a malformed
+                # payload, notify_ci_status cannot safely route the callback,
+                # so only log the decode failure and let SQS retry/DLQ it.
+                if ci is not None:
+                    notify_ci_status(
+                        ci=ci,
+                        status="FAILED",
+                        attempt_id=attempt_id,
+                        error=str(exc),
+                    )
+                else:
+                    logger.error(
+                        "[CIWorker] unable to send FAILED callback because "
+                        "CI payload could not be decoded: message_id=%s error=%s",
+                        message_id,
+                        exc,
+                    )
                 raise
 
         except Exception as exc:
             logger.exception(
                 "[CIWorker] failed message_id=%s ci_id=%s action=%s error=%s",
                 message_id,
-                ci.get("id", "unknown") if ci else "unknown",
-                ci.get("action", "create") if ci else "unknown",
+                ci_id,
+                action,
                 exc,
             )
             if message_id:
