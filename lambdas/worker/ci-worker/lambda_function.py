@@ -102,7 +102,7 @@ def _decode_payload(record_or_event: dict) -> dict:
         raise ValueError("CI payload must be a JSON object")
 
     payload.setdefault("source_type", "ci")
-    payload.setdefault("global_id", get_global_ci_id(payload, tenant_id=payload.get("tenant_id"), project_id=payload.get("project_id")))
+    payload.setdefault("global_id", get_global_ci_id(payload, tenant_id=payload.get("tenant_id")))
     return payload
 
 

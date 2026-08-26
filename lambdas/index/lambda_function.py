@@ -230,7 +230,6 @@ def _build_ci_doc(ci: dict) -> dict:
         "tenant_id": ci["tenant_id"],
         "tenant_name": ci["tenant_name"],
         "tenant_schema": ci["tenant_schema"],
-        "project_id": ci["project_id"],
     }
 
 

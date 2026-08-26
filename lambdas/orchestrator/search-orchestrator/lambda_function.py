@@ -228,7 +228,7 @@ def _lookup_ci(raw_ci: dict, tenant: dict) -> dict | None:
     ci_id = raw_ci.get("id")
     if ci_id is None:
         return None
-    global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"), project_id=raw_ci.get("project_id"))
+    global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"))
     try:
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
         resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(global_ci_id), ignore=[404])
