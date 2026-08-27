@@ -14,22 +14,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def _debug_geometry(stage, chunk):
-    """Debug only canonical geometry; never inspect page-relative character offsets."""
-    for obj in chunk.get("extraction", {}).get("objects", []):
-        geometry = obj.get("geometry") or {}
-        logger.info(
-            "[GEOMETRY DEBUG] stage=%s chunk=%s object=%s type=%s "
-            "pages=%s source=%s precision=%s",
-            stage,
-            chunk.get("chunk_id"),
-            obj.get("object_id"),
-            obj.get("type"),
-            [p.get("page") for p in geometry.get("page_distribution", [])],
-            geometry.get("source"),
-            geometry.get("precision"),
-        )
-
 
 # In Lambda containers, code lives under /var/task. Use that root when present.
 _task_root_env = os.environ.get("LAMBDA_TASK_ROOT")
@@ -125,17 +109,10 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
         result = fn(*args, **kwargs)
         timings[label] = round(time.perf_counter() - t, 3)
         return result
-    _debug_geometry("BEFORE_NORMALIZE", chunk)
     chunk = _timed("normalize", normalize._process_document, chunk)
-    _debug_geometry("AFTER_NORMALIZE", chunk)
     chunk = _timed("ner",       ner._process_document,       chunk)
-    _debug_geometry("AFTER_NER", chunk)
     chunk = _timed("ontology",  ontology._process_document,  chunk)
-    _debug_geometry("AFTER_ONTOLOGY", chunk)
-
     chunk = _timed("embedding", embedding._process_document, chunk, lambda_ctx=context)
-    _debug_geometry("AFTER_EMBEDDING", chunk)
-    _debug_geometry("BEFORE_INDEX", chunk)
     _timed("index",     idx._process_document,       chunk)
 
     elapsed = round(time.perf_counter() - t_total, 3)
