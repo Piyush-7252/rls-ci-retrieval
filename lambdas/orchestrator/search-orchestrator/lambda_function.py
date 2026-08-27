@@ -569,7 +569,26 @@ def _process_payload(event: dict, context: Any = None) -> dict:
 
                     for final_hit in result.get("final_hits", []):
                         if isinstance(final_hit, dict):
+                            # Keep the complete UI CI on every final hit.
                             final_hit["ci"] = clean_ci
+
+                            # matched_object is useful to the UI (text, geometry,
+                            # object/page metadata), but it may contain the large
+                            # retrieval-time embedding vectors.  Strip only those
+                            # vector fields from matched_object; do not remove the
+                            # matched object itself.
+                            if "matched_object" in final_hit:
+                                final_hit["matched_object"] = _clean_response_object(
+                                    final_hit["matched_object"]
+                                )
+
+                            # Some worker paths use indexed_object instead of
+                            # matched_object. Apply the same terminal-response
+                            # cleanup there as well.
+                            if "indexed_object" in final_hit:
+                                final_hit["indexed_object"] = _clean_response_object(
+                                    final_hit["indexed_object"]
+                                )
 
                 flat_results.append(result)
 
