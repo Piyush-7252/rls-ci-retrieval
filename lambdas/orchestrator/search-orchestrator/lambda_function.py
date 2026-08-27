@@ -344,16 +344,39 @@ def _invoke_worker(batch_payload: dict) -> dict:
 
 # ── Result merge ───────────────────────────────────────────────────────────────
 
-def _clean_ci_vectors(ci: dict) -> dict:
-    """Remove embedding vectors and large unnecessary fields from CI for response."""
-    vectors_to_exclude = {
+def _clean_response_object(value):
+    """Recursively remove retrieval-only vector data from response objects.
+
+    The full CI/document metadata remains available to the UI, but embedding
+    vectors are never serialized into the terminal S3 response.  Vectors can
+    appear either at the top level or inside nested ``embedding`` objects, so
+    this must be recursive.
+    """
+    vector_keys = {
         "dense_vector",
-        "embedding",
         "sparse_vector",
         "vector",
         "dense_embedding",
+        "sparse_embedding",
     }
-    return {k: v for k, v in ci.items() if k not in vectors_to_exclude}
+
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            if key in vector_keys or key == "embedding":
+                continue
+            cleaned[key] = _clean_response_object(item)
+        return cleaned
+
+    if isinstance(value, list):
+        return [_clean_response_object(item) for item in value]
+
+    return value
+
+
+def _clean_ci_vectors(ci: dict) -> dict:
+    """Return the complete UI CI object without embedding/vector payloads."""
+    return _clean_response_object(ci)
 
 
 # ── Handler ────────────────────────────────────────────────────────────────────
@@ -534,7 +557,20 @@ def _process_payload(event: dict, context: Any = None) -> dict:
             for result in batch_results:
                 ci_id = result.get("ci_id") or result.get("id")
                 if ci_id and ci_id in raw_ci_map:
-                    result["raw_ci"] = _clean_ci_vectors(raw_ci_map[ci_id])
+                    # Keep the complete CI available to the UI, but strip
+                    # retrieval-only embeddings/vectors before S3 serialization.
+                    clean_ci = _clean_ci_vectors(raw_ci_map[ci_id])
+
+                    # The UI expects the CI directly on each final hit.
+                    # Also keep it at the per-CI result level so consumers
+                    # that render the CI independently do not need to recover
+                    # it from a hit.
+                    result["ci"] = clean_ci
+
+                    for final_hit in result.get("final_hits", []):
+                        if isinstance(final_hit, dict):
+                            final_hit["ci"] = clean_ci
+
                 flat_results.append(result)
 
             batch_completed = batch_resp.get("completed_cis", 0)
