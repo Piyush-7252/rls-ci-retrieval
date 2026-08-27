@@ -308,6 +308,16 @@ def _invoke_worker(batch_payload: dict) -> dict:
         raise RuntimeError("WORKER_LAMBDA_ARN env var is not set")
     # Extract function name from ARN (format: arn:aws:lambda:region:account:function:name)
     function_name = WORKER_LAMBDA_ARN.split(":")[-1]
+    batch_started_at = time.perf_counter()
+    batch_idx = batch_payload.get("batch_idx", "-")
+    cis = batch_payload.get("cis", [])
+    logger.info(
+        "[Orchestrator] worker batch START batch=%s cis=%d "
+        "search_id=%s",
+        batch_idx,
+        len(cis) if isinstance(cis, list) else 0,
+        batch_payload.get("search_id", "-"),
+    )
     resp = _get("lambda").invoke(
         FunctionName   = function_name,
         InvocationType = "RequestResponse",
@@ -317,6 +327,14 @@ def _invoke_worker(batch_payload: dict) -> dict:
     result   = json.loads(raw)
     # Lambda wraps unhandled errors in {"errorMessage": ..., "errorType": ...}
     if "errorMessage" in result:
+        logger.error(
+            "[Orchestrator] worker batch FAILED batch=%s elapsed=%.3fs "
+            "errorType=%s error=%s",
+            batch_idx,
+            time.perf_counter() - batch_started_at,
+            result.get("errorType"),
+            result.get("errorMessage"),
+        )
         raise RuntimeError(
             f"Worker batch_idx={batch_payload['batch_idx']} failed: "
             f"{result.get('errorType')}: {result.get('errorMessage')}"
@@ -753,20 +771,28 @@ def handler(event: dict, context: Any) -> dict:
     if not isinstance(records, list):
         raise ValueError("Lambda SQS Records must be a list")
 
-    logger.info("[Orchestrator] received SQS batch records=%d", len(records))
+    batch_received_at = time.perf_counter()
+    logger.info(
+        "[Orchestrator] SQS invocation START records=%d",
+        len(records),
+    )
 
     results = []
     failures = []
 
     for index, record in enumerate(records):
         message_id = record.get("messageId", f"record-{index}")
+        message_started_at = time.perf_counter()
 
         try:
             payload = _decode_sqs_record(record)
 
             logger.info(
-                "[Orchestrator] processing SQS message_id=%s "
-                "search_id=%s cimAnnotationJobId=%s document_id=%s",
+                "[Orchestrator] SQS message START "
+                "message=%d/%d message_id=%s search_id=%s "
+                "cimAnnotationJobId=%s document_id=%s",
+                index + 1,
+                len(records),
                 message_id,
                 payload.get("search_id", "-"),
                 payload.get("cimAnnotationJobId", "-"),
@@ -775,6 +801,23 @@ def handler(event: dict, context: Any) -> dict:
 
             result = _process_payload(payload, context)
 
+            message_elapsed = time.perf_counter() - message_started_at
+            logger.info(
+                "[Orchestrator] SQS message COMPLETE "
+                "message=%d/%d message_id=%s status=%s "
+                "expected_cis=%s completed_cis=%s failed_cis=%s "
+                "batches=%s elapsed=%.3fs",
+                index + 1,
+                len(records),
+                message_id,
+                result.get("status"),
+                result.get("expected_cis"),
+                result.get("completed_cis"),
+                result.get("failed_cis"),
+                result.get("n_batches"),
+                message_elapsed,
+            )
+
             results.append({
                 "message_id": message_id,
                 "success": True,
@@ -782,9 +825,14 @@ def handler(event: dict, context: Any) -> dict:
             })
 
         except Exception as exc:
+            message_elapsed = time.perf_counter() - message_started_at
             logger.exception(
-                "[Orchestrator] SQS message failed message_id=%s error=%s",
+                "[Orchestrator] SQS message FAILED "
+                "message=%d/%d message_id=%s elapsed=%.3fs error=%s",
+                index + 1,
+                len(records),
                 message_id,
+                message_elapsed,
                 exc,
             )
 
@@ -797,6 +845,17 @@ def handler(event: dict, context: Any) -> dict:
                 "success": False,
                 "error": str(exc),
             })
+
+    invocation_elapsed = time.perf_counter() - batch_received_at
+
+    logger.info(
+        "[Orchestrator] SQS invocation COMPLETE "
+        "records=%d succeeded=%d failed=%d elapsed=%.3fs",
+        len(records),
+        len(results) - len(failures),
+        len(failures),
+        invocation_elapsed,
+    )
 
     # This is intentionally returned in the AWS partial-batch format.
     # It only has an effect when the event source mapping has
