@@ -107,8 +107,65 @@ def _decode_payload(record_or_event: dict) -> dict:
     return payload
 
 
+def _ci_index_exists(ci: dict) -> bool:
+    """
+    Check whether the CI already exists in the ci-objects index.
+
+    Returns False when the document does not exist. Any real OpenSearch
+    error is raised so it cannot be mistaken for a missing CI.
+    """
+    idx = _load("index", "idx")
+
+    global_id = ci.get("global_id") or get_global_ci_id(
+        ci, tenant_id=ci.get("tenant_id")
+    )
+    ci["global_id"] = global_id
+
+    get_os = getattr(idx, "_get_os", None)
+    if get_os is None:
+        raise RuntimeError(
+            "CI index module must expose _get_os() for CI existence checks"
+        )
+
+    index_name = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
+
+    try:
+        exists = bool(
+            get_os().exists(
+                index=index_name,
+                id=global_id,
+            )
+        )
+        logger.info(
+            "[CIWorker] os-exists index=%s _id=%s ci_id=%s exists=%s",
+            index_name,
+            global_id,
+            ci.get("id"),
+            exists,
+        )
+        return exists
+    except Exception as exc:
+        if getattr(exc, "status_code", None) == 404:
+            logger.info(
+                "[CIWorker] os-exists index=%s _id=%s ci_id=%s exists=False",
+                index_name,
+                global_id,
+                ci.get("id"),
+            )
+            return False
+
+        logger.error(
+            "[CIWorker] os-exists ERROR index=%s _id=%s ci_id=%s error=%s",
+            index_name,
+            global_id,
+            ci.get("id"),
+            exc,
+        )
+        raise
+
+
 def _delete_existing_ci(ci: dict) -> None:
-    """Delete the tenant-scoped CI document before update/delete."""
+    """Delete an existing tenant-scoped CI document. Missing CI is normal."""
     idx = _load("index", "idx")
 
     global_id = ci.get("global_id") or get_global_ci_id(
@@ -123,24 +180,46 @@ def _delete_existing_ci(ci: dict) -> None:
         )
 
     index_name = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
+
     logger.info(
         "[CIWorker] delete-existing index=%s _id=%s ci_id=%s action=%s",
-        index_name, global_id, ci.get("id"), ci.get("action"),
+        index_name,
+        global_id,
+        ci.get("id"),
+        ci.get("action"),
     )
 
     try:
-        get_os().delete(index=index_name, id=global_id, ignore=[404])
-    except TypeError:
-        try:
-            get_os().delete(index=index_name, id=global_id)
-        except Exception as exc:
-            if getattr(exc, "status_code", None) != 404:
-                raise
+        response = get_os().delete(
+            index=index_name,
+            id=global_id,
+        )
+        logger.info(
+            "[CIWorker] delete-existing result=%s index=%s _id=%s ci_id=%s",
+            response.get("result", "deleted") if isinstance(response, dict) else "deleted",
+            index_name,
+            global_id,
+            ci.get("id"),
+        )
+    except Exception as exc:
+        if getattr(exc, "status_code", None) == 404:
+            logger.info(
+                "[CIWorker] delete-existing result=NOT_FOUND index=%s _id=%s ci_id=%s",
+                index_name,
+                global_id,
+                ci.get("id"),
+            )
+            return
 
-    logger.info(
-        "[CIWorker] delete-existing complete index=%s _id=%s ci_id=%s",
-        index_name, global_id, ci.get("id"),
-    )
+        logger.error(
+            "[CIWorker] delete-existing result=ERROR index=%s _id=%s "
+            "ci_id=%s error=%s",
+            index_name,
+            global_id,
+            ci.get("id"),
+            exc,
+        )
+        raise
 
 
 def _run_enrichment_and_index(ci: dict, context: Any = None) -> dict:
@@ -223,9 +302,11 @@ def _run_ci(ci: dict, context: Any = None) -> dict:
             "timings": {"delete": elapsed},
         }
 
-    if action == "update":
-        # Replacement semantics: remove the old indexed representation first.
-        _delete_existing_ci(ci)
+    if action in {"create", "update"}:
+        # Both create and update are safe to retry. Only delete first when an
+        # existing indexed CI is actually present.
+        if _ci_index_exists(ci):
+            _delete_existing_ci(ci)
 
     # create and update both enrich and write a fresh CI document.
     return _run_enrichment_and_index(ci, context)
