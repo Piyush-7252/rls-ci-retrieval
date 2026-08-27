@@ -9,7 +9,8 @@ Input
 -----
 {
     "search_id":        str (optional, generated if absent),
-    "cis":              list[dict],   # raw CIs (looked up from ci-objects index)
+    "cimAnnotationJobId": int | str,
+    "cis":              list[dict],   # optional legacy/manual input; ignored when cimAnnotationJobId is present
     "document_id":      str,
     "tenant":           dict,
     "project_id":        str,
@@ -17,6 +18,9 @@ Input
     "batch_size":       int  (default: 50),
     "skip_rerank":      bool (default: false),
     "skip_verify":      bool (default: false),
+    "bucketName":        str (optional, S3 bucket for full result JSON of backend service),
+    "s3ResultPath":     str (optional, if provided, full result JSON is written to S3),
+    "pageCount":        int (optional, for future use, not currently used)
 }
 
 Output
@@ -47,9 +51,6 @@ Env vars
   CI_LOOKUP_WORKERS       — Concurrent threads for CI enrichment (default: 10)
   MAX_WORKERS             — Concurrent Worker Lambda invocations (default: 3, prevents OpenSearch 429s)
   DOCUMENT_ASSETS_PATH    — Local path to document_assets.json (optional)
-  RESULTS_BUCKET          — S3 bucket for full result JSON (required)
-                             e.g., rls-file-bucket-eu
-  RESULTS_PREFIX          — S3 key prefix (default: rls-ci-retrieval-search-results)
   
   Connection pool: OPENSEARCH_MAXSIZE (default 128) provides safety margin for concurrent
   CI lookups (up to CI_LOOKUP_WORKERS × 2 threads per invocation)
@@ -69,6 +70,10 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from shared.server_notify import (
+    get_cim_annotation_job_cis,
+    notify_cim_annotation_job_status,
+)
 from shared.id_resolver import get_global_ci_id
 from shared.utility import getTenantFromEvent
 
@@ -144,8 +149,7 @@ DOCUMENT_ASSETS_PATH = os.environ.get(
     "DOCUMENT_ASSETS_PATH",
     str(ROOT / "localfiles" / "assets" / "document_assets.json"),
 )
-RESULTS_BUCKET  = os.environ.get("RESULTS_BUCKET", "")
-RESULTS_PREFIX  = os.environ.get("RESULTS_PREFIX", "search-results")
+
 # Max CIs processed in parallel within a single worker Lambda.
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "3"))
 CI_LOOKUP_WORKERS = int(os.environ.get("CI_LOOKUP_WORKERS", "10"))
@@ -224,44 +228,59 @@ def _load_document_context(document_id: str) -> dict:
 # ── CI enrichment lookup ───────────────────────────────────────────────────────
 
 def _lookup_ci(raw_ci: dict, tenant: dict) -> dict | None:
-    """Fetch the enriched CI from the ci-objects OpenSearch index."""
-    ci_id = raw_ci.get("id")
+    """Fetch the tenant-scoped enriched CI from the ci-objects index."""
+    ci_id = raw_ci.get("id") or raw_ci.get("ci_id")
     if ci_id is None:
         return None
-    global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"))
+
+    # CI OpenSearch IDs are tenant-scoped: {tenant_id}__ci_{ci_id}.
+    # The backend response already carries tenant_id, but fall back to the
+    # request tenant when necessary.  CI is not project-scoped.
+    global_ci_id =     global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"))
+
     try:
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
-        resp = _get_os().get(index=OPENSEARCH_CI_INDEX, id=str(global_ci_id), ignore=[404])
+        resp = _get_os().get(
+            index=OPENSEARCH_CI_INDEX,
+            id=str(global_ci_id),
+            ignore=[404],
+        )
         if not resp.get("found"):
-            logger.warning("[Orchestrator] CI %s not found in ci-objects", ci_id)
+            logger.warning(
+                "[Orchestrator] CI %s not found in ci-objects _id=%s",
+                ci_id, global_ci_id,
+            )
             return None
+
         doc = resp["_source"]
-        enrichment_fields = {k: doc.get(k, default)
-                             for k, default in ENRICHMENT_DEFAULTS.items()}
+        enrichment_fields = {
+            k: doc.get(k, default)
+            for k, default in ENRICHMENT_DEFAULTS.items()
+        }
         return {
             **raw_ci,
             **enrichment_fields,
-            "entities":  doc.get("entities", []),
-            "knownCI":   doc.get("known_ci", raw_ci.get("knownCI", "")),
+            "entities": doc.get("entities", []),
+            "knownCI": doc.get("known_ci", raw_ci.get("knownCI", "")),
             "normalization": {
-                "normalized_text":     doc.get("normalized_text", ""),
-                "tokens":              doc.get("tokens", []),
+                "normalized_text": doc.get("normalized_text", ""),
+                "tokens": doc.get("tokens", []),
                 "abbreviations_found": {},
             },
             "ner": {
                 "entities": doc.get("entities", []),
-                "model":    doc.get("ner_model", "gliner"),
+                "model": doc.get("ner_model", "gliner"),
             },
             "ontology": {
-                "expansions":     doc.get("ontology_expansions", []),
-                "synonyms":       doc.get("ontology_synonyms", {}),
+                "expansions": doc.get("ontology_expansions", []),
+                "synonyms": doc.get("ontology_synonyms", {}),
                 "regex_patterns": doc.get("regex_patterns", []),
             },
             "embedding": {
-                "dense_vector":  doc.get("dense_vector", []),
+                "dense_vector": doc.get("dense_vector", []),
                 "sparse_vector": doc.get("sparse_vector", {}),
-                "model":         doc.get("embedding_model", EMBEDDING_MODEL),
-                "dimensions":    len(doc.get("dense_vector", [])),
+                "model": doc.get("embedding_model", EMBEDDING_MODEL),
+                "dimensions": len(doc.get("dense_vector", [])),
             },
         }
     except Exception as exc:
@@ -269,7 +288,9 @@ def _lookup_ci(raw_ci: dict, tenant: dict) -> dict | None:
         return None
 
 
-def _load_cis_parallel(raw_cis: list[dict],tenant:dict, n_workers: int) -> list[dict]:
+def _load_cis_parallel(
+    raw_cis: list[dict], tenant: dict, n_workers: int
+) -> list[dict]:
     """Bulk-fetch enriched CIs from ci-objects in parallel."""
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
         results = list(pool.map(lambda ci: _lookup_ci(ci, tenant), raw_cis))
@@ -319,210 +340,363 @@ def _clean_ci_vectors(ci: dict) -> dict:
 # ── Handler ────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
-    search_id   = event.get("search_id") or str(uuid.uuid4())
-    raw_cis     = event.get("cis", [])
-    document_id = event.get("document_id", "")
-    tenant     = getTenantFromEvent(event)
-    project_id = event.get("project_id", "")
-    batch_size  = int(event.get("batch_size",  _DEFAULT_BATCH_SIZE))
+    search_id = event.get("search_id") or str(uuid.uuid4())
+    document_id = str(event.get("document_id", ""))
+    tenant = getTenantFromEvent(event)
+    project_id = str(event.get("project_id", ""))
+    cim_job_id = event.get("cimAnnotationJobId")
+    bucket_name = event.get("bucketName")
+    s3_result_path = event.get("s3ResultPath")
+    batch_size = int(event.get("batch_size", _DEFAULT_BATCH_SIZE))
     skip_rerank = bool(event.get("skip_rerank", False))
-    skip_verify = bool(event.get("skip_verify",  False))
+    skip_verify = bool(event.get("skip_verify", False))
 
-    # ── Set logging context via ContextVar (applies to all logs automatically) ──────────────────
     _ctx_tenant.set(tenant["tenant_name"])
     _ctx_document_id.set(document_id)
     _ctx_search_id.set(search_id)
 
-    logger.info("[Orchestrator] start cis=%d batch_size=%d", len(raw_cis), batch_size)
-
-    # ── Document context ────────────────────────────────────────────────────
-    doc_context = event.get("document_context") or _load_document_context(document_id)
-
-    # ── Load enriched CIs ───────────────────────────────────────────────────
-    t0         = time.perf_counter()
-    # Create mapping of raw CIs by ID for later retrieval
-    raw_ci_map = {ci.get("id"): ci for ci in raw_cis}
-    n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
-    enriched   = _load_cis_parallel(raw_cis,tenant, n_lookup_workers)
-    if not enriched:
-        logger.warning("[Orchestrator] no enriched CIs found — returning empty result")
-        return {
-            "search_id": search_id, "document_id": document_id,
-            "n_cis": 0, "n_batches": 0, "results": [],
-            "stage_wall": {}, "wall_time": round(time.perf_counter() - t0, 3),
-        }
-
-    # ── Split into batches ──────────────────────────────────────────────────
-    batches = [enriched[i:i + batch_size] for i in range(0, len(enriched), batch_size)]
-    n_batches = len(batches)
-    logger.info("[Orchestrator] %d CIs → %d batches of ≤%d", len(enriched), n_batches, batch_size)
-
-    # ── Fan-out: invoke all workers concurrently ────────────────────────────
-    payloads = [
-        {
-            "search_id":        search_id,
-            "batch_idx":        idx,
-            "cis":              batch,
-            "document_id":      document_id,
-            "tenant":           tenant,  # Pass tenant for worker logging context
-            "project_id":       project_id,  # Pass project_id for worker context
-            "document_context": doc_context,
-            "skip_rerank":      skip_rerank,
-            "skip_verify":      skip_verify,
-        }
-        for idx, batch in enumerate(batches)
-    ]
-
-    # ── Concurrency: default to conservative 3 batches max (prevent OpenSearch 429s)
-    n_invoke_workers = int(min(MAX_WORKERS, n_batches))
-    logger.info("[Orchestrator] parallelism: %d batches max", n_invoke_workers)
-
-    all_results:  list[dict]             = [{}] * n_batches
-    batch_times:  dict[int, float]       = {}     # Track execution time per batch
-    failed_batches: set[int]             = set()  # Track which batches failed
-    errors:       list[dict]             = []     # Track batch_idx + error
-
-    with ThreadPoolExecutor(max_workers=n_invoke_workers) as pool:
-        futures = {pool.submit(_invoke_worker, p): p["batch_idx"] for p in payloads}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                batch_response = future.result()
-                all_results[idx] = batch_response
-                # Store batch execution time
-                batch_times[idx] = batch_response.get("wall_time", 0.0)
-                logger.info("[Orchestrator] batch %d/%d done (%.1fs)",
-                         idx + 1, n_batches,
-                         batch_response.get("wall_time", 0.0))
-            except Exception as exc:
-                logger.error("[Orchestrator] batch %d failed: %s", idx, exc)
-                failed_batches.add(idx)
-                batch_times[idx] = 0.0  # Mark failed batch with 0 time
-                errors.append({
-                    "batch_idx": idx,
-                    "error": str(exc),
-                })
-
-    # Flatten per-CI results in original order, enriching with raw CI data
-    flat_results: list[dict] = []
-    total_worker_completed = 0
-    total_worker_failed = 0
-    batch_summary: list[dict] = []
-    
-    for batch_idx, batch_resp in enumerate(all_results):
-        batch_results = batch_resp.get("results", [])
-        
-        # Attach raw CI data from the original raw_cis (not enriched), cleaned of vectors
-        for result in batch_results:
-            ci_id = result.get("ci_id") or result.get("id")
-            if ci_id and ci_id in raw_ci_map:
-                result["raw_ci"] = _clean_ci_vectors(raw_ci_map[ci_id])
-            flat_results.append(result)
-        
-        batch_completed = batch_resp.get("completed_cis", 0)
-        batch_failed = batch_resp.get("failed_cis", 0)
-        total_worker_completed += batch_completed
-        total_worker_failed += batch_failed
-        
-        # For expected_cis: use actual count from original batches
-        expected_batch_cis = len(batches[batch_idx]) if batch_idx < len(batches) else 0
-        
-        # Build per-batch summary with execution time
-        batch_status = "FAILED" if batch_idx in failed_batches else (
-            "PARTIAL" if batch_failed > 0 else "COMPLETED"
+    # CIM annotation job lifecycle:
+    #   start -> ON_GOING
+    #   successful completion -> COMPLETED
+    #   any orchestrator failure -> FAILED
+    #
+    # These callbacks are deliberately non-fatal. Search processing must not
+    # fail merely because the backend notification endpoint is temporarily down.
+    if cim_job_id is not None:
+        notify_cim_annotation_job_status(
+            job_id=cim_job_id,
+            tenant=tenant,
+            status="ON_GOING",
         )
-        batch_summary.append({
-            "batch_idx": batch_idx,
-            "status": batch_status,
-            "expected_cis": expected_batch_cis,
-            "completed_cis": batch_completed,
-            "failed_cis": batch_failed,
-            "execution_time_ms": round(batch_times.get(batch_idx, 0.0) * 1000, 1),
-            "ci_failures": batch_resp.get("ci_failures", []),  # Detailed CI failures from Worker
-        })
 
-    wall_time = round(time.perf_counter() - t0, 3)
-
-    total_hits = sum(len(r.get("final_hits", [])) for r in flat_results)
-    
-    # ── Determine completion status ─────────────────────────────────────────────
-    # Track both orchestrator-level (batch failures) and worker-level (CI failures)
-    total_cis_at_orchestrator = len(enriched)
-    
-    # Status logic:
-    # - FAILED: all batches failed (complete failure)
-    # - PARTIAL: some batches failed OR some CIs failed within batches
-    # - COMPLETED: all batches returned and all CIs completed
-    if failed_batches and len(failed_batches) == n_batches:
-        status = "FAILED"  # Complete failure
-    elif failed_batches or total_worker_failed > 0:
-        status = "PARTIAL"  # Some batches or CIs failed
-    else:
-        status = "COMPLETED"  # Everything succeeded
-    
-    logger.info(
-        "[Orchestrator] done wall=%.1fs status=%s "
-        "cis_expected=%d cis_completed=%d cis_failed_in_worker=%d failed_batches=%d",
-        wall_time, status,
-        total_cis_at_orchestrator, total_worker_completed, total_worker_failed, len(failed_batches),
-    )
-
-    # Build failed_batches list with execution times
-    failed_batches_with_times = []
-    for batch_idx in sorted(failed_batches):
-        failed_batches_with_times.append({
-            "batch_idx": batch_idx,
-            "execution_time_ms": round(batch_times.get(batch_idx, 0.0) * 1000, 1),
-            "error": next((e.get("error") for e in errors if e.get("batch_idx") == batch_idx), None),
-        })
-    
-    response = {
-        "search_id":       search_id,
-        "document_id":     document_id,
-        "status":          status,
-        "expected_cis":    total_cis_at_orchestrator,
-        "completed_cis":   total_worker_completed,
-        "failed_cis":      total_worker_failed,
-        "n_cis":           total_cis_at_orchestrator,
-        "n_batches":       n_batches,
-        "failed_batches":  failed_batches_with_times if failed_batches else [],
-        "batch_summary":   batch_summary,
-        "results":         flat_results,
-        "wall_time":       wall_time,
-    }
-    if errors:
-        response["errors"] = errors
-
-    # ── Write full results to S3 (payload is too large for Lambda response) ──
-    if RESULTS_BUCKET:
-        s3_key = f"{RESULTS_PREFIX}/{tenant['name']}/{search_id}/{document_id}.json"
-
-        body    = json.dumps(response, default=str).encode()
-        _get("s3").put_object(
-            Bucket      = RESULTS_BUCKET,
-            Key         = s3_key,
-            Body        = body,
-            ContentType = "application/json",
+    try:
+        logger.info(
+            "[Orchestrator] start cis_source=%s batch_size=%d",
+            "cim_annotation_job" if cim_job_id is not None else "event",
+            batch_size,
         )
-        logger.info("[Orchestrator] results written s3://%s/%s (%d bytes)",
-                 RESULTS_BUCKET, s3_key, len(body))
-        # Return lightweight summary + pointer
-        summary = {
-            "search_id":      search_id,
-            "document_id":    document_id,
-            "status":         status,
-            "expected_cis":   total_cis_at_orchestrator,
-            "completed_cis":  total_worker_completed,
-            "failed_cis":     total_worker_failed,
-            "total_hits":     total_hits,
-            "wall_time":      wall_time,
-            "batch_summary":  batch_summary,
-            "failed_batches": failed_batches_with_times if failed_batches else [],
-            "s3_bucket":      RESULTS_BUCKET,
-            "s3_key":         s3_key,
+
+        if cim_job_id is not None:
+            # Backend is the source of truth for the CI set belonging to this
+            # CIM annotation job. The potentially large CI list never travels
+            # through the SQS message.
+            raw_cis = get_cim_annotation_job_cis(
+                cim_job_id,
+                tenant=tenant,
+            )
+        else:
+            raw_cis = event.get("cis", [])
+
+        logger.info(
+            "[Orchestrator] loaded CIs count=%d job_id=%s",
+            len(raw_cis),
+            cim_job_id,
+        )
+
+        t0 = time.perf_counter()
+
+        doc_context = event.get("document_context") or _load_document_context(document_id)
+
+        raw_ci_map = {ci.get("id"): ci for ci in raw_cis}
+        n_lookup_workers = min(CI_LOOKUP_WORKERS, len(raw_cis)) if raw_cis else 1
+        enriched = _load_cis_parallel(
+            raw_cis,
+            tenant,
+            n_lookup_workers,
+        )
+
+        if not enriched:
+            logger.warning(
+                "[Orchestrator] no enriched CIs found — returning empty result"
+            )
+
+            response = {
+                "search_id": search_id,
+                "document_id": document_id,
+                "status": "COMPLETED",
+                "expected_cis": 0,
+                "completed_cis": 0,
+                "failed_cis": 0,
+                "n_cis": 0,
+                "n_batches": 0,
+                "results": [],
+                "stage_wall": {},
+                "wall_time": round(time.perf_counter() - t0, 3),
+            }
+
+            if cim_job_id is not None:
+                notify_cim_annotation_job_status(
+                    job_id=cim_job_id,
+                    tenant=tenant,
+                    status="COMPLETED",
+                )
+
+            return response
+
+        batches = [
+            enriched[i:i + batch_size]
+            for i in range(0, len(enriched), batch_size)
+        ]
+        n_batches = len(batches)
+
+        logger.info(
+            "[Orchestrator] %d CIs → %d batches of ≤%d",
+            len(enriched),
+            n_batches,
+            batch_size,
+        )
+
+        payloads = [
+            {
+                "search_id": search_id,
+                "batch_idx": idx,
+                "cis": batch,
+                "document_id": document_id,
+                "tenant": tenant,
+                "project_id": project_id,
+                "document_context": doc_context,
+                "skip_rerank": skip_rerank,
+                "skip_verify": skip_verify,
+            }
+            for idx, batch in enumerate(batches)
+        ]
+
+        n_invoke_workers = int(min(MAX_WORKERS, n_batches))
+        logger.info(
+            "[Orchestrator] parallelism: %d batches max",
+            n_invoke_workers,
+        )
+
+        all_results: list[dict] = [{}] * n_batches
+        batch_times: dict[int, float] = {}
+        failed_batches: set[int] = set()
+        errors: list[dict] = []
+
+        with ThreadPoolExecutor(max_workers=n_invoke_workers) as pool:
+            futures = {
+                pool.submit(_invoke_worker, payload): payload["batch_idx"]
+                for payload in payloads
+            }
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    batch_response = future.result()
+                    all_results[idx] = batch_response
+                    batch_times[idx] = batch_response.get("wall_time", 0.0)
+
+                    logger.info(
+                        "[Orchestrator] batch %d/%d done (%.1fs)",
+                        idx + 1,
+                        n_batches,
+                        batch_response.get("wall_time", 0.0),
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[Orchestrator] batch %d failed: %s",
+                        idx,
+                        exc,
+                    )
+                    failed_batches.add(idx)
+                    batch_times[idx] = 0.0
+                    errors.append({
+                        "batch_idx": idx,
+                        "error": str(exc),
+                    })
+
+        flat_results: list[dict] = []
+        total_worker_completed = 0
+        total_worker_failed = 0
+        batch_summary: list[dict] = []
+
+        for batch_idx, batch_resp in enumerate(all_results):
+            batch_results = batch_resp.get("results", [])
+
+            for result in batch_results:
+                ci_id = result.get("ci_id") or result.get("id")
+                if ci_id and ci_id in raw_ci_map:
+                    result["raw_ci"] = _clean_ci_vectors(raw_ci_map[ci_id])
+                flat_results.append(result)
+
+            batch_completed = batch_resp.get("completed_cis", 0)
+            batch_failed = batch_resp.get("failed_cis", 0)
+            total_worker_completed += batch_completed
+            total_worker_failed += batch_failed
+
+            expected_batch_cis = (
+                len(batches[batch_idx])
+                if batch_idx < len(batches)
+                else 0
+            )
+
+            batch_status = (
+                "FAILED"
+                if batch_idx in failed_batches
+                else (
+                    "PARTIAL"
+                    if batch_failed > 0
+                    else "COMPLETED"
+                )
+            )
+
+            batch_summary.append({
+                "batch_idx": batch_idx,
+                "status": batch_status,
+                "expected_cis": expected_batch_cis,
+                "completed_cis": batch_completed,
+                "failed_cis": batch_failed,
+                "execution_time_ms": round(
+                    batch_times.get(batch_idx, 0.0) * 1000,
+                    1,
+                ),
+                "ci_failures": batch_resp.get("ci_failures", []),
+            })
+
+        wall_time = round(time.perf_counter() - t0, 3)
+        total_hits = sum(
+            len(result.get("final_hits", []))
+            for result in flat_results
+        )
+
+        total_cis_at_orchestrator = len(enriched)
+
+        if failed_batches and len(failed_batches) == n_batches:
+            status = "FAILED"
+        elif failed_batches or total_worker_failed > 0:
+            status = "PARTIAL"
+        else:
+            status = "COMPLETED"
+
+        logger.info(
+            "[Orchestrator] done wall=%.1fs status=%s "
+            "cis_expected=%d cis_completed=%d cis_failed_in_worker=%d "
+            "failed_batches=%d",
+            wall_time,
+            status,
+            total_cis_at_orchestrator,
+            total_worker_completed,
+            total_worker_failed,
+            len(failed_batches),
+        )
+
+        failed_batches_with_times = []
+
+        for batch_idx in sorted(failed_batches):
+            failed_batches_with_times.append({
+                "batch_idx": batch_idx,
+                "execution_time_ms": round(
+                    batch_times.get(batch_idx, 0.0) * 1000,
+                    1,
+                ),
+                "error": next(
+                    (
+                        error.get("error")
+                        for error in errors
+                        if error.get("batch_idx") == batch_idx
+                    ),
+                    None,
+                ),
+            })
+
+        response = {
+            "search_id": search_id,
+            "document_id": document_id,
+            "status": status,
+            "expected_cis": total_cis_at_orchestrator,
+            "completed_cis": total_worker_completed,
+            "failed_cis": total_worker_failed,
+            "n_cis": total_cis_at_orchestrator,
+            "n_batches": n_batches,
+            "failed_batches": (
+                failed_batches_with_times
+                if failed_batches
+                else []
+            ),
+            "batch_summary": batch_summary,
+            "results": flat_results,
+            "wall_time": wall_time,
         }
+
         if errors:
-            summary["errors"] = errors
-        return summary
+            response["errors"] = errors
 
-    return response
+        if bucket_name and s3_result_path:
+            s3_key = s3_result_path
+
+            body = json.dumps(
+                response,
+                default=str,
+            ).encode()
+
+            _get("s3").put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=body,
+                ContentType="application/json",
+            )
+
+            logger.info(
+                "[Orchestrator] results written s3://%s/%s (%d bytes)",
+                bucket_name,
+                s3_key,
+                len(body),
+            )
+
+            summary = {
+                "search_id": search_id,
+                "document_id": document_id,
+                "status": status,
+                "expected_cis": total_cis_at_orchestrator,
+                "completed_cis": total_worker_completed,
+                "failed_cis": total_worker_failed,
+                "total_hits": total_hits,
+                "wall_time": wall_time,
+                "batch_summary": batch_summary,
+                "failed_batches": (
+                    failed_batches_with_times
+                    if failed_batches
+                    else []
+                ),
+                "s3_bucket": bucket_name,
+                "s3_key": s3_key,
+            }
+
+            if errors:
+                summary["errors"] = errors
+
+            if cim_job_id is not None:
+                notify_cim_annotation_job_status(
+                    job_id=cim_job_id,
+                    tenant=tenant,
+                    status="COMPLETED" if status == "COMPLETED" else "FAILED",
+                )
+
+            return summary
+
+        if cim_job_id is not None:
+            notify_cim_annotation_job_status(
+                job_id=cim_job_id,
+                tenant=tenant,
+                status="COMPLETED" if status == "COMPLETED" else "FAILED",
+            )
+
+        return response
+
+    except Exception as exc:
+        logger.exception(
+            "[Orchestrator] failed search_id=%s document_id=%s "
+            "cimAnnotationJobId=%s error=%s",
+            search_id,
+            document_id,
+            cim_job_id,
+            exc,
+        )
+
+        if cim_job_id is not None:
+            notify_cim_annotation_job_status(
+                job_id=cim_job_id,
+                tenant=tenant,
+                status="FAILED",
+            )
+
+        raise
