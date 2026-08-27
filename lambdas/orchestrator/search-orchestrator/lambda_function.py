@@ -236,7 +236,8 @@ def _lookup_ci(raw_ci: dict, tenant: dict) -> dict | None:
     # CI OpenSearch IDs are tenant-scoped: {tenant_id}__ci_{ci_id}.
     # The backend response already carries tenant_id, but fall back to the
     # request tenant when necessary.  CI is not project-scoped.
-    global_ci_id =     global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant.get("tenant_id"))
+    tenant_id = raw_ci.get("tenant_id") or tenant.get("tenant_id") or tenant.get("id")
+    global_ci_id = get_global_ci_id(raw_ci, tenant_id=tenant_id)
 
     try:
         from shared.opensearch_enrichment import ENRICHMENT_DEFAULTS
@@ -339,7 +340,7 @@ def _clean_ci_vectors(ci: dict) -> dict:
 
 # ── Handler ────────────────────────────────────────────────────────────────────
 
-def handler(event: dict, context: Any) -> dict:
+def _process_payload(event: dict, context: Any = None) -> dict:
     search_id = event.get("search_id") or str(uuid.uuid4())
     document_id = str(event.get("document_id", ""))
     tenant = getTenantFromEvent(event)
@@ -700,3 +701,107 @@ def handler(event: dict, context: Any) -> dict:
             )
 
         raise
+
+
+# ── AWS SQS entry point ────────────────────────────────────────────────────────
+
+def _decode_sqs_record(record: dict) -> dict:
+    """Decode one SQS record into the application payload."""
+    if not isinstance(record, dict):
+        raise ValueError("SQS record must be a JSON object")
+
+    body = record.get("body")
+    if body is None:
+        raise ValueError("SQS record is missing body")
+
+    if isinstance(body, str):
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"SQS message body is not valid JSON: {exc}") from exc
+    elif isinstance(body, dict):
+        payload = body
+    else:
+        raise ValueError("SQS message body must be a JSON object or JSON string")
+
+    if not isinstance(payload, dict):
+        raise ValueError("CI/Search payload must be a JSON object")
+
+    return payload
+
+
+def handler(event: dict, context: Any) -> dict:
+    """
+    Lambda entry point.
+
+    Supports:
+      1. AWS SQS event: {"Records": [{"body": "..."}]}
+      2. Direct application payload for local/manual invocation.
+
+    The SQS event source mapping may deliver multiple messages in one
+    invocation. Each message is processed independently.
+    """
+    if not isinstance(event, dict):
+        raise ValueError("Lambda event must be a JSON object")
+
+    records = event.get("Records")
+
+    # Direct/manual invocation remains supported.
+    if not records:
+        return _process_payload(event, context)
+
+    if not isinstance(records, list):
+        raise ValueError("Lambda SQS Records must be a list")
+
+    logger.info("[Orchestrator] received SQS batch records=%d", len(records))
+
+    results = []
+    failures = []
+
+    for index, record in enumerate(records):
+        message_id = record.get("messageId", f"record-{index}")
+
+        try:
+            payload = _decode_sqs_record(record)
+
+            logger.info(
+                "[Orchestrator] processing SQS message_id=%s "
+                "search_id=%s cimAnnotationJobId=%s document_id=%s",
+                message_id,
+                payload.get("search_id", "-"),
+                payload.get("cimAnnotationJobId", "-"),
+                payload.get("document_id", "-"),
+            )
+
+            result = _process_payload(payload, context)
+
+            results.append({
+                "message_id": message_id,
+                "success": True,
+                "result": result,
+            })
+
+        except Exception as exc:
+            logger.exception(
+                "[Orchestrator] SQS message failed message_id=%s error=%s",
+                message_id,
+                exc,
+            )
+
+            failures.append({
+                "itemIdentifier": message_id,
+            })
+
+            results.append({
+                "message_id": message_id,
+                "success": False,
+                "error": str(exc),
+            })
+
+    # This is intentionally returned in the AWS partial-batch format.
+    # It only has an effect when the event source mapping has
+    # ReportBatchItemFailures enabled.
+    return {
+        "batchItemFailures": failures,
+        "results": results,
+    }
