@@ -390,13 +390,13 @@ def notify_document_indexing_dispatch_status(
 
     logger.info(
         "[ServerNotify] document status job_id=%s status=%s attempt_id=%s "
-        "expected=%s dispatched=%s failed_dispatch=%s indexed=%s failed=%s",
+        "expected=%s dispatched=%s failed_dispatch=%s",
         job_id,
         status,
         attempt_id,
         expected_chunks,
         dispatched_chunks,
-        failed_dispatch_chunks
+        failed_dispatch_chunks,
     )
 
     return notify_server(

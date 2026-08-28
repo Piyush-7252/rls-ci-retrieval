@@ -327,26 +327,35 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
 
 def main() -> int:
     args = _args()
-    _require(args)
-    tenant = _tenant(args)
-    tenant_schema = tenant.get("tenant_schema", "")
-    job_label = args.file_id or args.document_id
+    tenant_schema = args.tenant_schema
     attempt_id = os.getenv("ATTEMPT_ID", "")
+
     logger.info(
         "START document_id=%s file_id=%s tenant_schema=%s project_id=%s attempt_id=%s",
-        args.document_id, args.file_id, args.tenant_schema, args.project_id, attempt_id,
+        args.document_id,
+        args.file_id,
+        args.tenant_schema,
+        args.project_id,
+        attempt_id,
     )
 
-    # Callback failures are deliberately non-fatal; the backend DB is the state system of record.
-    if args.file_id:
-        notify_document_indexing_dispatch_status(
+    try:
+        # Validate before starting any work. If configuration is invalid,
+        # report DISPATCH_FAILED and let the process exit with code 1.
+        _require(args)
+
+        tenant = _tenant(args)
+
+        # Callback failures are deliberately non-fatal; the backend DB is the
+        # state system of record.
+        if args.file_id:
+            notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
                 tenant_schema=tenant_schema,
                 status="PROCESSING",
-                attempt_id=attempt_id
+                attempt_id=attempt_id,
             )
 
-    try:
         raw, temp_path, _ = _download_full_tables(args.input_bucket, args.full_tables_key)
         t0 = time.perf_counter()
         doc_structure = _merge_doc_structure(raw)
