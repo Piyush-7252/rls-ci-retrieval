@@ -47,6 +47,7 @@ def _args() -> argparse.Namespace:
     p.add_argument("--file-id", default=os.getenv("FILE_ID", ""))
     p.add_argument("--callback-url", default=os.getenv("CALLBACK_URL", ""))
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--attempt_id", default=os.getenv("ATTEMPT_ID", ""))
     return p.parse_args()
 
 
@@ -126,6 +127,7 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace, tenant:
         tenant_id=str(args.tenant_id),
         project_id=str(args.project_id),
     )
+    attempt_id = args.attempt_id
 
     payloads: list[dict] = []
     global_obj_counter = 0
@@ -149,6 +151,7 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace, tenant:
             "source_type": "document",
             "document_id": str(args.document_id),
             "tenant_id": str(args.tenant_id),
+            "attempt_id": attempt_id,
             "tenant_name": args.tenant_name,
             "tenant_schema": args.tenant_schema,
             "project_id": str(args.project_id),
@@ -275,6 +278,7 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
                 "tenant_schema": payload["tenant_schema"],
                 "project_id": payload["project_id"],
                 "file_id": payload.get("file_id"),
+                "attemptId": payload.get("attemptId"),
                 "chunk_id": payload["chunk_id"],
                 "s3_payload": {"bucket": payload_bucket, "key": key},
             })
@@ -354,6 +358,7 @@ def main() -> int:
                 tenant_schema=tenant_schema,
                 status="PROCESSING",
                 attempt_id=attempt_id,
+                callback_url=args.callback_url,
             )
 
         raw, temp_path, _ = _download_full_tables(args.input_bucket, args.full_tables_key)
@@ -373,6 +378,7 @@ def main() -> int:
                 status="DISPATCH_PREPARED",
                 attempt_id=attempt_id,
                 expected_chunks=expected,
+                callback_url=args.callback_url,
             )
 
         if args.dry_run:
@@ -403,7 +409,7 @@ def main() -> int:
                 expected_chunks=expected,
                 dispatched_chunks=sent,
                 failed_dispatch_chunks=failed_dispatch,
-
+                callback_url=args.callback_url,
             )
 
         # Partial entry failures are an expected/recoverable dispatch state.
@@ -418,6 +424,7 @@ def main() -> int:
                 status="DISPATCH_FAILED",
                 attempt_id=attempt_id,
                 error=str(exc),
+                callback_url=args.callback_url,
             )
         return 1
 

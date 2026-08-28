@@ -27,6 +27,7 @@ def notify_server(
     *,
     tenant_schema: str,
     body: dict[str, Any],
+    callback_url: str | None = None,
 ) -> bool:
     """
     PATCH an internal backend endpoint.
@@ -34,7 +35,7 @@ def notify_server(
     Returns True when the server accepts the callback, False when the callback
     is unavailable or fails. Never raises.
     """
-    if not CALLBACK_URL:
+    if not CALLBACK_URL and not callback_url:
         logger.info("[ServerNotify] CALLBACK_URL not configured; skipping path=%s", path)
         return False
 
@@ -45,7 +46,7 @@ def notify_server(
         )
         return False
 
-    url = f"{CALLBACK_URL}/{path.lstrip('/')}"
+    url = f"{callback_url or CALLBACK_URL}/{path.lstrip('/')}"
     payload = json.dumps(body).encode("utf-8")
 
     try:
@@ -369,6 +370,7 @@ def notify_document_indexing_dispatch_status(
     dispatched_chunks: int | None = None,
     failed_dispatch_chunks: int | None = None,
     error: str | None = None,
+    callback_url: str | None = None,
 ) -> bool:
     """Notify backend with the complete document indexing->dispatch state.
 
@@ -403,5 +405,6 @@ def notify_document_indexing_dispatch_status(
         f"/api/internal/documents/indexing-dispatch-status",
         tenant_schema=tenant_schema,
         body=body,
+        callback_url=callback_url,
     )
 

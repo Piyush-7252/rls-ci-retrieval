@@ -176,8 +176,13 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
 
 
 def _get_attempt_id(chunk: dict) -> str | None:
-    value = chunk.get("attemptId") or chunk.get("attempt_id")
-    return str(value) if value is not None else None
+    value = (
+        chunk.get("attemptId")
+        or chunk.get("attempt_id")
+        or (chunk.get("metadata") or {}).get("attemptId")
+        or (chunk.get("metadata") or {}).get("attempt_id")
+    )
+    return str(value) if value is not None and str(value).strip() else None
 
 
 def _is_final_sqs_attempt(record: dict) -> bool:
