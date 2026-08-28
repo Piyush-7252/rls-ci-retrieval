@@ -332,6 +332,12 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
 def main() -> int:
     args = _args()
     tenant_schema = args.tenant_schema
+    logger.info(
+    "CONFIG callback_url_configured=%s callback_url=%s attempt_id=%s",
+    bool(args.callback_url),
+    args.callback_url,
+    args.attempt_id,
+)
     attempt_id = os.getenv("ATTEMPT_ID", "")
 
     logger.info(
