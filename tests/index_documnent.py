@@ -287,6 +287,7 @@ def build_chunks(doc_structure: dict, page_start: int, page_end: int,
     """
     from shared.apryse_parser  import parse_pages
     from shared.section_chunker import build_section_chunks
+    from shared.sentence_builder import _build_objects
 
     # Parse all pages in one pass — heading continuity requires the full range
     all_pages = parse_pages(doc_structure, page_start, page_end)
@@ -323,7 +324,7 @@ def build_chunks(doc_structure: dict, page_start: int, page_end: int,
     for sec in sections:
         chunk_id = f"{DOCUMENT_ID}_chunk_{len(chunks):04d}"
 
-        objects = extraction._build_objects(
+        objects = _build_objects(
             chunk_id, sec.virtual_pages, global_offset=global_obj_counter
         )
         trace(

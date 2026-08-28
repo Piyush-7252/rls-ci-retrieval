@@ -231,7 +231,7 @@ class SectionChunk:
     def virtual_pages(self) -> list[dict]:
         """
         Group objects by page number into virtual page dicts that are
-        compatible with extraction._build_objects().
+        compatible with sentence_builder._build_objects().
         """
         page_objs: dict[int, list] = defaultdict(list)
         for pg_num, obj in self.objects:

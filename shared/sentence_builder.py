@@ -1,10 +1,4 @@
 """
-Document Pipeline — Stage 2: Extraction
-=========================================
-Uses Apryse SDK ``DataExtractionModule`` with ``e_DocStructure`` mode.
-Triggered by : Orchestrator Lambda (async)
-Fan-out to   : Normalize Lambda (async)
-
 Input chunk
 -----------
 {
@@ -42,8 +36,6 @@ Page schema  (produced by shared/apryse_parser.py)
 
 from __future__ import annotations
 
-from shared.geometry_trace import trace, trace_raw_apryse
-
 import copy
 import json
 import logging
@@ -56,78 +48,6 @@ from shared.geometry import SentenceSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-NORMALIZE_LAMBDA_ARN = os.environ.get("NORMALIZE_LAMBDA_ARN", "")
-APRYSE_LICENSE_KEY   = os.environ.get("APRYSE_LICENSE_KEY", "")
-# Path to the Apryse StructuredOutput native module (deployed as a Lambda layer)
-APRYSE_RESOURCE_PATH = os.environ.get("APRYSE_RESOURCE_PATH", "/opt/apryse")
-
-# ─── lazy AWS clients ─────────────────────────────────────────────────────────
-_aws: dict = {}
-
-def _get(service: str):
-    if service not in _aws:
-        import boto3
-        _aws[service] = boto3.client(service)
-    return _aws[service]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-def handler(event: dict, context: Any) -> dict:
-    chunk_id = event.get("chunk_id", "unknown")
-    logger.info(
-        "[Stage 2 Extraction] start chunk_id=%s pages=%s-%s",
-        chunk_id,
-        event.get("page_start"),
-        event.get("page_end"),
-    )
-
-    try:
-        result = _process(event)
-    except Exception as exc:
-        logger.error("[Stage 2 Extraction] failed chunk_id=%s error=%s", chunk_id, exc)
-        raise
-
-    logger.info(
-        "[Stage 2 Extraction] done chunk_id=%s pages_extracted=%d",
-        chunk_id,
-        len(result["extraction"]["pages"]),
-    )
-
-    _get("lambda").invoke(
-        FunctionName   = NORMALIZE_LAMBDA_ARN,
-        InvocationType = "Event",
-        Payload        = json.dumps(result).encode(),
-    )
-    return result
-
-
-def _process(chunk: dict) -> dict:
-    chunk_id      = chunk["chunk_id"]
-    pdf_bytes     = _fetch_pdf_bytes(chunk["s3_bucket"], chunk["s3_key"])
-    doc_structure = _run_apryse_extraction(pdf_bytes)
-    trace_raw_apryse(f"EXTRACTION:{chunk_id}:after_apryse", doc_structure)
-    pages         = parse_pages(doc_structure, chunk["page_start"], chunk["page_end"])
-    page_state    = trace(f"EXTRACTION:{chunk_id}:after_parse_pages", {"pages": pages})
-    raw_text      = "\n\n".join(p["raw_text"] for p in pages)
-    objects       = _build_objects(chunk_id, pages)
-    trace(f"EXTRACTION:{chunk_id}:after_build_objects", {"objects": objects})
-
-    return {
-        **chunk,
-        "extraction": {
-            "raw_text": raw_text,
-            "pages":    pages,
-            "objects":  objects,   # semantic objects — one embedding each
-        },
-    }
-
-
-def _fetch_pdf_bytes(bucket: str, key: str) -> bytes:
-    response = _get("s3").get_object(Bucket=bucket, Key=key)
-    return response["Body"].read()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sentence builder
@@ -1056,7 +976,6 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
         merged.append(obj)
     raw = merged
 
-    trace("EXTRACTION:after_raw_object_merge", {"objects": raw})
     objects: list[dict] = []
     current_section = None
     current_section_level = None
@@ -1118,32 +1037,4 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
         })
 
 
-    trace("EXTRACTION:after_build_objects", {"objects": objects})
     return objects
-
-def _run_apryse_extraction(pdf_bytes: bytes) -> dict:
-    """
-    Write the PDF to /tmp, run Apryse e_DocStructure extraction,
-    return the parsed JSON dict.
-
-    Apryse is installed as a Lambda Layer (apryse_sdk).
-    """
-    from apryse_sdk import PDFNet, DataExtractionModule, DataExtractionOptions
-
-    PDFNet.Initialize(APRYSE_LICENSE_KEY)
-    PDFNet.AddResourceSearchPath(APRYSE_RESOURCE_PATH)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-    try:
-        tmp.write(pdf_bytes)
-        tmp.close()
-
-        options  = DataExtractionOptions()
-        raw_json = DataExtractionModule.ExtractData(
-            tmp.name,
-            DataExtractionModule.e_DocStructure,
-            options,
-        )
-        return json.loads(raw_json)
-    finally:
-        os.unlink(tmp.name)

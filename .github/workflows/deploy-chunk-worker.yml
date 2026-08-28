@@ -13,7 +13,6 @@ on:
       - "lambdas/embedding/**"
       - "lambdas/ontology/**"
       - "lambdas/index/**"
-      - "lambdas/extraction/**"
       - "shared/**"
       - "tools/deploy_document_chunk_worker.sh"
       - "tools/deploy_ci_worker.sh"
@@ -57,7 +56,6 @@ jobs:
               - 'lambdas/embedding_cohere/**'
               - 'lambdas/ontology/**'
               - 'lambdas/index/**'
-              - 'lambdas/extraction/**'
               - 'shared/**'
               - '.github/workflows/deploy-chunk-worker.yml'
             ci_worker:

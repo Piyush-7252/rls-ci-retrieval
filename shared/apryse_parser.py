@@ -5,9 +5,6 @@ Pure-Python helpers that turn an Apryse ``e_DocStructure`` JSON result into
 the structured page dicts used by the rest of the pipeline.
 
 This module has zero external dependencies — it only uses the stdlib.
-It is used by:
-  - lambdas/document/extraction/lambda_function.py  (production)
-  - tests/local_pipeline_test.py                     (mock extraction)
 
 Apryse e_DocStructure schema (as observed from SDK output)
 ------------------------------------------------------------

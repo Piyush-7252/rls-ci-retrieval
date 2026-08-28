@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from shared.apryse_parser import parse_pages  # noqa: E402
+from shared.sentence_builder import _build_objects  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
 logger = logging.getLogger("dry_run")
@@ -45,17 +46,6 @@ APRYSE_KEY  = os.environ.get("APRYSE_LICENSE_KEY", "")
 OUT_DIR     = ROOT / "localfiles" / "dry_run"
 
 W = 76  # print width
-
-
-# ── Load extraction lambda helper ─────────────────────────────────────────────
-
-def _load_extraction_module():
-    lf_path = ROOT / "lambdas" / "document" / "extraction" / "lambda_function.py"
-    sys.path.insert(0, str(lf_path.parent))
-    spec = importlib.util.spec_from_file_location("doc_extraction", lf_path)
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ── S3 download ───────────────────────────────────────────────────────────────
@@ -284,9 +274,8 @@ def main() -> None:
 
     # ── Step 4: _build_objects ────────────────────────────────────────────────
     logger.info("Building semantic objects …")
-    extraction_mod = _load_extraction_module()
     chunk_id       = f"{DOCUMENT_ID}_chunk_dryrun"
-    objects        = extraction_mod._build_objects(chunk_id, parsed, global_offset=0)
+    objects        = _build_objects(chunk_id, parsed, global_offset=0)
 
     # ── Step 5: Build views ───────────────────────────────────────────────────
     view1 = print_raw_apryse(raw_page, page)
