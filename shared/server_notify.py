@@ -333,3 +333,51 @@ def get_cim_annotation_job_cis(
     )
     return cis
 
+
+
+def notify_document_indexing_status(
+    *,
+    job_id: int | str,
+    tenant: dict[str, Any],
+    status: str,
+    attempt_id: str | None = None,
+    expected_chunks: int | None = None,
+    dispatched_chunks: int | None = None,
+    failed_dispatch_chunks: int | None = None,
+    error: str | None = None,
+) -> bool:
+    """Notify backend with the complete document indexing/dispatch state.
+
+    This callback is best-effort. The backend is the source of truth, while
+    the ECS/Lambda workers report the latest attempt statistics.
+    """
+    body: dict[str, Any] = {"status": status}
+
+    if attempt_id is not None:
+        body["attemptId"] = str(attempt_id)
+    if expected_chunks is not None:
+        body["expectedChunks"] = int(expected_chunks)
+    if dispatched_chunks is not None:
+        body["dispatchedChunks"] = int(dispatched_chunks)
+    if failed_dispatch_chunks is not None:
+        body["failedDispatchChunks"] = int(failed_dispatch_chunks)
+    if error:
+        body["error"] = str(error)
+
+    logger.info(
+        "[ServerNotify] document status job_id=%s status=%s attempt_id=%s "
+        "expected=%s dispatched=%s failed_dispatch=%s indexed=%s failed=%s",
+        job_id,
+        status,
+        attempt_id,
+        expected_chunks,
+        dispatched_chunks,
+        failed_dispatch_chunks
+    )
+
+    return notify_server(
+        f"/api/internal/documents/{job_id}/indexing-status",
+        tenant=tenant,
+        body=body,
+    )
+

@@ -1,0 +1,117 @@
+name: Deploy NLP Sentence Builder
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ecs/nlp-sentence-builder/**"
+      - "shared/**"
+      - ".github/workflows/deploy-nlp-sentence-builder.yml"
+
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: rls-nlp-sentence-builder
+  ECS_TASK_DEFINITION: NLP_SENTENCE_BUILDER
+  ECS_CONTAINER_NAME: nlp-sentence-builder
+
+jobs:
+  build-and-push:
+    name: Build and push NLP Sentence Builder image
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Building: ${IMAGE_URI}"
+
+          docker build             -f ecs/nlp-sentence-builder/Dockerfile             -t "${IMAGE_URI}"             .
+
+          docker push "${IMAGE_URI}"
+
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+
+      - name: Register ECS task definition with new image
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
+        run: |
+          aws ecs describe-task-definition             --task-definition "${ECS_TASK_DEFINITION}"             --query 'taskDefinition'             --output json > task-definition.json
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          path = "task-definition.json"
+          image = os.environ["IMAGE_URI"]
+          container_name = os.environ["ECS_CONTAINER_NAME"]
+
+          with open(path) as f:
+              task = json.load(f)
+
+          found = False
+
+          for container in task["containerDefinitions"]:
+              if container["name"] == container_name:
+                  container["image"] = image
+                  found = True
+
+          if not found:
+              raise RuntimeError(
+                  f"Container '{container_name}' not found in task definition"
+              )
+
+          for key in (
+              "taskDefinitionArn",
+              "revision",
+              "status",
+              "requiresAttributes",
+              "compatibilities",
+              "registeredAt",
+              "registeredBy",
+          ):
+              task.pop(key, None)
+
+          with open(path, "w") as f:
+              json.dump(task, f)
+
+          PY
+
+          aws ecs register-task-definition             --cli-input-json file://task-definition.json
+
+          echo "Registered new ${ECS_TASK_DEFINITION} revision."
+
+      - name: Deployment summary
+        run: |
+          echo "=============================================="
+          echo "NLP SENTENCE BUILDER IMAGE DEPLOYED"
+          echo "=============================================="
+          echo "ECR repository : ${ECR_REPOSITORY}"
+          echo "Image tag      : ${GITHUB_SHA}"
+          echo "Task definition: ${ECS_TASK_DEFINITION}"
+          echo ""
+          echo "This workflow does NOT start an ECS task."
+          echo "Backend is responsible for calling ECS RunTask."
