@@ -89,6 +89,75 @@ def notify_server(
     return False
 
 
+
+def _notify_server_method(
+    path: str,
+    *,
+    tenant_schema: str,
+    method: str,
+    body: dict[str, Any] | None = None,
+) -> bool:
+    """Generic non-fatal authenticated internal-server request."""
+    if not CALLBACK_URL:
+        logger.info(
+            "[ServerNotify] CALLBACK_URL not configured; skipping method=%s path=%s",
+            method, path,
+        )
+        return False
+
+    if not tenant_schema:
+        logger.warning(
+            "[ServerNotify] missing tenant schema; skipping method=%s path=%s",
+            method, path,
+        )
+        return False
+
+    try:
+        aws_key = get_tenant_api_key(tenant_schema)
+    except Exception as exc:
+        logger.warning(
+            "[ServerNotify] could not fetch API key tenant_schema=%s error=%s",
+            tenant_schema, exc,
+        )
+        return False
+
+    payload = json.dumps(body or {}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{CALLBACK_URL}/{path.lstrip('/')}",
+        data=payload,
+        method=method,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-tenant": tenant_schema,
+            "x-awskey": aws_key,
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=_CALLBACK_TIMEOUT) as response:
+            logger.info(
+                "[ServerNotify] OK method=%s status=%s tenant_schema=%s path=%s",
+                method, response.status, tenant_schema, path,
+            )
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        logger.warning(
+            "[ServerNotify] HTTP failure method=%s status=%s tenant_schema=%s "
+            "path=%s detail=%s",
+            method, exc.code, tenant_schema, path, detail,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ServerNotify] callback failed method=%s tenant_schema=%s "
+            "path=%s error=%s",
+            method, tenant_schema, path, exc,
+        )
+
+    return False
+
+
 def notify_ci_status(
     *,
     ci: dict[str, Any],
@@ -151,7 +220,7 @@ def notify_cim_annotation_job_status(
 
     # The backend status endpoints do not require a body, but sending the
     # lifecycle status makes the callback useful for request tracing.
-    return notify_server(
+    return _notify_server_method(
         path,
         tenant_schema=tenant_schema,
         method="PUT",
