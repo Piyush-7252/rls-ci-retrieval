@@ -13,7 +13,7 @@ It:
 7. Offloads oversized SQS payloads to S3.
 8. Calls the backend indexing-status callback at `PROCESSING`, `DISPATCHED`, and `FAILED`.
 
-The task definition family is `NLP_SENTENCE_BUILDER` by default.
+The task definition family is `RLS_CI_RETRIEVAL_NLP_SENTENCE_BUILDER`.
 
 ## Deploy
 
