@@ -14,7 +14,7 @@ from shared.id_resolver import get_global_document_id
 from shared.section_chunker import build_section_chunks
 from shared.apryse_parser import parse_pages
 from shared.sentence_builder import _build_objects
-from shared.server_notify import notify_document_indexing_status
+from shared.server_notify import notify_document_indexing_dispatch_status
 
 logger = logging.getLogger("NLP_SENTENCE_BUILDER")
 logging.basicConfig(
@@ -70,11 +70,7 @@ def _tenant(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "tenant_id": str(args.tenant_id),
         "tenant_name": args.tenant_name,
-        "tenant_schema": args.tenant_schema,
-        # server_notify accepts schema/name/id variants used by the pipeline.
-        "id": str(args.tenant_id),
-        "name": args.tenant_name,
-        "schema": args.tenant_schema,
+        "tenant_schema": args.tenant_schema
     }
 
 
@@ -254,6 +250,8 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
     _CURRENT_QUEUE_URL = args.queue_url
     payload_bucket = args.payload_bucket or args.input_bucket
     global_document_id = get_global_document_id(str(args.document_id), tenant_id=str(args.tenant_id), project_id=str(args.project_id))
+    tenant_name = args.tenant_name 
+    project_id = args.project_id
 
     batches: list[list[dict]] = []
     current: list[dict] = []
@@ -263,7 +261,7 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
     for payload in payloads:
         body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(body_bytes) > SQS_MAX_MESSAGE_BYTES:
-            key = f"{args.payload_prefix.rstrip('/')}/{global_document_id}/{payload['chunk_id']}.json"
+            key = f"{args.payload_prefix.rstrip('/')}/{tenant_name}/{project_id}/{global_document_id}/{payload['chunk_id']}.json"
             t0 = time.perf_counter()
             s3.put_object(Bucket=payload_bucket, Key=key, Body=body_bytes, ContentType="application/json")
             elapsed = time.perf_counter() - t0
@@ -331,6 +329,7 @@ def main() -> int:
     args = _args()
     _require(args)
     tenant = _tenant(args)
+    tenant_schema = tenant.get("tenant_schema", "")
     job_label = args.file_id or args.document_id
     attempt_id = os.getenv("ATTEMPT_ID", "")
     logger.info(
@@ -340,9 +339,9 @@ def main() -> int:
 
     # Callback failures are deliberately non-fatal; the backend DB is the state system of record.
     if args.file_id:
-        notify_document_indexing_status(
+        notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
-                tenant=tenant,
+                tenant_schema=tenant_schema,
                 status="PROCESSING",
                 attempt_id=attempt_id
             )
@@ -359,9 +358,9 @@ def main() -> int:
         logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
 
         if args.file_id:
-            notify_document_indexing_status(
+            notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
-                tenant=tenant,
+                tenant_schema=tenant_schema,
                 status="DISPATCH_PREPARED",
                 attempt_id=attempt_id,
                 expected_chunks=expected,
@@ -387,9 +386,9 @@ def main() -> int:
         )
 
         if args.file_id:
-            notify_document_indexing_status(
+            notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
-                tenant=tenant,
+                tenant_schema=tenant_schema,
                 status=status,
                 attempt_id=attempt_id,
                 expected_chunks=expected,
@@ -404,9 +403,9 @@ def main() -> int:
     except Exception as exc:
         logger.exception("FAILED document_id=%s error=%s", args.document_id, exc)
         if args.file_id:
-            notify_document_indexing_status(
+            notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
-                tenant=tenant,
+                tenant_schema=tenant_schema,
                 status="DISPATCH_FAILED",
                 attempt_id=attempt_id,
                 error=str(exc),

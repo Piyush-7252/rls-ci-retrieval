@@ -25,7 +25,7 @@ _CALLBACK_TIMEOUT = float(os.environ.get("CALLBACK_TIMEOUT_SECONDS", "30"))
 def notify_server(
     path: str,
     *,
-    tenant: dict[str, Any],
+    tenant_schema: str,
     body: dict[str, Any],
 ) -> bool:
     """
@@ -38,11 +38,6 @@ def notify_server(
         logger.info("[ServerNotify] CALLBACK_URL not configured; skipping path=%s", path)
         return False
 
-    tenant_schema = str(
-        tenant.get("schema")
-        or tenant.get("tenant_schema")
-        or ""
-    )
     if not tenant_schema:
         logger.warning(
             "[ServerNotify] missing tenant schema; skipping path=%s body=%s",
@@ -125,7 +120,7 @@ def notify_ci_status(
 
     return notify_server(
         status_path,
-        tenant=ci,
+        tenant_schema=ci["tenant_schema"],
         body=body,
     )
 
@@ -133,7 +128,7 @@ def notify_ci_status(
 def notify_cim_annotation_job_status(
     *,
     job_id: int | str,
-    tenant: dict[str, Any],
+    tenant_schema: str,
     status: str,
 ) -> bool:
     """Notify the backend of a CIM annotation job lifecycle transition.
@@ -156,90 +151,17 @@ def notify_cim_annotation_job_status(
 
     # The backend status endpoints do not require a body, but sending the
     # lifecycle status makes the callback useful for request tracing.
-    return _notify_server_method(
+    return notify_server(
         path,
-        tenant=tenant,
+        tenant_schema=tenant_schema,
         method="PUT",
         body={"status": status},
     )
 
-
-def _notify_server_method(
-    path: str,
-    *,
-    tenant: dict[str, Any],
-    method: str,
-    body: dict[str, Any] | None = None,
-) -> bool:
-    """Generic non-fatal authenticated internal-server request."""
-    if not CALLBACK_URL:
-        logger.info(
-            "[ServerNotify] CALLBACK_URL not configured; skipping method=%s path=%s",
-            method, path,
-        )
-        return False
-
-    tenant_schema = str(
-        tenant.get("schema")
-        or tenant.get("tenant_schema")
-        or ""
-    )
-    if not tenant_schema:
-        logger.warning(
-            "[ServerNotify] missing tenant schema; skipping method=%s path=%s",
-            method, path,
-        )
-        return False
-
-    try:
-        aws_key = get_tenant_api_key(tenant_schema)
-    except Exception as exc:
-        logger.warning(
-            "[ServerNotify] could not fetch API key tenant_schema=%s error=%s",
-            tenant_schema, exc,
-        )
-        return False
-
-    payload = json.dumps(body or {}).encode("utf-8")
-    request = urllib.request.Request(
-        f"{CALLBACK_URL}/{path.lstrip('/')}",
-        data=payload,
-        method=method,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "x-tenant": tenant_schema,
-            "x-awskey": aws_key,
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=_CALLBACK_TIMEOUT) as response:
-            logger.info(
-                "[ServerNotify] OK method=%s status=%s tenant_schema=%s path=%s",
-                method, response.status, tenant_schema, path,
-            )
-            return 200 <= response.status < 300
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        logger.warning(
-            "[ServerNotify] HTTP failure method=%s status=%s tenant_schema=%s "
-            "path=%s detail=%s",
-            method, exc.code, tenant_schema, path, detail,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[ServerNotify] callback failed method=%s tenant_schema=%s "
-            "path=%s error=%s",
-            method, tenant_schema, path, exc,
-        )
-
-    return False
-
 def get_cim_annotation_job_cis(
     job_id: int | str,
     *,
-    tenant: dict[str, Any],
+    tenant_schema: str,
 ) -> list[dict[str, Any]]:
     """Fetch all CIs belonging to one CIM annotation job.
 
@@ -258,8 +180,6 @@ def get_cim_annotation_job_cis(
     if not CALLBACK_URL:
         raise RuntimeError("CALLBACK_URL is required to fetch CIM annotation job CIs")
 
-    tenant_schema = str(tenant.get("tenant_schema") or ""
-    )
     if not tenant_schema:
         raise ValueError("tenant schema is required to fetch CIM annotation job CIs")
 
@@ -335,10 +255,45 @@ def get_cim_annotation_job_cis(
 
 
 
-def notify_document_indexing_status(
+
+def notify_document_indexed_chunk(
+    *,
+    attempt_id: str,
+    tenant_schema: str,
+) -> bool:
+    """Notify backend that one document chunk was indexed successfully."""
+    return notify_server(
+        "/api/internal/documents/indexing/indexed-chunk",
+        tenant_schema=tenant_schema,
+        body={
+            "attemptId": str(attempt_id),
+        },
+    )
+
+
+def notify_document_failed_chunk(
+    *,
+    attempt_id: str,
+    chunk_id: str,
+    error: str,
+    tenant_schema: str,
+) -> bool:
+    """Notify backend that one document chunk permanently failed."""
+    return notify_server(
+        "/api/internal/documents/indexing/failed-chunk",
+        tenant_schema=tenant_schema,
+        body={
+            "attemptId": str(attempt_id),
+            "chunkId": str(chunk_id),
+            "error": str(error),
+        },
+    )
+
+
+def notify_document_indexing_dispatch_status(
     *,
     job_id: int | str,
-    tenant: dict[str, Any],
+    tenant_schema: str,
     status: str,
     attempt_id: str | None = None,
     expected_chunks: int | None = None,
@@ -346,7 +301,7 @@ def notify_document_indexing_status(
     failed_dispatch_chunks: int | None = None,
     error: str | None = None,
 ) -> bool:
-    """Notify backend with the complete document indexing/dispatch state.
+    """Notify backend with the complete document indexing->dispatch state.
 
     This callback is best-effort. The backend is the source of truth, while
     the ECS/Lambda workers report the latest attempt statistics.
@@ -376,8 +331,8 @@ def notify_document_indexing_status(
     )
 
     return notify_server(
-        f"/api/internal/documents/{job_id}/indexing-status",
-        tenant=tenant,
+        f"/api/internal/documents/indexing-dispatch-status",
+        tenant_schema=tenant_schema,
         body=body,
     )
 

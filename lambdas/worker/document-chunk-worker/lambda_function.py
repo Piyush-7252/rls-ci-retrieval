@@ -11,6 +11,11 @@ import types
 from pathlib import Path
 from typing import Any
 
+from shared.server_notify import (
+    notify_document_failed_chunk,
+    notify_document_indexed_chunk,
+)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -170,6 +175,90 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
     }
 
 
+def _get_attempt_id(chunk: dict) -> str | None:
+    value = chunk.get("attemptId") or chunk.get("attempt_id")
+    return str(value) if value is not None else None
+
+
+def _is_final_sqs_attempt(record: dict) -> bool:
+    """
+    Return True only when this delivery is the final retry before SQS moves
+    the message to the DLQ.
+
+    Configure MAX_RECEIVE_COUNT to match the SQS redrive policy. If it is
+    unavailable, default to 5 and log the decision.
+    """
+    attributes = record.get("attributes") or {}
+
+    try:
+        receive_count = int(attributes.get("ApproximateReceiveCount", "1"))
+    except (TypeError, ValueError):
+        receive_count = 1
+
+    try:
+        max_receive_count = int(os.environ.get("SQS_MAX_RECEIVE_COUNT", "5"))
+    except (TypeError, ValueError):
+        max_receive_count = 5
+
+    if max_receive_count < 1:
+        max_receive_count = 1
+
+    return receive_count >= max_receive_count
+
+
+def _notify_indexed(chunk: dict, result: dict) -> None:
+    attempt_id = _get_attempt_id(chunk)
+    tenant_schema = chunk.get("tenant_schema")
+
+    if not attempt_id:
+        logger.warning(
+            "[ChunkWorker] indexed callback skipped: missing attemptId chunk_id=%s",
+            result.get("chunk_id"),
+        )
+        return
+
+    if not tenant_schema:
+        logger.warning(
+            "[ChunkWorker] indexed callback skipped: missing tenant_schema attempt_id=%s chunk_id=%s",
+            attempt_id,
+            result.get("chunk_id"),
+        )
+        return
+
+    notify_document_indexed_chunk(
+        attempt_id=attempt_id,
+        tenant_schema=tenant_schema,
+    )
+
+
+def _notify_failed(chunk: dict, exc: Exception) -> None:
+    attempt_id = _get_attempt_id(chunk)
+    tenant_schema = chunk.get("tenant_schema")
+    chunk_id = str(chunk.get("chunk_id") or "")
+
+    if not attempt_id:
+        logger.warning(
+            "[ChunkWorker] failed callback skipped: missing attemptId chunk_id=%s",
+            chunk_id,
+        )
+        return
+
+    if not tenant_schema:
+        logger.warning(
+            "[ChunkWorker] failed callback skipped: missing tenant_schema attempt_id=%s chunk_id=%s",
+            attempt_id,
+            chunk_id,
+        )
+        return
+
+    notify_document_failed_chunk(
+        attempt_id=attempt_id,
+        chunk_id=chunk_id,
+        error=str(exc),
+        tenant_schema=tenant_schema,
+    )
+
+
 def handler(event: dict, context: Any) -> dict:
     # Direct invoke for smoke testing
     if "Records" not in event:
@@ -210,6 +299,11 @@ def handler(event: dict, context: Any) -> dict:
             if context is not None:
                 chunk["_memory_limit_mb"] = int(getattr(context, "memory_limit_in_mb", 0) or 0)
             result = _run_chunk(chunk, context)
+
+            # The chunk is considered indexed only after _run_chunk completes
+            # successfully. Callback failures are non-fatal.
+            _notify_indexed(chunk, result)
+
             processed += 1
             logger.info(
                 "[ChunkWorker] done chunk_id=%s elapsed_s=%s",
@@ -222,6 +316,13 @@ def handler(event: dict, context: Any) -> dict:
                 "[ChunkWorker] failed message_id=%s chunk_id=%s error=%s",
                 message_id, chunk_id, exc,
             )
+
+            # Do not increment failedChunks for transient attempts. The same
+            # SQS message can be retried multiple times. Count it only on the
+            # final configured receive attempt, immediately before DLQ.
+            if chunk is not None and _is_final_sqs_attempt(record):
+                _notify_failed(chunk, exc)
+
             if message_id:
                 failures.append({"itemIdentifier": message_id})
 

@@ -407,7 +407,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
     if cim_job_id is not None:
         notify_cim_annotation_job_status(
             job_id=cim_job_id,
-            tenant=tenant,
+            tenant_schema=tenant["tenant_schema"],
             status="ON_GOING",
         )
 
@@ -424,7 +424,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
             # through the SQS message.
             raw_cis = get_cim_annotation_job_cis(
                 cim_job_id,
-                tenant=tenant,
+                tenant_schema=tenant["tenant_schema"],
             )
         else:
             raw_cis = event.get("cis", [])
@@ -469,7 +469,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
             if cim_job_id is not None:
                 notify_cim_annotation_job_status(
                     job_id=cim_job_id,
-                    tenant=tenant,
+                    tenant_schema=tenant["tenant_schema"],
                     status="COMPLETED",
                 )
 
@@ -741,7 +741,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
             if cim_job_id is not None:
                 notify_cim_annotation_job_status(
                     job_id=cim_job_id,
-                    tenant=tenant,
+                    tenant_schema=tenant["tenant_schema"],
                     status="COMPLETED" if status == "COMPLETED" else "FAILED",
                 )
 
@@ -750,7 +750,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
         if cim_job_id is not None:
             notify_cim_annotation_job_status(
                 job_id=cim_job_id,
-                tenant=tenant,
+                tenant_schema=tenant["tenant_schema"],
                 status="COMPLETED" if status == "COMPLETED" else "FAILED",
             )
 
@@ -769,7 +769,7 @@ def _process_payload(event: dict, context: Any = None) -> dict:
         if cim_job_id is not None:
             notify_cim_annotation_job_status(
                 job_id=cim_job_id,
-                tenant=tenant,
+                tenant_schema=tenant["tenant_schema"],
                 status="FAILED",
             )
 
