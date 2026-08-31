@@ -377,15 +377,15 @@ def main() -> int:
         expected = len(payloads)
         logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
 
-        if args.file_id:
-            notify_document_indexing_dispatch_status(
-                job_id=args.file_id,
-                tenant_schema=tenant_schema,
-                status="DISPATCH_PREPARED",
-                attempt_id=attempt_id,
-                expected_chunks=expected,
-                callback_url=args.callback_url,
-            )
+        # if args.file_id:
+        #     notify_document_indexing_dispatch_status(
+        #         job_id=args.file_id,
+        #         tenant_schema=tenant_schema,
+        #         status="DISPATCH_PREPARED",
+        #         attempt_id=attempt_id,
+        #         expected_chunks=expected,
+        #         callback_url=args.callback_url,
+        #     )
 
         if args.dry_run:
             logger.info("DRY RUN complete expected_chunks=%d", expected)
