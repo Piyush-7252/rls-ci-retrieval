@@ -1,5 +1,5 @@
 """
-Batch dispatch all CI files under localfiles/ci/ to rls-ci-worker-queue.
+Batch dispatch all CI files under localfiles/ci/ to rls-ci-retrieval-ci-chunk-worker-queue.
 
 Usage
 -----
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 ROOT       = Path(__file__).resolve().parent.parent
 CI_DIR     = ROOT / "localfiles" / "ci"
-QUEUE_URL  = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-worker-queue"
+QUEUE_URL  = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-retrieval-ci-chunk-worker-queue"
 REGION     = "eu-west-1"
 
 # All CI files in dispatch order (smallest → largest to warm up queue fast)
@@ -70,7 +70,7 @@ def dispatch_file(ci_file: Path, dry_run: bool, index: int, total: int) -> bool:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Batch dispatch all CI files to rls-ci-worker-queue")
+    p = argparse.ArgumentParser(description="Batch dispatch all CI files to rls-ci-retrieval-ci-chunk-worker-queue")
     p.add_argument("--dry-run", action="store_true", help="Print without sending to SQS")
     p.add_argument("--files",   nargs="+", default=None,
                    help="Only dispatch these filenames (e.g. ahmedCis.json christineCIs.json)")

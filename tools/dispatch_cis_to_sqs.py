@@ -2,14 +2,14 @@
 dispatch_cis_to_sqs.py
 ======================
 Reads a CI JSON file and pushes each CI as an SQS message to the
-rls-ci-worker-queue (or any queue you point at).  Mirrors the pattern
+rls-ci-retrieval-ci-chunk-worker-queue (or any queue you point at).  Mirrors the pattern
 of dispatch_chunks_to_sqs.py.
 
 Usage
 -----
     python tools/dispatch_cis_to_sqs.py \\
         --ci-file  localfiles/ci/ahmedCis.json \\
-        --queue-url https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-worker-queue \\
+        --queue-url https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-retrieval-ci-chunk-worker-queue \\
         --region eu-west-1
 
     # dry-run (print messages, do not send)
