@@ -11,7 +11,7 @@ ROLE_ARN="${ROLE_ARN:-}"
 # Optional inputs
 AWS_REGION="${AWS_REGION:-eu-west-1}"
 FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-chunk-worker}"
-QUEUE_NAME="${QUEUE_NAME:-rls-ci-chunk-queue}"
+QUEUE_NAME="${QUEUE_NAME:-rls-ci-retrieval-document-chunk-worker-queue}"
 DLQ_NAME="${DLQ_NAME:-rls-ci-chunk-dlq}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-50}"
 EMBEDDING_MAX_WORKERS="${EMBEDDING_MAX_WORKERS:-8}"

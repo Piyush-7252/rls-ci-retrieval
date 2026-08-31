@@ -5,6 +5,7 @@ import gzip
 import importlib.util
 import json
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -21,8 +22,8 @@ _loaded: dict[str, types.ModuleType] = {}
 # the 10-entry limit. Keep headroom for the request/entry envelope.
 SQS_BATCH_MAX_ENTRIES = 10
 SQS_BATCH_MAX_BYTES = 900_000
-TENANT = {"tenant_name": "RLS Test Script", "tenant_id": "1", "tenant_schema": "rls-test-script"}
-PROJECT_ID="123"
+TENANT = {"tenant_name": "RLS CIM", "tenant_id": "e69f37be-9be8-41b4-baca-4e6fefa22ea4", "tenant_schema": "rls_cim"}
+PROJECT_ID="29"
 
 
 def _load(rel_path: str, alias: str) -> types.ModuleType:
@@ -113,8 +114,7 @@ def _build_chunks(
 ) -> list[dict]:
     from shared.apryse_parser import parse_pages
     from shared.section_chunker import build_section_chunks
-
-    extraction = _load("extraction", "extraction")
+    from shared.sentence_builder import _build_objects
 
     all_pages = parse_pages(doc_structure, page_start, page_end)
     if not all_pages:
@@ -132,7 +132,7 @@ def _build_chunks(
             break
         chunk_id = f"{global_document_id}_chunk_{len(chunks):04d}"
 
-        objects = extraction._build_objects(
+        objects = _build_objects(
             chunk_id,
             sec.virtual_pages,
             global_offset=global_obj_counter,
@@ -413,6 +413,7 @@ def main() -> None:
                     print(f"  [chunk-cache] patched {len(chunks)} chunks from original (suffix={args.suffix!r})", flush=True)
 
         if chunks is None:
+            t0=time.time()
             chunks = _build_chunks(
                 doc_structure=doc_structure,
                 document_id=effective_document_id,
@@ -427,11 +428,13 @@ def main() -> None:
                 max_chunks=max_for_batch,
                 global_document_id=global_document_id
             )
+            t1 = time.time()
+            print(f"  built {len(chunks)} chunks for pages {batch_start}-{batch_end} in {t1-t0:.1f}s", flush=True)
             # Save to chunk cache (only when full range, no limit)
             if not args.no_chunk_cache and max_for_batch == 0:
                 _save_cached_chunks(ccache_path, chunks)
         _save_cached_chunks(ccache_path, chunks)
-        # return
+        return
 
         total_chunks_built += len(chunks)
         

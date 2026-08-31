@@ -700,7 +700,7 @@ def main(
         print(f"\n{'─' * 70}")
         print("  Re-dispatch commands (run these to re-index all documents):")
         print(f"{'─' * 70}\n")
-        queue_url = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-chunk-queue"
+        queue_url = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-retrieval-document-chunk-worker-queue"
         for doc_id in all_doc_ids:
             print(
                 f"python3.12 tools/dispatch_chunks_to_sqs.py \\\n"
