@@ -14,7 +14,7 @@ on:
 env:
   AWS_REGION: eu-west-1
   ECR_REPOSITORY: rls-ci-retrieval-nlp-sentence-builder
-  ECS_TASK_DEFINITION: RLS_CI_RETRIEVAL_NLP_SENTENCE_BUILDER
+  ECS_TASK_DEFINITION: rls-ci-retrieval-nlp-sentence-builder
   ECS_CONTAINER_NAME: rls-ci-retrieval-nlp-sentence-builder
 
 jobs:
