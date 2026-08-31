@@ -176,13 +176,8 @@ def _run_chunk(chunk: dict, context: Any = None) -> dict:
 
 
 def _get_attempt_id(chunk: dict) -> str | None:
-    value = (
-        chunk.get("attemptId")
-        or chunk.get("attempt_id")
-        or (chunk.get("metadata") or {}).get("attemptId")
-        or (chunk.get("metadata") or {}).get("attempt_id")
-    )
-    return str(value) if value is not None and str(value).strip() else None
+    value = chunk.get("attemptId") or chunk.get("attempt_id")
+    return str(value) if value is not None else None
 
 
 def _is_final_sqs_attempt(record: dict) -> bool:
@@ -222,16 +217,18 @@ def _notify_indexed(chunk: dict, result: dict) -> None:
         )
         return
 
-    if not tenant_schema:
+    chunk_id = str(result.get("chunk_id") or chunk.get("chunk_id") or "")
+
+    if not chunk_id:
         logger.warning(
-            "[ChunkWorker] indexed callback skipped: missing tenant_schema attempt_id=%s chunk_id=%s",
+            "[ChunkWorker] indexed callback skipped: missing chunk_id attempt_id=%s",
             attempt_id,
-            result.get("chunk_id"),
         )
         return
 
     notify_document_indexed_chunk(
         attempt_id=attempt_id,
+        chunk_id=chunk_id,
         tenant_schema=tenant_schema,
     )
 
@@ -250,7 +247,7 @@ def _notify_failed(chunk: dict, exc: Exception) -> None:
 
     if not tenant_schema:
         logger.warning(
-            "[ChunkWorker] failed callback skipped: missing tenant_schema attempt_id=%s chunk_id=%s",
+            "[ChunkWorker] failed callback skipped: missing tenant attempt_id=%s chunk_id=%s",
             attempt_id,
             chunk_id,
         )

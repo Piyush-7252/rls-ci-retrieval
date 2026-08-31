@@ -329,6 +329,7 @@ def get_cim_annotation_job_cis(
 def notify_document_indexed_chunk(
     *,
     attempt_id: str,
+    chunk_id: str,
     tenant_schema: str,
 ) -> bool:
     """Notify backend that one document chunk was indexed successfully."""
@@ -337,6 +338,7 @@ def notify_document_indexed_chunk(
         tenant_schema=tenant_schema,
         body={
             "attemptId": str(attempt_id),
+            "chunkId": str(chunk_id),
         },
     )
 
@@ -370,7 +372,6 @@ def notify_document_indexing_dispatch_status(
     dispatched_chunks: int | None = None,
     failed_dispatch_chunks: int | None = None,
     error: str | None = None,
-    callback_url: str | None = None,
 ) -> bool:
     """Notify backend with the complete document indexing->dispatch state.
 
@@ -398,13 +399,12 @@ def notify_document_indexing_dispatch_status(
         attempt_id,
         expected_chunks,
         dispatched_chunks,
-        failed_dispatch_chunks,
+        failed_dispatch_chunks
     )
 
     return notify_server(
         f"/api/internal/documents/indexing-dispatch-status",
         tenant_schema=tenant_schema,
         body=body,
-        callback_url=callback_url,
     )
 

@@ -111,7 +111,7 @@ def _merge_doc_structure(raw: dict) -> dict:
     return {"properties": props, "pages": pages}
 
 
-def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace, tenant: dict[str, Any]) -> list[dict]:
+def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list[dict]:
     total_pages = len(doc_structure.get("pages", []))
     pages = parse_pages(doc_structure, 1, total_pages)
     logger.info("parsed pages=%d", len(pages))
@@ -332,13 +332,7 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
 def main() -> int:
     args = _args()
     tenant_schema = args.tenant_schema
-    logger.info(
-    "CONFIG callback_url_configured=%s callback_url=%s attempt_id=%s",
-    bool(args.callback_url),
-    args.callback_url,
-    args.attempt_id,
-)
-    attempt_id = os.getenv("ATTEMPT_ID", "")
+
 
     logger.info(
         "START document_id=%s file_id=%s tenant_schema=%s project_id=%s attempt_id=%s",
@@ -346,46 +340,28 @@ def main() -> int:
         args.file_id,
         args.tenant_schema,
         args.project_id,
-        attempt_id,
+        args.attempt_id,
     )
 
-    try:
-        # Validate before starting any work. If configuration is invalid,
-        # report DISPATCH_FAILED and let the process exit with code 1.
-        _require(args)
-
-        tenant = _tenant(args)
-
-        # Callback failures are deliberately non-fatal; the backend DB is the
-        # state system of record.
-        if args.file_id:
-            notify_document_indexing_dispatch_status(
+    # Callback failures are deliberately non-fatal; the backend DB is the state system of record.
+    if args.file_id:
+        notify_document_indexing_dispatch_status(
                 job_id=args.file_id,
                 tenant_schema=tenant_schema,
                 status="PROCESSING",
-                attempt_id=attempt_id,
-                callback_url=args.callback_url,
+                attempt_id=args.attempt_id
             )
 
+    try:
         raw, temp_path, _ = _download_full_tables(args.input_bucket, args.full_tables_key)
         t0 = time.perf_counter()
         doc_structure = _merge_doc_structure(raw)
         del raw
         logger.info("document structure merged pages=%d elapsed_s=%.3f", len(doc_structure.get("pages", [])), time.perf_counter() - t0)
 
-        payloads = _build_chunk_payloads(doc_structure, args, tenant)
+        payloads = _build_chunk_payloads(doc_structure, args)
         expected = len(payloads)
         logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
-
-        # if args.file_id:
-        #     notify_document_indexing_dispatch_status(
-        #         job_id=args.file_id,
-        #         tenant_schema=tenant_schema,
-        #         status="DISPATCH_PREPARED",
-        #         attempt_id=attempt_id,
-        #         expected_chunks=expected,
-        #         callback_url=args.callback_url,
-        #     )
 
         if args.dry_run:
             logger.info("DRY RUN complete expected_chunks=%d", expected)
@@ -411,11 +387,11 @@ def main() -> int:
                 job_id=args.file_id,
                 tenant_schema=tenant_schema,
                 status=status,
-                attempt_id=attempt_id,
+                attempt_id=args.attempt_id,
                 expected_chunks=expected,
                 dispatched_chunks=sent,
                 failed_dispatch_chunks=failed_dispatch,
-                callback_url=args.callback_url,
+
             )
 
         # Partial entry failures are an expected/recoverable dispatch state.
@@ -428,9 +404,8 @@ def main() -> int:
                 job_id=args.file_id,
                 tenant_schema=tenant_schema,
                 status="DISPATCH_FAILED",
-                attempt_id=attempt_id,
+                attempt_id=args.attempt_id,
                 error=str(exc),
-                callback_url=args.callback_url,
             )
         return 1
 
