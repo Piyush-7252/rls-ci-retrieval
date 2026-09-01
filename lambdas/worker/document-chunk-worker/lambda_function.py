@@ -206,6 +206,119 @@ def _is_final_sqs_attempt(record: dict) -> bool:
     return receive_count >= max_receive_count
 
 
+def _is_callback_error_retryable(status_code: int | None, exc: Exception) -> bool:
+    """
+    Classify HTTP response codes as retryable or terminal.
+
+    Retryable (infrastructure/transient):
+    - No response (connection refused, timeout, reset, DNS failure)
+    - 5xx errors (backend crash, deployment, DB unavailable, pool exhausted, 503, 504)
+
+    Terminal (application/permanent):
+    - 4xx errors (invalid data, auth, validation)
+    """
+    if status_code is None:
+        # No HTTP response — network/connection issue
+        # (ECONNREFUSED, ETIMEDOUT, ECONNRESET, socket timeout, DNS failure, etc)
+        return True
+
+    if 500 <= status_code < 600:
+        # 5xx — server error (deployment, crash, DB temporarily unavailable)
+        # Idempotent operation, safe to retry.
+        return True
+
+    if 400 <= status_code < 500:
+        # 4xx — client error (bad request, validation, auth)
+        # Retrying won't help; would just waste retries.
+        return False
+
+    # Other status codes (3xx, 2xx) are not errors.
+    return False
+
+
+def _retry_callback_with_backoff(
+    attempt_id: str,
+    chunk_id: str,
+    tenant_schema: str,
+    max_attempts: int = 4,
+) -> None:
+    """
+    Retry callback with exponential backoff (1s, 2s, 4s, 8s).
+
+    Handles transient failures (503, timeout, connection refused, etc).
+    Propagates terminal failures (400, 404, 422, etc) immediately.
+
+    Args:
+        attempt_id: File indexing attempt ID.
+        chunk_id: Chunk identifier.
+        tenant_schema: Database schema.
+        max_attempts: Retry budget (default 4 = 1 initial + 3 retries).
+
+    Raises:
+        Exception: If all attempts fail, or a terminal error occurs.
+    """
+    last_exc = None
+
+    for attempt in range(max_attempts):
+        try:
+            notify_document_indexed_chunk(
+                attempt_id=attempt_id,
+                chunk_id=chunk_id,
+                tenant_schema=tenant_schema,
+            )
+            # Success
+            return
+
+        except Exception as exc:
+            last_exc = exc
+
+            # Extract HTTP status code if available
+            status_code = getattr(exc, "response", {}).get("status_code") if hasattr(exc, "response") else None
+
+            # Check if retryable
+            if not _is_callback_error_retryable(status_code, exc):
+                # Terminal error — don't retry
+                logger.error(
+                    "[ChunkWorker] callback failed (terminal) attempt=%d status=%s "
+                    "attempt_id=%s chunk_id=%s error=%s",
+                    attempt + 1,
+                    status_code,
+                    attempt_id,
+                    chunk_id,
+                    exc,
+                )
+                raise
+
+            # Transient error — backoff and retry
+            if attempt < max_attempts - 1:
+                backoff_s = 2 ** attempt  # 1s, 2s, 4s, 8s
+                logger.warning(
+                    "[ChunkWorker] callback failed (retryable) attempt=%d status=%s "
+                    "backoff_s=%d attempt_id=%s chunk_id=%s error=%s",
+                    attempt + 1,
+                    status_code,
+                    backoff_s,
+                    attempt_id,
+                    chunk_id,
+                    exc,
+                )
+                time.sleep(backoff_s)
+            else:
+                # Final attempt exhausted
+                logger.error(
+                    "[ChunkWorker] callback failed (exhausted retries) status=%s "
+                    "attempt_id=%s chunk_id=%s error=%s",
+                    status_code,
+                    attempt_id,
+                    chunk_id,
+                    exc,
+                )
+
+    # All retries exhausted — propagate last exception to SQS
+    if last_exc:
+        raise last_exc
+
+
 def _notify_indexed(chunk: dict, result: dict) -> None:
     attempt_id = _get_attempt_id(chunk)
     tenant_schema = chunk.get("tenant_schema")
@@ -229,10 +342,11 @@ def _notify_indexed(chunk: dict, result: dict) -> None:
         )
         return
 
-    # Transient failures (network, backend down, etc) MUST propagate.
-    # No try/except here — let exceptions bubble to handler's outer except block.
-    # This ensures SQS treats this as a failed message and retries.
-    notify_document_indexed_chunk(
+    # Retry callback with exponential backoff for transient failures (503, timeout, etc).
+    # Terminal failures (400, 404, 422) propagate immediately without retry.
+    # After application-level retries exhausted, exception propagates to handler.
+    # Handler adds message to SQS batchItemFailures, enabling SQS retry layer.
+    _retry_callback_with_backoff(
         attempt_id=attempt_id,
         chunk_id=chunk_id,
         tenant_schema=tenant_schema,
