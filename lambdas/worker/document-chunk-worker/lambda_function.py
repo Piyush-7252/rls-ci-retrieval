@@ -210,6 +210,9 @@ def _notify_indexed(chunk: dict, result: dict) -> None:
     attempt_id = _get_attempt_id(chunk)
     tenant_schema = chunk.get("tenant_schema")
 
+    # Validation failures: data is missing, so callback cannot be made.
+    # This is NOT a transient failure — chunk is missing required fields.
+    # We skip the callback but do NOT fail the Lambda (data quality issue, not network).
     if not attempt_id:
         logger.warning(
             "[ChunkWorker] indexed callback skipped: missing attemptId chunk_id=%s",
@@ -226,6 +229,9 @@ def _notify_indexed(chunk: dict, result: dict) -> None:
         )
         return
 
+    # Transient failures (network, backend down, etc) MUST propagate.
+    # No try/except here — let exceptions bubble to handler's outer except block.
+    # This ensures SQS treats this as a failed message and retries.
     notify_document_indexed_chunk(
         attempt_id=attempt_id,
         chunk_id=chunk_id,
@@ -302,8 +308,14 @@ def handler(event: dict, context: Any) -> dict:
                 chunk["_memory_limit_mb"] = int(getattr(context, "memory_limit_in_mb", 0) or 0)
             result = _run_chunk(chunk, context)
 
-            # The chunk is considered indexed only after _run_chunk completes
-            # successfully. Callback failures are non-fatal.
+            # Notify server that chunk was indexed.
+            # CRITICAL: If this callback fails (network error, backend down, etc),
+            # the exception MUST propagate to the outer except block so that:
+            # 1. message_id is added to batchItemFailures
+            # 2. SQS does NOT acknowledge this message
+            # 3. SQS retries after visibility timeout expires
+            # This ensures the database update eventually happens when backend recovers.
+            # We do NOT swallow callback exceptions here.
             _notify_indexed(chunk, result)
 
             processed += 1
@@ -325,6 +337,12 @@ def handler(event: dict, context: Any) -> dict:
             if chunk is not None and _is_final_sqs_attempt(record):
                 _notify_failed(chunk, exc)
 
+            # CRITICAL: Add to batchItemFailures so SQS does NOT acknowledge this message.
+            # Message will become visible again after visibility timeout.
+            # This applies to ALL failures:
+            # - indexing failures (OpenSearch unavailable)
+            # - callback failures (backend unavailable during deployment)
+            # - data quality issues (missing chunk_id, etc)
             if message_id:
                 failures.append({"itemIdentifier": message_id})
 
