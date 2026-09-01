@@ -1,122 +1,175 @@
-image: atlassian/default-image:4
+image: atlassian/default-image:3
+
+options:
+  docker: true
 
 definitions:
-  caches:
-    pip-cache: ~/.cache/pip
-    docker-buildkit: ~/.cache/docker-buildkit
+  services:
+    docker:
+      memory: 5120
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STEP 1: Build all Docker images (extraction, splitter, and Lambda workers)
+  # ─────────────────────────────────────────────────────────────────────────────
   steps:
-    - step: &deploy-chunk-worker
-        name: Build & Deploy rls-ci-chunk-worker
-        services:
-          - docker
-        caches:
-          - pip-cache
-          - docker-buildkit
+    - step: &build-all-images
+        name: "Build & Push All Images to All ECRs"
+        services: [docker]
+        caches: [docker]
+        size: 2x
+        oidc: true
         script:
-          # --- AWS auth ---
-          - export AWS_DEFAULT_REGION="${AWS_REGION:-eu-west-1}"
-          - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          - ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/rls-ci-chunk-worker"
+          # Install AWS CLI v2
+          - apt-get update -qq && apt-get install -y -qq unzip curl jq python3 python3-pip
+          - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip -q awscliv2.zip && ./aws/install --update
+          - aws --version
 
-          # --- ECR login ---
-          - aws ecr describe-repositories --repository-names rls-ci-chunk-worker --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1 ||
-            aws ecr create-repository --repository-name rls-ci-chunk-worker --region "$AWS_DEFAULT_REGION" >/dev/null
-          - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" |
-            docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          # Build all Docker images tagged with commit SHA
+          - docker build --platform linux/amd64 -f lambdas/worker/document-chunk-worker/Dockerfile -t document-chunk-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/worker/ci-worker/Dockerfile -t ci-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/worker/search-worker/Dockerfile -t search-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/orchestrator/search-orchestrator/Dockerfile -t search-orchestrator:$BITBUCKET_COMMIT .
 
-          # --- Build (BuildKit cache backed by registry) ---
-          - IMAGE_TAG=$(date +%Y%m%d-%H%M%S)
-          - docker buildx create --use --driver docker-container 2>/dev/null || true
+          # Function to push images to an environment
           - |
-            docker buildx build \
-              --platform linux/amd64 \
-              --provenance=false \
-              --sbom=false \
-              --push \
-              --cache-from "type=registry,ref=${ECR_URI}:buildcache" \
-              --cache-to   "type=registry,ref=${ECR_URI}:buildcache,mode=max" \
-              -f lambdas/chunk_worker/Dockerfile \
-              -t "${ECR_URI}:${IMAGE_TAG}" \
-              -t "${ECR_URI}:latest" \
-              .
-
-          # --- Wait for Lambda to be idle then update ---
-          - FUNCTION_NAME="${FUNCTION_NAME:-rls-ci-chunk-worker}"
-          - |
-            wait_lambda() {
-              aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME" --region "$AWS_DEFAULT_REGION" || true
-            }
-          - |
-            retry_update() {
-              for attempt in 1 2 3 4 5; do
-                "$@" && return 0
-                echo "Lambda busy (attempt $attempt/5), waiting..."
-                wait_lambda
+            push_to_env() {
+              local env_name=$1
+              local aws_account_id=$2
+              local aws_region=$3
+              local aws_role_arn=$4
+              
+              echo "🔄 Authenticating to $env_name ($aws_region)..."
+              export AWS_DEFAULT_REGION=$aws_region
+              export AWS_ROLE_ARN=$aws_role_arn
+              export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+              echo $BITBUCKET_STEP_OIDC_TOKEN > $AWS_WEB_IDENTITY_TOKEN_FILE
+              
+              aws sts get-caller-identity
+              aws ecr get-login-password --region $aws_region | docker login --username AWS --password-stdin $aws_account_id.dkr.ecr.$aws_region.amazonaws.com
+              
+              # Push all images
+              for image in document-chunk-worker ci-worker search-worker search-orchestrator; do
+                docker tag $image:$BITBUCKET_COMMIT $aws_account_id.dkr.ecr.$aws_region.amazonaws.com/$image:$BITBUCKET_COMMIT
+                docker push $aws_account_id.dkr.ecr.$aws_region.amazonaws.com/$image:$BITBUCKET_COMMIT
+                echo "✅ Pushed $image:$BITBUCKET_COMMIT to $env_name"
               done
-              echo "ERROR: gave up after 5 attempts"
-              return 1
             }
 
-          - |
-            if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$AWS_DEFAULT_REGION" >/dev/null 2>&1; then
-              retry_update aws lambda update-function-code \
-                --function-name "$FUNCTION_NAME" \
-                --image-uri "${ECR_URI}:${IMAGE_TAG}" \
-                --region "$AWS_DEFAULT_REGION" >/dev/null
-            else
-              aws lambda create-function \
-                --function-name "$FUNCTION_NAME" \
-                --package-type Image \
-                --code ImageUri="${ECR_URI}:${IMAGE_TAG}" \
-                --role "$ROLE_ARN" \
-                --timeout "${TIMEOUT:-900}" \
-                --memory-size "${MEMORY_SIZE:-10240}" \
-                --region "$AWS_DEFAULT_REGION" >/dev/null
-            fi
+          # Push to DEV
+          - push_to_env "DEV" "$AWS_DEV_ACCOUNT_ID" "$AWS_DEFAULT_REGION_DEV" "$AWS_ROLE_ARN_DEV"
+          # Push to QA
+          - push_to_env "QA" "$AWS_QA_ACCOUNT_ID" "$AWS_DEFAULT_REGION_QA" "$AWS_ROLE_ARN_QA"
+          # Push to CQA (same account as QA, different region)
+          - push_to_env "CQA" "$AWS_QA_ACCOUNT_ID" "$AWS_DEFAULT_REGION_CQA" "$AWS_ROLE_ARN_QA"
+          # Push to PROD
+          - push_to_env "PROD" "$AWS_PROD_ACCOUNT_ID" "$AWS_DEFAULT_REGION_PROD" "$AWS_ROLE_ARN_PROD"
 
-          - wait_lambda
+    # ───────────────────────────────────────────────────────────────────────────
+    # STEP 2: Deploy to DEV
+    # ───────────────────────────────────────────────────────────────────────────
+    - step: &deploy-dev
+        name: "Deploy to DEV"
+        deployment: dev
+        trigger: manual
+        size: 2x
+        oidc: true
+        script:
+          - apt-get update -qq && apt-get install -y -qq unzip curl jq python3 python3-pip
+          - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip -q awscliv2.zip && ./aws/install --update
+          - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION_DEV
+          - export AWS_ROLE_ARN=$AWS_ROLE_ARN_DEV
+          - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+          - echo $BITBUCKET_STEP_OIDC_TOKEN > $AWS_WEB_IDENTITY_TOKEN_FILE
+          - aws sts get-caller-identity
+          - bash ./ci/deploy.sh dev $BITBUCKET_COMMIT
 
-          - |
-            retry_update aws lambda update-function-configuration \
-              --function-name "$FUNCTION_NAME" \
-              --timeout "${TIMEOUT:-900}" \
-              --memory-size "${MEMORY_SIZE:-10240}" \
-              --environment "Variables={
-                OPENSEARCH_ENDPOINT=${OPENSEARCH_ENDPOINT:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com},
-                OPENSEARCH_INDEX=${OPENSEARCH_INDEX:-document-chunks},
-                SEMANTIC_OBJECTS_INDEX=${SEMANTIC_OBJECTS_INDEX:-semantic-objects},
-                OPENSEARCH_CI_INDEX=${OPENSEARCH_CI_INDEX:-ci-objects},
-                NER_MODEL=${NER_MODEL:-gliner},
-                EMBEDDING_MODEL=${EMBEDDING_MODEL:-amazon.titan-embed-text-v2:0},
-                EMBEDDING_MAX_WORKERS=${EMBEDDING_MAX_WORKERS:-8},
-                HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1},
-                HF_HOME=${HF_HOME:-/var/task/models}
-              }" \
-              --region "$AWS_DEFAULT_REGION" >/dev/null
+    # ───────────────────────────────────────────────────────────────────────────
+    # STEP 3: Deploy to QA
+    # ───────────────────────────────────────────────────────────────────────────
+    - step: &deploy-qa
+        name: "Deploy to QA"
+        deployment: qa
+        trigger: manual
+        size: 2x
+        oidc: true
+        script:
+          - apt-get update -qq && apt-get install -y -qq unzip curl jq python3 python3-pip
+          - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip -q awscliv2.zip && ./aws/install --update
+          - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION_QA
+          - export AWS_ROLE_ARN=$AWS_ROLE_ARN_QA
+          - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+          - echo $BITBUCKET_STEP_OIDC_TOKEN > $AWS_WEB_IDENTITY_TOKEN_FILE
+          - aws sts get-caller-identity
+          - bash ./ci/deploy.sh qa $BITBUCKET_COMMIT
 
-          - wait_lambda
-          - echo "Deployed $FUNCTION_NAME → ${ECR_URI}:${IMAGE_TAG}"
+    # ───────────────────────────────────────────────────────────────────────────
+    # STEP 4: Deploy to CQA
+    # ───────────────────────────────────────────────────────────────────────────
+    - step: &deploy-cqa
+        name: "Deploy to CQA"
+        deployment: cqa
+        trigger: manual
+        size: 2x
+        oidc: true
+        script:
+          - apt-get update -qq && apt-get install -y -qq unzip curl jq python3 python3-pip
+          - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip -q awscliv2.zip && ./aws/install --update
+          - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION_CQA
+          - export AWS_ROLE_ARN=$AWS_ROLE_ARN_QA
+          - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+          - echo $BITBUCKET_STEP_OIDC_TOKEN > $AWS_WEB_IDENTITY_TOKEN_FILE
+          - aws sts get-caller-identity
+          - bash ./ci/deploy.sh cqa $BITBUCKET_COMMIT
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # STEP 5: Deploy to PROD
+    # ───────────────────────────────────────────────────────────────────────────
+    - step: &deploy-prod
+        name: "Deploy to PROD"
+        deployment: prod
+        trigger: manual
+        size: 2x
+        oidc: true
+        script:
+          - apt-get update -qq && apt-get install -y -qq unzip curl jq python3 python3-pip
+          - curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          - unzip -q awscliv2.zip && ./aws/install --update
+          - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION_PROD
+          - export AWS_ROLE_ARN=$AWS_ROLE_ARN_PROD
+          - export AWS_WEB_IDENTITY_TOKEN_FILE=$(pwd)/web-identity-token
+          - echo $BITBUCKET_STEP_OIDC_TOKEN > $AWS_WEB_IDENTITY_TOKEN_FILE
+          - aws sts get-caller-identity
+          - bash ./ci/deploy.sh prod $BITBUCKET_COMMIT
 
 pipelines:
   branches:
     main:
-      - step: *deploy-chunk-worker
+      # Build and push all images to all ECRs
+      - step: *build-all-images
+      # Manual deployment steps
+      - step: *deploy-dev
+      - step: *deploy-qa
+      - step: *deploy-cqa
+      - step: *deploy-prod
 
   custom:
-    deploy-chunk-worker:
-      - variables:
-          # AWS credentials — entered at run time in the Bitbucket UI (never stored in code)
-          - name: AWS_ACCESS_KEY_ID
-          - name: AWS_SECRET_ACCESS_KEY
-          - name: ROLE_ARN
-          # Tunables with sensible defaults
-          - name: FUNCTION_NAME
-            default: rls-ci-chunk-worker
-          - name: AWS_REGION
-            default: eu-west-1
-          - name: TIMEOUT
-            default: "900"
-          - name: MEMORY_SIZE
-            default: "10240"
-      - step: *deploy-chunk-worker
+    # Manual trigger for building and pushing images only
+    build-and-push:
+      - step: *build-all-images
+
+    # Manual trigger for individual environment deployments
+    deploy-dev:
+      - step: *deploy-dev
+
+    deploy-qa:
+      - step: *deploy-qa
+
+    deploy-cqa:
+      - step: *deploy-cqa
+
+    deploy-prod:
+      - step: *deploy-prod
