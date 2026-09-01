@@ -278,7 +278,7 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
                 "tenant_schema": payload["tenant_schema"],
                 "project_id": payload["project_id"],
                 "file_id": payload.get("file_id"),
-                "attemptId": payload.get("attemptId"),
+                "attempt_id": payload.get("attempt_id"),
                 "chunk_id": payload["chunk_id"],
                 "s3_payload": {"bucket": payload_bucket, "key": key},
             })
