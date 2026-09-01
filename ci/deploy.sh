@@ -47,29 +47,43 @@ retry_update() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: Deploy or update a Lambda function
+# NOTE: Environment variables are NOT managed by this script.
+#       They must be set manually in AWS Console or Lambda config.
+#       Only updates: Docker image, timeout, memory, and lifecycle.
 # ─────────────────────────────────────────────────────────────────────────────
 deploy_lambda() {
     local function_name=$1
     local image_uri=$2
     local timeout=${3:-900}
     local memory=${4:-10240}
-    local env_vars=${5:-""}
     
     echo ""
     echo "📦 Deploying: $function_name"
     echo "   Image: $image_uri"
     echo "   Timeout: ${timeout}s, Memory: ${memory}MB"
+    echo "   ℹ️  Environment variables: NOT managed by this script"
     
     # Check if function exists
     if aws lambda get-function --function-name "$function_name" --region "$AWS_REGION" >/dev/null 2>&1; then
-        echo "   ↻ Updating existing function..."
+        echo "   ↻ Updating function code..."
         retry_update "$function_name" \
             aws lambda update-function-code \
                 --function-name "$function_name" \
                 --image-uri "$image_uri" \
                 --region "$AWS_REGION" > /dev/null
+        
+        wait_lambda "$function_name"
+        
+        echo "   ↻ Updating function configuration (timeout, memory)..."
+        retry_update "$function_name" \
+            aws lambda update-function-configuration \
+                --function-name "$function_name" \
+                --timeout "$timeout" \
+                --memory-size "$memory" \
+                --region "$AWS_REGION" > /dev/null
     else
         echo "   ✨ Creating new function..."
+        echo "   ⚠️  You must MANUALLY set environment variables after function creation!"
         aws lambda create-function \
             --function-name "$function_name" \
             --package-type Image \
@@ -77,21 +91,7 @@ deploy_lambda() {
             --role "$LAMBDA_ROLE_ARN" \
             --timeout "$timeout" \
             --memory-size "$memory" \
-            --region "$AWS_REGION" \
-            --environment "Variables=$env_vars" > /dev/null
-    fi
-    
-    wait_lambda "$function_name"
-    
-    # Update configuration
-    if [ ! -z "$env_vars" ]; then
-        retry_update "$function_name" \
-            aws lambda update-function-configuration \
-                --function-name "$function_name" \
-                --timeout "$timeout" \
-                --memory-size "$memory" \
-                --environment "Variables=$env_vars" \
-                --region "$AWS_REGION" > /dev/null
+            --region "$AWS_REGION" > /dev/null
     fi
     
     wait_lambda "$function_name"
@@ -108,36 +108,11 @@ echo "🔐 AWS Account: $ACCOUNT_ID"
 echo "📍 ECR Registry: $ECR_REGISTRY"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Load environment-specific configuration
+# Validate environment
 # ─────────────────────────────────────────────────────────────────────────────
 case "$ENVIRONMENT" in
-    dev)
-        OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT_DEV:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com}"
-        SEMANTIC_OBJECTS_INDEX="${SEMANTIC_OBJECTS_INDEX_DEV:-semantic-objects}"
-        DOCUMENT_CHUNKS_INDEX="${DOCUMENT_CHUNKS_INDEX_DEV:-document-chunks}"
-        CI_OBJECTS_INDEX="${CI_OBJECTS_INDEX_DEV:-ci-objects}"
-        OPENSEARCH_MAXSIZE="${OPENSEARCH_MAXSIZE_DEV:-256}"
-        ;;
-    qa)
-        OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT_QA:-search-rls-qa-xyz.eu-west-1.es.amazonaws.com}"
-        SEMANTIC_OBJECTS_INDEX="${SEMANTIC_OBJECTS_INDEX_QA:-semantic-objects}"
-        DOCUMENT_CHUNKS_INDEX="${DOCUMENT_CHUNKS_INDEX_QA:-document-chunks}"
-        CI_OBJECTS_INDEX="${CI_OBJECTS_INDEX_QA:-ci-objects}"
-        OPENSEARCH_MAXSIZE="${OPENSEARCH_MAXSIZE_QA:-512}"
-        ;;
-    cqa)
-        OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT_CQA:-search-rls-cqa-xyz.eu-west-1.es.amazonaws.com}"
-        SEMANTIC_OBJECTS_INDEX="${SEMANTIC_OBJECTS_INDEX_CQA:-semantic-objects}"
-        DOCUMENT_CHUNKS_INDEX="${DOCUMENT_CHUNKS_INDEX_CQA:-document-chunks}"
-        CI_OBJECTS_INDEX="${CI_OBJECTS_INDEX_CQA:-ci-objects}"
-        OPENSEARCH_MAXSIZE="${OPENSEARCH_MAXSIZE_CQA:-512}"
-        ;;
-    prod)
-        OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT_PROD:-search-rls-prod-xyz.eu-west-1.es.amazonaws.com}"
-        SEMANTIC_OBJECTS_INDEX="${SEMANTIC_OBJECTS_INDEX_PROD:-semantic-objects}"
-        DOCUMENT_CHUNKS_INDEX="${DOCUMENT_CHUNKS_INDEX_PROD:-document-chunks}"
-        CI_OBJECTS_INDEX="${CI_OBJECTS_INDEX_PROD:-ci-objects}"
-        OPENSEARCH_MAXSIZE="${OPENSEARCH_MAXSIZE_PROD:-1024}"
+    dev|qa|cqa|prod)
+        # Valid environment
         ;;
     *)
         echo "❌ Invalid environment: $ENVIRONMENT"
@@ -147,16 +122,11 @@ case "$ENVIRONMENT" in
 esac
 
 echo ""
-echo "⚙️  Environment Config:"
-echo "   OpenSearch: $OPENSEARCH_ENDPOINT"
-echo "   Indexes: $SEMANTIC_OBJECTS_INDEX / $DOCUMENT_CHUNKS_INDEX / $CI_OBJECTS_INDEX"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Define Lambda deployments
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Common environment variables for all Lambdas
-COMMON_ENV="{OPENSEARCH_ENDPOINT=$OPENSEARCH_ENDPOINT,SEMANTIC_OBJECTS_INDEX=$SEMANTIC_OBJECTS_INDEX,DOCUMENT_CHUNKS_INDEX=$DOCUMENT_CHUNKS_INDEX,CI_OBJECTS_INDEX=$CI_OBJECTS_INDEX,OPENSEARCH_MAXSIZE=$OPENSEARCH_MAXSIZE,HF_HUB_OFFLINE=1,HF_HOME=/var/task/models}"
+echo "⚙️  Deployment Info:"
+echo "   Environment: $ENVIRONMENT"
+echo "   Region: $AWS_REGION"
+echo "   Account: $ACCOUNT_ID"
+echo "   ℹ️  Environment variables must be set manually in AWS Lambda Console"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE 1: Document Processing Workers
@@ -170,15 +140,13 @@ echo "════════════════════════�
 deploy_lambda \
     "rls-ci-retrieval-document-chunk-worker" \
     "$ECR_REGISTRY/document-chunk-worker:$IMAGE_TAG" \
-    "900" "10240" \
-    "$COMMON_ENV,NER_MODEL=gliner,EMBEDDING_MODEL=amazon.titan-embed-text-v2:0,EMBEDDING_MAX_WORKERS=8"
+    "900" "10240"
 
 # CI Worker
 deploy_lambda \
     "rls-ci-retrieval-ci-worker" \
     "$ECR_REGISTRY/ci-worker:$IMAGE_TAG" \
-    "900" "3072" \
-    "$COMMON_ENV"
+    "900" "3072"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STAGE 2: Search Workers
@@ -192,15 +160,13 @@ echo "════════════════════════�
 deploy_lambda \
     "rls-ci-retrieval-search-orchestrator" \
     "$ECR_REGISTRY/search-orchestrator:$IMAGE_TAG" \
-    "900" "3072" \
-    "$COMMON_ENV"
+    "900" "3072"
 
 # Search Worker
 deploy_lambda \
     "rls-ci-retrieval-search-worker" \
     "$ECR_REGISTRY/search-worker:$IMAGE_TAG" \
-    "900" "3072" \
-    "$COMMON_ENV"
+    "900" "3072"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Optional: PDF Processing (only if images exist)
@@ -219,3 +185,13 @@ echo "  Environment: $ENVIRONMENT"
 echo "  Image Tag: $IMAGE_TAG"
 echo "  Region: $AWS_REGION"
 echo "  Account: $ACCOUNT_ID"
+echo ""
+echo "⚠️  IMPORTANT: Set Lambda environment variables manually in AWS Console:"
+echo "   - OPENSEARCH_ENDPOINT"
+echo "   - SEMANTIC_OBJECTS_INDEX"
+echo "   - DOCUMENT_CHUNKS_INDEX"
+echo "   - CI_OBJECTS_INDEX"
+echo "   - OPENSEARCH_MAXSIZE"
+echo "   - NER_MODEL (for document-chunk-worker)"
+echo "   - EMBEDDING_MODEL (for document-chunk-worker)"
+echo "   - EMBEDDING_MAX_WORKERS (for document-chunk-worker)"
