@@ -24,7 +24,7 @@ logging.basicConfig(
 
 SQS_MAX_ENTRIES = 10
 SQS_MAX_BATCH_BYTES = int(os.environ.get("SQS_BATCH_MAX_BYTES", "900000"))
-SQS_MAX_MESSAGE_BYTES = 256 * 1024
+SQS_MAX_MESSAGE_BYTES = 0
 S3_OFFLOAD_THRESHOLD = int(os.environ.get("SQS_S3_OFFLOAD_THRESHOLD", "240000"))
 
 s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
@@ -38,7 +38,7 @@ def _args() -> argparse.Namespace:
     p.add_argument("--input-bucket", default=os.getenv("INPUT_BUCKET", ""))
     p.add_argument("--source-s3-key", default=os.getenv("SOURCE_S3_KEY", ""))
     p.add_argument("--queue-url", default=os.getenv("QUEUE_URL", ""))
-    p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", ""))
+    p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", "rls-file-bucket-eu"))
     p.add_argument("--payload-prefix", default=os.getenv("PAYLOAD_PREFIX", "nlp-sentence-builder-payloads"))
     p.add_argument("--tenant-id", default=os.getenv("TENANT_ID", ""))
     p.add_argument("--tenant-name", default=os.getenv("TENANT_NAME", ""))
