@@ -24,7 +24,7 @@ logging.basicConfig(
 
 SQS_MAX_ENTRIES = 10
 SQS_MAX_BATCH_BYTES = int(os.environ.get("SQS_BATCH_MAX_BYTES", "900000"))
-SQS_MAX_MESSAGE_BYTES = 0
+SQS_MAX_MESSAGE_BYTES = 256 * 1024
 S3_OFFLOAD_THRESHOLD = int(os.environ.get("SQS_S3_OFFLOAD_THRESHOLD", "240000"))
 
 s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
