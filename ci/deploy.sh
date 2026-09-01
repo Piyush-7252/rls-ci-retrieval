@@ -139,13 +139,13 @@ echo "════════════════════════�
 # Document Chunk Worker
 deploy_lambda \
     "rls-ci-retrieval-document-chunk-worker" \
-    "$ECR_REGISTRY/document-chunk-worker:$IMAGE_TAG" \
+    "$ECR_REGISTRY/rls-ci-retrieval-document-chunk-worker:$IMAGE_TAG" \
     "900" "10240"
 
 # CI Worker
 deploy_lambda \
     "rls-ci-retrieval-ci-worker" \
-    "$ECR_REGISTRY/ci-worker:$IMAGE_TAG" \
+    "$ECR_REGISTRY/rls-ci-retrieval-ci-worker:$IMAGE_TAG" \
     "900" "3072"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,13 +159,13 @@ echo "════════════════════════�
 # Search Orchestrator
 deploy_lambda \
     "rls-ci-retrieval-search-orchestrator" \
-    "$ECR_REGISTRY/search-orchestrator:$IMAGE_TAG" \
+    "$ECR_REGISTRY/rls-ci-retrieval-search-orchestrator:$IMAGE_TAG" \
     "900" "3072"
 
 # Search Worker
 deploy_lambda \
     "rls-ci-retrieval-search-worker" \
-    "$ECR_REGISTRY/search-worker:$IMAGE_TAG" \
+    "$ECR_REGISTRY/rls-ci-retrieval-search-worker:$IMAGE_TAG" \
     "900" "3072"
 
 # ─────────────────────────────────────────────────────────────────────────────

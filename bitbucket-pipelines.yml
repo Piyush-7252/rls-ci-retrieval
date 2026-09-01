@@ -9,7 +9,8 @@ definitions:
       memory: 5120
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # STEP 1: Build all Docker images (extraction, splitter, and Lambda workers)
+  # STEP 1: Build all Docker images (4 Lambda workers + 1 ECS service)
+  # Services: document-chunk-worker, ci-worker, search-worker, search-orchestrator, nlp-sentence-builder
   # ─────────────────────────────────────────────────────────────────────────────
   steps:
     - step: &build-all-images
@@ -26,10 +27,11 @@ definitions:
           - aws --version
 
           # Build all Docker images tagged with commit SHA
-          - docker build --platform linux/amd64 -f lambdas/worker/document-chunk-worker/Dockerfile -t document-chunk-worker:$BITBUCKET_COMMIT .
-          - docker build --platform linux/amd64 -f lambdas/worker/ci-worker/Dockerfile -t ci-worker:$BITBUCKET_COMMIT .
-          - docker build --platform linux/amd64 -f lambdas/worker/search-worker/Dockerfile -t search-worker:$BITBUCKET_COMMIT .
-          - docker build --platform linux/amd64 -f lambdas/orchestrator/search-orchestrator/Dockerfile -t search-orchestrator:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/worker/document-chunk-worker/Dockerfile -t rls-ci-retrieval-document-chunk-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/worker/ci-worker/Dockerfile -t rls-ci-retrieval-ci-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/worker/search-worker/Dockerfile -t rls-ci-retrieval-search-worker:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f lambdas/orchestrator/search-orchestrator/Dockerfile -t rls-ci-retrieval-search-orchestrator:$BITBUCKET_COMMIT .
+          - docker build --platform linux/amd64 -f ecs/nlp-sentence-builder/Dockerfile -t rls-ci-retrieval-nlp-sentence-builder:$BITBUCKET_COMMIT .
 
           # Function to push images to an environment
           - |
@@ -49,7 +51,7 @@ definitions:
               aws ecr get-login-password --region $aws_region | docker login --username AWS --password-stdin $aws_account_id.dkr.ecr.$aws_region.amazonaws.com
               
               # Push all images
-              for image in document-chunk-worker ci-worker search-worker search-orchestrator; do
+              for image in rls-ci-retrieval-document-chunk-worker rls-ci-retrieval-ci-worker rls-ci-retrieval-search-worker rls-ci-retrieval-search-orchestrator rls-ci-retrieval-nlp-sentence-builder; do
                 docker tag $image:$BITBUCKET_COMMIT $aws_account_id.dkr.ecr.$aws_region.amazonaws.com/$image:$BITBUCKET_COMMIT
                 docker push $aws_account_id.dkr.ecr.$aws_region.amazonaws.com/$image:$BITBUCKET_COMMIT
                 echo "✅ Pushed $image:$BITBUCKET_COMMIT to $env_name"
