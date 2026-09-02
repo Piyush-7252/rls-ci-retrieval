@@ -33,6 +33,11 @@ on:
           - search-worker
           - search-orchestrator
 
+env:
+  AWS_REGION:      ${{ secrets.AWS_REGION }}
+  CALLBACK_URL:    ${{ secrets.CALLBACK_URL }}
+  OPENSEARCH_ENDPOINT: ${{ secrets.OPENSEARCH_ENDPOINT }}
+
 jobs:
   changes:
     name: Detect changed paths
@@ -88,7 +93,6 @@ jobs:
     timeout-minutes: 60
 
     env:
-      AWS_REGION:    ${{ secrets.AWS_REGION }}
       FUNCTION_NAME: rls-ci-retrieval-document-chunk-worker
       ECR_REPO:      rls-ci-retrieval-document-chunk-worker
 
@@ -119,7 +123,6 @@ jobs:
     timeout-minutes: 45
 
     env:
-      AWS_REGION:    ${{ secrets.AWS_REGION }}
       FUNCTION_NAME: rls-ci-retrieval-ci-worker
       ECR_REPO:      rls-ci-retrieval-ci-worker
 
@@ -129,7 +132,7 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
@@ -150,7 +153,6 @@ jobs:
     timeout-minutes: 45
 
     env:
-      AWS_REGION:    ${{ secrets.AWS_REGION }}
       FUNCTION_NAME: rls-ci-retrieval-search-worker
       ECR_REPO:      rls-ci-retrieval-search-worker
 
@@ -160,7 +162,7 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
@@ -181,7 +183,6 @@ jobs:
     timeout-minutes: 30
 
     env:
-      AWS_REGION:    ${{ secrets.AWS_REGION }}
       FUNCTION_NAME: rls-ci-retrieval-search-orchestrator
       ECR_REPO:      rls-ci-retrieval-search-orchestrator
 
@@ -191,7 +192,7 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ env.AWS_REGION }}
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:

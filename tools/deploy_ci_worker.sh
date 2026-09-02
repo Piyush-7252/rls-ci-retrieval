@@ -26,7 +26,7 @@ ROLE_ARN="${ROLE_ARN:-}"
 TIMEOUT="${TIMEOUT:-300}"
 MEMORY_SIZE="${MEMORY_SIZE:-10240}"
 EPHEMERAL_STORAGE="${EPHEMERAL_STORAGE:-10240}"   # MB — GLiNER model copy needs ~1.5 GB /tmp
-
+CALLBACK_URL="${CALLBACK_URL:-}"
 OPENSEARCH_ENDPOINT="${OPENSEARCH_ENDPOINT:-search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com}"
 OPENSEARCH_CI_INDEX="${OPENSEARCH_CI_INDEX:-ci-objects}"
 NER_MODEL="${NER_MODEL:-gliner}"
