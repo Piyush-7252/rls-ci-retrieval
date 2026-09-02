@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: eu-west-1
+  AWS_REGION: ${{ secrets.AWS_REGION }}
   ECR_REPOSITORY: rls-ci-retrieval-nlp-sentence-builder
   ECS_TASK_DEFINITION: rls-ci-retrieval-nlp-sentence-builder
   ECS_CONTAINER_NAME: rls-ci-retrieval-nlp-sentence-builder
