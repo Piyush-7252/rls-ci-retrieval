@@ -215,9 +215,10 @@ def _build_ci_doc(ci: dict) -> dict:
         "tokens":              ci["normalization"]["tokens"],
         "entities":            ci["ner"]["entities"],
         "ner_model":           ci["ner"].get("model", "gliner"),
-        "ontology_expansions": ci["ontology"]["expansions"],
-        "ontology_synonyms":   ci["ontology"]["synonyms"],
-        "regex_patterns":      ci["ontology"]["regex_patterns"],
+        # Ontology fields: store as JSON to prevent field explosion from arbitrary keys
+        "ontology_expansions": ci["ontology"]["expansions"],  # list, stored not indexed
+        "ontology_synonyms":   json.dumps(ci["ontology"].get("synonyms", {})),  # JSON string
+        "regex_patterns":      json.dumps(ci["ontology"].get("regex_patterns", {})),  # JSON string
         # ── Embeddings ───────────────────────────────────────────────────────
         "dense_vector":      ci["embedding"]["dense_vector"],
         # Sparse vectors contain arbitrary token names. Store them as JSON
@@ -367,8 +368,10 @@ def _build_chunk_doc(chunk: dict) -> dict:
         "normalized_text":      chunk["normalization"]["normalized_text"],
         "tokens":               chunk["normalization"]["tokens"],
         "entities":             chunk.get("ner", {}).get("entities", []),
-        "ontology_expansions":  chunk.get("ontology", {}).get("expansions", []),
-        "ontology_synonyms":    json.dumps(chunk.get("ontology", {}).get("synonyms", {})),
+        # Ontology fields: store as JSON to prevent field explosion from arbitrary keys
+        "ontology_expansions":  chunk.get("ontology", {}).get("expansions", []),  # list, stored not indexed
+        "ontology_synonyms":    json.dumps(chunk.get("ontology", {}).get("synonyms", {})),  # JSON string
+        "regex_patterns":       json.dumps(chunk.get("ontology", {}).get("regex_patterns", {})),  # JSON string
         "dense_vector":         chunk.get("embedding", {}).get("dense_vector", []),
         "heading_dense_vector": chunk.get("embedding", {}).get("heading_dense_vector", []),
         "sparse_vector_json":   json.dumps(chunk.get("embedding", {}).get("sparse_vector", {})),

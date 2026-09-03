@@ -114,6 +114,7 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
                 # Ontology
                 "ontology_expansions":  {"type": "object", "enabled": False},
                 "ontology_synonyms":    {"type": "keyword", "index": False},
+                "regex_patterns":       {"type": "keyword", "index": False},
                 # Vectors — dense_vector is knn-searched; heading is stored only
                 "dense_vector":         _knn_field(1024),
                 "heading_dense_vector": {"type": "float", "index": False},
@@ -839,8 +840,8 @@ if __name__ == "__main__":
         help="Skip the confirmation prompt",
     )
     parser.add_argument(
-        "--region", default="us-east-1",
-        help="AWS region (default: us-east-1)",
+        "--region", default="eu-west-1",
+        help="AWS region (default: eu-west-1)",
     )
     parser.add_argument(
         "--chunks-index", default="document-chunks",
@@ -867,7 +868,7 @@ if __name__ == "__main__":
 
     endpoint = os.environ.get(
         "OPENSEARCH_ENDPOINT",
-        "search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com",
+        "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com",
     )
     if not endpoint:
         print("ERROR: OPENSEARCH_ENDPOINT env var not set", file=sys.stderr)
