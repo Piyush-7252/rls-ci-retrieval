@@ -220,7 +220,11 @@ def _build_ci_doc(ci: dict) -> dict:
         "regex_patterns":      ci["ontology"]["regex_patterns"],
         # ── Embeddings ───────────────────────────────────────────────────────
         "dense_vector":      ci["embedding"]["dense_vector"],
-        "sparse_vector":     ci["embedding"]["sparse_vector"],
+        # Sparse vectors contain arbitrary token names. Store them as JSON
+        # rather than mapping each token as an OpenSearch field.
+        "sparse_vector_json": json.dumps(
+            ci["embedding"].get("sparse_vector", {})
+        ),
         "embedding_model":   ci["embedding"]["model"],
         # ── ClinicalObject enrichment (symmetric with semantic-objects) ───────
         # build_enrichment_fields() is the SINGLE source of truth — both CI
