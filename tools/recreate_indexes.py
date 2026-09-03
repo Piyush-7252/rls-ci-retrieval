@@ -1,5 +1,5 @@
 """
-Recreate document-chunks and semantic-objects OpenSearch indexes from scratch.
+Recreate ci-objects, document-chunks and semantic-objects OpenSearch indexes from scratch.
 
 This script:
   1. Reads the current document counts per index so you know what will be lost.
@@ -10,7 +10,7 @@ This script:
 
 Usage:
     export OPENSEARCH_ENDPOINT=search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com
-    python tools/recreate_indexes.py [--yes] [--region eu-west-1]
+    python tools/recreate_indexes.py [--ci-only] [--yes] [--region us-east-1]
 
 Flags:
     --yes       Skip the confirmation prompt.
@@ -27,9 +27,14 @@ import os
 import sys
 from pathlib import Path
 
+from ci_objects_mapping import CI_OBJECTS_MAPPING
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
 # ── AWS / OpenSearch connection ───────────────────────────────────────────────
 
@@ -60,6 +65,7 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
             "number_of_replicas": 0,
             "index.knn":          True,
             "refresh_interval":   "30s",
+            "index.mapping.total_fields.limit": 2000,
         },
         "mappings": {
             "dynamic_templates": [
@@ -237,6 +243,7 @@ def _objects_mapping() -> dict:
             "number_of_replicas": 0,
             "index.knn":          True,
             "refresh_interval":   "30s",
+            "index.mapping.total_fields.limit": 2000,
         },
         "mappings": {
             "dynamic_templates": [
@@ -552,10 +559,71 @@ def main(
     region: str,
     chunks_index: str,
     objects_index: str,
+    ci_index: str,
     yes: bool,
     chunks_shards: int,
+    ci_only: bool,
 ) -> None:
     client = _get_os(endpoint, region)
+
+    if ci_only:
+        print(f"\\n{'─' * 70}")
+        print(f"  CI-only OpenSearch recreation: {endpoint}")
+        print(f"{'─' * 70}\\n")
+
+        ci_exists = client.indices.exists(index=ci_index)
+        ci_count = client.count(index=ci_index)["count"] if ci_exists else 0
+        print(f"Existing {ci_index} documents: {ci_count:,}")
+
+        if not yes:
+            answer = input(
+                f"Delete and recreate '{ci_index}' ONLY? "
+                f"'{chunks_index}' and '{objects_index}' will NOT be touched. [yes/N] "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted.")
+                sys.exit(0)
+
+        if ci_exists:
+            print(f"  Deleting {ci_index} …", end=" ", flush=True)
+            client.indices.delete(index=ci_index)
+            print("deleted")
+        else:
+            print(f"  {ci_index} does not exist — skipping delete")
+
+        print(f"  Creating {ci_index} …", end=" ", flush=True)
+        resp = client.indices.create(index=ci_index, body=CI_OBJECTS_MAPPING)
+        print(f"ok  (acknowledged={resp.get('acknowledged')})")
+
+        ci_mapping = client.indices.get_mapping(index=ci_index)[ci_index]["mappings"]
+        ci_props = ci_mapping.get("properties", {})
+        ci_sparse = ci_props.get("sparse_vector_json", {})
+        ci_dense = ci_props.get("dense_vector", {})
+        ci_templates = ci_mapping.get("dynamic_templates", [])
+
+        ci_ok = (
+            ci_props.get("ci_id", {}).get("type") == "keyword"
+            and ci_dense.get("type") == "knn_vector"
+            and ci_dense.get("dimension") == 1024
+            and ci_sparse == {"type": "keyword", "index": False}
+            and "sparse_vector" not in ci_props
+            and any("strings_as_keyword" in t for t in ci_templates)
+        )
+
+        print(
+            f"  [{'✓' if ci_ok else '✗'}] {ci_index}  "
+            f"ci_id={ci_props.get('ci_id', {}).get('type', 'MISSING')}  "
+            f"dense_vector={ci_dense.get('type', 'MISSING')}  "
+            f"sparse_vector_json="
+            f"{'keyword/index:false' if ci_sparse == {'type': 'keyword', 'index': False} else 'MISSING/WRONG'}"
+        )
+
+        if not ci_ok:
+            raise RuntimeError("ci-objects mapping verification failed")
+
+        print(f"\\nDone. ONLY '{ci_index}' was deleted and recreated.")
+        print(f"'{chunks_index}' and '{objects_index}' were not modified.")
+        return
 
     # ── 1. Show what is currently in both indexes ─────────────────────────────
     print(f"\n{'─' * 70}")
@@ -564,8 +632,9 @@ def main(
 
     chunks_counts  = _doc_counts_per_document(client, chunks_index)
     objects_counts = _doc_counts_per_document(client, objects_index)
+    ci_count = client.count(index=ci_index)["count"] if client.indices.exists(index=ci_index) else 0
 
-    # Merge all document_ids seen in either index
+    # Merge all document_ids seen in either document index.
     all_doc_ids = sorted(set(chunks_counts) | set(objects_counts))
 
     if all_doc_ids:
@@ -582,14 +651,15 @@ def main(
             f"{sum(objects_counts.values()):>9,}"
         )
     else:
-        print("Both indexes are empty — nothing to lose.")
+        print("Both document indexes are empty — nothing to lose.")
 
+    print(f"Existing {ci_index} documents: {ci_count:,}")
     print()
 
     # ── 2. Confirm ────────────────────────────────────────────────────────────
     if not yes:
         answer = input(
-            f"Delete and recreate '{chunks_index}' and '{objects_index}'? "
+            f"Delete and recreate '{ci_index}', '{chunks_index}' and '{objects_index}'? "
             f"All data above will be PERMANENTLY deleted. [yes/N] "
         ).strip().lower()
         if answer != "yes":
@@ -597,7 +667,7 @@ def main(
             sys.exit(0)
 
     # ── 3. Delete indexes ─────────────────────────────────────────────────────
-    for idx in (chunks_index, objects_index):
+    for idx in (ci_index, chunks_index, objects_index):
         if client.indices.exists(index=idx):
             print(f"  Deleting {idx} …", end=" ", flush=True)
             client.indices.delete(index=idx)
@@ -606,6 +676,10 @@ def main(
             print(f"  {idx} does not exist — skipping delete")
 
     # ── 4. Recreate with explicit mappings ────────────────────────────────────
+    print(f"\n  Creating {ci_index} …", end=" ", flush=True)
+    resp = client.indices.create(index=ci_index, body=CI_OBJECTS_MAPPING)
+    print(f"ok  (acknowledged={resp.get('acknowledged')})")
+
     print(f"\n  Creating {chunks_index} …", end=" ", flush=True)
     resp = client.indices.create(index=chunks_index, body=_chunks_mapping(chunks_shards))
     print(f"ok  (acknowledged={resp.get('acknowledged')})")
@@ -616,16 +690,47 @@ def main(
 
     # ── 5. Verify new mappings ────────────────────────────────────────────────
     print()
+
+    ci_mapping = client.indices.get_mapping(index=ci_index)[ci_index]["mappings"]
+    ci_props = ci_mapping.get("properties", {})
+    ci_sparse = ci_props.get("sparse_vector_json", {})
+    ci_dense = ci_props.get("dense_vector", {})
+    ci_templates = ci_mapping.get("dynamic_templates", [])
+
+    ci_ok = (
+        ci_props.get("ci_id", {}).get("type") == "keyword"
+        and ci_dense.get("type") == "knn_vector"
+        and ci_dense.get("dimension") == 1024
+        and ci_sparse == {"type": "keyword", "index": False}
+        and not any(
+            key.startswith("sparse_vector") and key != "sparse_vector_json"
+            for key in ci_props
+        )
+        and any("strings_as_keyword" in t for t in ci_templates)
+    )
+
+    print(
+        f"  [{'✓' if ci_ok else '✗'}] {ci_index}  "
+        f"ci_id={ci_props.get('ci_id', {}).get('type', 'MISSING')}  "
+        f"dense_vector={ci_dense.get('type', 'MISSING')}  "
+        f"sparse_vector_json="
+        f"{'keyword/index:false' if ci_sparse == {'type': 'keyword', 'index': False} else 'MISSING/WRONG'}"
+    )
+
     for idx in (chunks_index, objects_index):
-        mapping   = client.indices.get_mapping(index=idx)
+        mapping = client.indices.get_mapping(index=idx)
         doc_id_type = mapping[idx]["mappings"]["properties"]["document_id"]["type"]
-        templates   = mapping[idx]["mappings"].get("dynamic_templates", [])
+        templates = mapping[idx]["mappings"].get("dynamic_templates", [])
         has_template = any(
             "strings_as_keyword" in t for t in templates
         )
         props = mapping[idx]["mappings"].get("properties", {})
         geometry = props.get("geometry", {})
-        geometry_props = geometry.get("properties", {}) if geometry.get("type") == "object" else {}
+        geometry_props = (
+            geometry.get("properties", {})
+            if geometry.get("type") == "object"
+            else {}
+        )
         required_geometry = {
             "geometry_source",
             "geometry_precision",
@@ -727,15 +832,15 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Drop and recreate document-chunks and semantic-objects indexes."
+        description="Drop and recreate OpenSearch indexes; use --ci-only for CI only."
     )
     parser.add_argument(
         "--yes", action="store_true",
         help="Skip the confirmation prompt",
     )
     parser.add_argument(
-        "--region", default="eu-west-1",
-        help="AWS region (default: eu-west-1)",
+        "--region", default="us-east-1",
+        help="AWS region (default: us-east-1)",
     )
     parser.add_argument(
         "--chunks-index", default="document-chunks",
@@ -746,6 +851,15 @@ if __name__ == "__main__":
         help="Name of the objects index (default: semantic-objects)",
     )
     parser.add_argument(
+        "--ci-index", default="ci-objects",
+        help="Name of the CI index (default: ci-objects)",
+    )
+    parser.add_argument(
+        "--ci-only",
+        action="store_true",
+        help="Delete and recreate only ci-objects; never touch document indexes",
+    )
+    parser.add_argument(
         "--chunks-shards", type=int, default=5,
         help="Number of shards for document-chunks (default: 5)",
     )
@@ -753,7 +867,7 @@ if __name__ == "__main__":
 
     endpoint = os.environ.get(
         "OPENSEARCH_ENDPOINT",
-        "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com",
+        "search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com",
     )
     if not endpoint:
         print("ERROR: OPENSEARCH_ENDPOINT env var not set", file=sys.stderr)
@@ -764,6 +878,8 @@ if __name__ == "__main__":
         region        = args.region,
         chunks_index  = args.chunks_index,
         objects_index = args.objects_index,
+        ci_index      = args.ci_index,
         yes           = args.yes,
         chunks_shards = args.chunks_shards,
+        ci_only       = args.ci_only,
     )
