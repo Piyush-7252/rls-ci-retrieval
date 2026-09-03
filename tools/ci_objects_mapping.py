@@ -49,7 +49,7 @@ CI_OBJECTS_MAPPING = {
             "known_ci": {"type": "keyword"},
             "category": {"type": "keyword"},
             "status": {"type": "keyword"},
-            "assets": {"type": "keyword"},
+            "assets": {"type": "object", "dynamic": False},
 
             # NLP
             "normalized_text": {
