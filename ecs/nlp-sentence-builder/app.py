@@ -38,7 +38,7 @@ def _args() -> argparse.Namespace:
     p.add_argument("--input-bucket", default=os.getenv("INPUT_BUCKET", ""))
     p.add_argument("--source-s3-key", default=os.getenv("SOURCE_S3_KEY", ""))
     p.add_argument("--queue-url", default=os.getenv("QUEUE_URL", ""))
-    p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", "rls-file-bucket-eu"))
+    p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", ""))
     p.add_argument("--payload-prefix", default=os.getenv("PAYLOAD_PREFIX", "nlp-sentence-builder-payloads"))
     p.add_argument("--tenant-id", default=os.getenv("TENANT_ID", ""))
     p.add_argument("--tenant-name", default=os.getenv("TENANT_NAME", ""))
