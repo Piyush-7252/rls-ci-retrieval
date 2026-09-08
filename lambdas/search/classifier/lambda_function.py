@@ -56,6 +56,7 @@ _STRATEGIES: dict[str, list[str]] = {
     "ODDS_RATIO":           ["numeric", "literal"],
     "NUMERIC_PERCENTAGE":   ["numeric", "literal"],
     "MEDIAN":               ["numeric", "literal"],
+    "TEMPORAL_CONSTRAINT":  ["numeric", "literal"],  # Temporal patterns like "26 weeks" → numeric retriever
     # Legacy coarse types — kept for backward compatibility
     "NUMERIC":              ["numeric", "literal"],
     "STATISTICAL":          ["numeric", "literal"],
@@ -193,38 +194,61 @@ _PERSON_RE = re.compile(
 # a number is always better served by the numeric retriever than by semantic
 # search, regardless of what human-assigned category label it carries.
 
+# Enhanced patterns to handle common syntax variations
 _SAMPLE_SIZE_NUM_RE = re.compile(
-    r'\b[nN]\s*=\s*\d+'
-    r'|\b\d+\s+(?:subjects?|patients?|participants?|individuals?|volunteers?)\b'
-    r'|\(\d+\s+(?:subjects?|patients?)\s+in\b',
+    r'\b[nN]\s*[=:]?\s*\(?\d+\)?'                           # n=62, n=(62), n(62), n:62, N = 62
+    r'|\b[nN]\s*[=]?\s*\(?\d+\)?'                            # n 62, n(62)
+    r'|\b\d+\s+(?:subjects?|patients?|participants?|individuals?|volunteers?)\b'  # 62 subjects
+    r'|\b(?:each\s+(?:of|in)\s+\d+\s+(?:groups?|cohorts?|arms?)|in\s+each(?:\s+of)?\s+\d+\s+groups?)\b'  # each of 3 groups
+    r'|\(\d+\s+(?:subjects?|patients?)\s+in\b',            # (62 subjects in
     re.I,
 )
+
 _CONFIDENCE_INTERVAL_NUM_RE = re.compile(
     r'\b\d+\s*%\s+CI\b',
     re.I,
 )
+
 _P_VALUE_NUM_RE = re.compile(
     r'\bp\s*[<>=\u2264\u2265]\s*0\.\d+'
     r'|\bp\s*-?\s*value\b',
     re.I,
 )
+
 _HR_NUM_RE = re.compile(
     r'\bHR\s*=\s*[\d.]+'
     r'|\bhazard\s+ratio\b',
     re.I,
 )
+
 _OR_NUM_RE = re.compile(
     r'\bOR\s*=\s*[\d.]+'
     r'|\bodds\s+ratio\b',
     re.I,
 )
+
 # Isolated percentage: entire short CI is just a percentage value
 _PURE_PERCENTAGE_NUM_RE  = re.compile(r'^\s*\d+(?:\.\d+)?%\s*$')
+
 # Comparative percentages: "30% of placebo ... 67%", "from X% to Y%"
 _COMP_PERCENTAGE_NUM_RE = re.compile(
     r'\b\d+(?:\.\d+)?%\s+of\b'
     r'|\bfrom\s+\d+(?:\.\d+)?%\s+to\s+\d+(?:\.\d+)?%\b'
     r'|\bcompared\s+to\s+\d+(?:\.\d+)?%\b',
+    re.I,
+)
+
+# Temporal patterns: ranges, durations, timepoints, cycles
+# Covers: "26 weeks", "26-week", "26 weeks of follow-up", "within 26 weeks",
+#         "Week 26", "at week 26", "C3D1", "26 days", "26 months", etc.
+_TEMPORAL_NUM_RE = re.compile(
+    r'\b(?:within|for|over|during|after|at|week|week|day|days?|month|months|year|years?|cycle|cycles?|timepoint|C\d+D\d+)\s+\d{1,3}(?:\s+(?:weeks?|days?|months?|years?|cycles?|timepoints?))?\b'  # temporal context + 1-3 digit number
+    r'|\b\d{1,3}\s+(?:weeks?|days?|months?|years?|cycles?|timepoints?)(?:\s+(?:of|post|follow-up|post-baseline|assessment|window|intervention|treatment|visits?))?\b'  # 1-3 digit number + temporal unit
+    r'|\b(?:Week|Day|Month|Cycle)\s+\d{1,3}\b'             # Week 26, Day 1, Month 3, Cycle 2 (1-3 digits, excludes years like 2023)
+    r'|\bC\d+D\d+\b'                                         # C3D1 (Cycle 3 Day 1)
+    r'|\b\d{1,2}[-–]\s*(?:week|day|month)\s+(?:study|visit|follow-up|assessment|treatment)\b'  # 1-2 digit 26-week study, 52-week follow-up (excludes years)
+    r'|\b\d{1,2}[-–]week(?:\s+|-)\w*\b'                    # 26-week, 52-week-old, etc. (1-2 digits)
+    r'|\bfollow[-–]up\s+(?:to|at)?\s+(?:week|day|month)\s+\d{1,3}\b',  # follow-up at week 26, follow-up to 52 weeks
     re.I,
 )
 
@@ -240,7 +264,8 @@ def _classify_numeric(text: str) -> str | None:
         HAZARD_RATIO         — "HR = 0.82"
         ODDS_RATIO           — "OR = 1.23"
         NUMERIC_PERCENTAGE   — "73%" or "30% of placebo ... 67%"
-        NUMERIC_SAMPLE_SIZE  — "n = 8", "254 subjects"
+        NUMERIC_SAMPLE_SIZE  — "n = 8", "254 subjects", "n=(62)", "100 in each of 3 groups"
+        TEMPORAL_CONSTRAINT  — "26 weeks", "within 26 weeks", "Week 26", "C3D1", etc.
         None                 — not a numeric CI
 
     Takes precedence over the category-map so that a CI labelled
@@ -250,6 +275,9 @@ def _classify_numeric(text: str) -> str | None:
     Each subtype maps to a different statistical_identity.type value, which
     the numeric retriever uses as a filter clause to eliminate false positives
     (e.g. \"dose level 8\" cannot match a \"sample_size\" query).
+
+    Temporal constraints are also routed to numeric retriever to leverage the
+    temporal_context field for matching.
     """
     if _CONFIDENCE_INTERVAL_NUM_RE.search(text):
         return "CONFIDENCE_INTERVAL"
@@ -263,6 +291,8 @@ def _classify_numeric(text: str) -> str | None:
         return "NUMERIC_PERCENTAGE"
     if _SAMPLE_SIZE_NUM_RE.search(text):
         return "NUMERIC_SAMPLE_SIZE"
+    if _TEMPORAL_NUM_RE.search(text):
+        return "TEMPORAL_CONSTRAINT"
     return None
 
 
