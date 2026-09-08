@@ -155,26 +155,8 @@ def _literal_search(ci_text: str, norm_text: str, document_id: str | None, tenan
         "_source": ["chunk_id", "document_id", "page_start", "page_end", "raw_text"],
     }
 
-    try:
-        resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
-        return _parse_hits(resp, ci_text)
-    except Exception as exc:
-        import json
-        logger.error(
-            "[Literal Retriever] search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "ci_text_len": len(ci_text),
-                "norm_text_len": len(norm_text),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
-        return []
+    resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
+    return _parse_hits(resp, ci_text)
 
 
 def _parse_hits(resp: dict, ci_text: str = "") -> list[dict]:

@@ -106,25 +106,8 @@ def _ner_search(entity_texts: list[str], document_id: str | None, tenant_id: str
                     "entities"],
     }
 
-    try:
-        resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
-        return _parse_hits(resp, entity_texts)
-    except Exception as exc:
-        import json
-        logger.error(
-            "[NER Retriever] search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "entity_texts_count": len(entity_texts),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
-        return []
+    resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
+    return _parse_hits(resp, entity_texts)
 
 
 def _parse_hits(resp: dict, entity_texts: list[str]) -> list[dict]:

@@ -46,7 +46,6 @@ import logging
 import os
 import re
 from typing import Any
-import json
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -131,17 +130,7 @@ def _process(req: dict) -> dict:
                 "(document may predate statistical_identity indexing) — falling back"
             )
         except Exception as exc:
-            logger.error(
-                "[Numeric Retriever] structured filter FAILED",
-                exc_info=True,
-                extra={
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "document_id": document_id,
-                    "ci_text_len": len(ci_text),
-                    "query_size": len(json.dumps(body)) if body else 0,
-                }
-            )
+            logger.warning("[Numeric Retriever] structured filter failed: %s — falling back", exc)
 
     # Tier 2: token must query (fallback for un-reindexed documents)
     body = _build_token_query(si, ci_text, document_id)
@@ -156,17 +145,7 @@ def _process(req: dict) -> dict:
         logger.info("[Numeric Retriever] token fallback: %d hits", len(hits))
         return {"retriever": "numeric", "hits": hits}
     except Exception as exc:
-        logger.error(
-            "[Numeric Retriever] token fallback FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "ci_text_len": len(ci_text),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
+        logger.warning("[Numeric Retriever] token fallback failed: %s", exc)
         return {"retriever": "numeric", "hits": []}
 
 

@@ -210,23 +210,10 @@ def _fact_search(
     body["size"] = k + TIE_BUFFER
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
-        return _parse_hits(resp)
     except Exception as exc:
-        import json
-        logger.error(
-            "[Fact Retriever] fact search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "ci_facts_count": len(ci_facts),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
+        logger.warning("[Fact Retriever] fact search failed: %s", exc)
         return []
+    return _parse_hits(resp)
 
 
 def _build_fact_query(
@@ -302,23 +289,10 @@ def _relation_search(ci_relations: list[dict], document_id: str | None, tenant_i
     body["size"] = k + TIE_BUFFER
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
-        return _parse_hits(resp)
     except Exception as exc:
-        import json
-        logger.error(
-            "[Fact Retriever] relation search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "ci_relations_count": len(ci_relations),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
+        logger.warning("[Fact Retriever] relation search failed: %s", exc)
         return []
+    return _parse_hits(resp)
 
 
 def _build_relation_query(ci_relations: list[dict], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None) -> dict | None:

@@ -103,25 +103,7 @@ def _regex_search(
         "_source": ["chunk_id", "document_id", "page_start", "page_end", "raw_text"],
     }
 
-    try:
-        resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
-    except Exception as exc:
-        import json
-        logger.error(
-            "[Regex Retriever] search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "patterns_count": len(patterns),
-                "query_size": len(json.dumps(body)) if body else 0,
-            }
-        )
-        return []
-    
+    resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
     hits: list[dict] = []
 
     for h in resp.get("hits", {}).get("hits", []):

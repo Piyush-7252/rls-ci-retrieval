@@ -208,22 +208,7 @@ def _bm25_search_objects(norm_text: str, tokens: list[str], document_id: str | N
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
-        logger.error(
-            "[BM25 Retriever] semantic-objects search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "fetch_size": fetch_size,
-                "query_text_len": len(query_text),
-                "norm_text_len": len(norm_text),
-                "token_count": len(tokens),
-                "query_fields": body.get("query", {}).get("bool", {}).get("should", []),
-            }
-        )
+        logger.warning("[BM25 Retriever] semantic-objects search failed: %s", exc)
         return []
 
     return _parse_object_hits(resp)
@@ -269,22 +254,7 @@ def _bm25_search_chunks(norm_text: str, tokens: list[str], document_id: str | No
     try:
         resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
     except Exception as exc:
-        logger.error(
-            "[BM25 Retriever] document-chunks search FAILED",
-            exc_info=True,
-            extra={
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "document_id": document_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "fetch_size": fetch_size,
-                "query_text_len": len(query_text),
-                "norm_text_len": len(norm_text),
-                "token_count": len(tokens),
-                "query_fields": body.get("query", {}).get("bool", {}).get("should", []),
-            }
-        )
+        logger.warning("[BM25 Retriever] document-chunks search failed: %s", exc)
         return []
 
     return _parse_chunk_hits(resp)
