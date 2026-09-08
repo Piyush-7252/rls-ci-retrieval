@@ -715,7 +715,7 @@ def _save_results_debug_s3(all_results: list[dict], event, wall_time: float = 0.
             ),
             "object_type_stats": _object_type_stats(all_results),
         },
-        "results": [_clean_result(r) for r in all_results],
+        "results": [_clean_result(r, debug=True) for r in all_results],
     }
 
     # ── Timing + cost summary ─────────────────────────────────────────────────
@@ -1136,7 +1136,7 @@ def _full_candidate_record(v: dict) -> dict:
     }
 
 
-def _clean_result(result: dict) -> dict:
+def _clean_result(result: dict,debug: bool = False) -> dict:
     """Strip embedding vectors, raw context blobs — keep only what matters."""
     ci = result.get("ci", {})
 
@@ -1223,11 +1223,13 @@ def _clean_result(result: dict) -> dict:
         # granularity for the CSV exporter and for manual review.
         # Replaces the separate rejected_hits / skipped_hits split for
         # downstream tools; both are kept below for backward compatibility.
-        # "candidates": [_full_candidate_record(v) for v in result.get("verified_candidates", [])],
         "final_hits":       [_hit_with_provenance(h) for h in result.get("final_hits", [])],
-        # "rejected_hits":    rejected_hits,
-        # "skipped_hits":     skipped_hits,
-        # "ce_histogram":     result.get("ce_histogram"),
+        **({"candidates": [_full_candidate_record(v) for v in result.get("verified_candidates", [])],
+            "rejected_hits":    rejected_hits,
+            "skipped_hits":     skipped_hits,
+            "ce_histogram":     result.get("ce_histogram"),
+        } if debug else {}),
+
         "timings":          result.get("timings", {}),
         "highlight_mode":   result.get("highlight_mode", "span"),
     }
