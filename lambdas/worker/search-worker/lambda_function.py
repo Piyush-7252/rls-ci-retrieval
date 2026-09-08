@@ -1280,71 +1280,18 @@ def _strip_vectors(obj: dict | list | str | int | float | bool | None) -> dict |
 
 
 def _build_result(req: dict) -> dict:
-    """Trim the request to a serialisable result dict (simple return to orchestrator).
+    """Return full detailed results with ALL fields (entities, facts, candidates, indexed_object).
     
-    MINIMAL PAYLOAD: Only return essential result metadata to Orchestrator.
-    Full details (entities, facts, etc.) are in S3 debug logs.
-    This DRAMATICALLY reduces payload size to stay under 6MB Lambda limit.
-    
-    The Orchestrator will enrich these results with full CI metadata for S3 output.
+    Vectors are stripped aggressively to keep payload under 6MB Lambda limit while
+    preserving all detailed clinical data needed for review and analysis.
     """
-    final_hits = req.get("final_hits", [])
+    # Return the complete cleaned result with all details
+    result = _clean_result(req)
     
-    # Minimize each hit: only return essential fields, strip large metadata
-    minimal_hits = []
-    for hit in final_hits:
-        minimal_hit = {
-            # Core ID/type info
-            "retrieval_object_id": hit.get("retrieval_object_id"),
-            "retrieval_object_type": hit.get("retrieval_object_type"),
-            "retrieved_type": hit.get("retrieved_type"),
-            "retrieval_section": hit.get("retrieval_section"),
-            # Retrieval scoring
-            "agg_score": hit.get("agg_score"),
-            "score_breakdown": hit.get("score_breakdown"),
-            "matched_distance": hit.get("matched_distance"),
-            "distance_ratio": hit.get("distance_ratio"),
-            # Retrieval context
-            "retrieval_origin": hit.get("retrieval_origin"),
-            "literal_match_count": hit.get("literal_match_count"),
-            "context_strategy": hit.get("context_strategy"),
-            "selection_reason": hit.get("selection_reason"),
-            # Pagination
-            "chunk_id": hit.get("chunk_id"),
-            "retrieval_chunk_id": hit.get("retrieval_chunk_id"),
-            # Verdict fields (CRITICAL for the pipeline)
-            "verdict": hit.get("verdict"),
-            "verdict_reason": hit.get("verdict_reason"),
-            "verdict_type": hit.get("verdict_type"),
-            "candidate_rank": hit.get("candidate_rank"),
-            "final_summary": hit.get("final_summary"),
-            # Location metadata (useful for UI without being too large)
-            "retrieval_heading_path": hit.get("retrieval_heading_path"),
-        }
-        
-        # Include minimal matched_object with just ID/text/geometry (no entities/facts)
-        matched_obj = hit.get("matched_object")
-        if matched_obj:
-            minimal_hit["matched_object"] = {
-                "object_id": matched_obj.get("object_id"),
-                "type": matched_obj.get("type"),
-                "text": matched_obj.get("text"),
-                "paragraph_text": matched_obj.get("paragraph_text"),
-                "geometry": matched_obj.get("geometry"),
-                "page": matched_obj.get("page"),
-                "bbox": matched_obj.get("bbox"),
-                "section_category": matched_obj.get("section_category"),
-            }
-        
-        # Remove all None values to reduce payload
-        minimal_hit = {k: v for k, v in minimal_hit.items() if v is not None}
-        minimal_hits.append(_strip_vectors(minimal_hit))
+    # Aggressively strip vectors from entire result to reduce payload size
+    result = _strip_vectors(result)
     
-    return {
-        "ci_id":          req["ci"].get("id"),
-        "search_id":      req.get("search_id"),
-        "final_hits":     minimal_hits,
-    }
+    return result
 
 
 def _upload_debug_json_to_s3(debug_json: dict, search_id: str, batch_idx: int, document_id: str, tenant_name: str) -> str:
