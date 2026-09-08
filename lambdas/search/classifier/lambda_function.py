@@ -55,8 +55,11 @@ _STRATEGIES: dict[str, list[str]] = {
     "HAZARD_RATIO":         ["numeric", "literal"],
     "ODDS_RATIO":           ["numeric", "literal"],
     "NUMERIC_PERCENTAGE":   ["numeric", "literal"],
+    "NUMERIC_RANGE":        ["numeric", "literal"],  # MMSE 8–22, age ranges, CI ranges
     "MEDIAN":               ["numeric", "literal"],
     "TEMPORAL_CONSTRAINT":  ["numeric", "literal"],  # Temporal patterns like "26 weeks" → numeric retriever
+    "DOSAGE":               ["numeric", "literal"],  # Dose patterns like "0.4 mg/kg"
+    "AGE_DEMOGRAPHIC":      ["numeric", "literal"],  # Age ranges like "≥18 years"
     # Legacy coarse types — kept for backward compatibility
     "NUMERIC":              ["numeric", "literal"],
     "STATISTICAL":          ["numeric", "literal"],
@@ -194,13 +197,15 @@ _PERSON_RE = re.compile(
 # a number is always better served by the numeric retriever than by semantic
 # search, regardless of what human-assigned category label it carries.
 
-# Enhanced patterns to handle common syntax variations
+# Enhanced sample size patterns: n=62, n=(62), 62 patients, 100 in each of 3 groups, 62/73, 62(84.9%), etc.
 _SAMPLE_SIZE_NUM_RE = re.compile(
     r'\b[nN]\s*[=:]?\s*\(?\d+\)?'                           # n=62, n=(62), n(62), n:62, N = 62
     r'|\b[nN]\s*[=]?\s*\(?\d+\)?'                            # n 62, n(62)
     r'|\b\d+\s+(?:subjects?|patients?|participants?|individuals?|volunteers?)\b'  # 62 subjects
     r'|\b(?:each\s+(?:of|in)\s+\d+\s+(?:groups?|cohorts?|arms?)|in\s+each(?:\s+of)?\s+\d+\s+groups?)\b'  # each of 3 groups
-    r'|\(\d+\s+(?:subjects?|patients?)\s+in\b',            # (62 subjects in
+    r'|\(\d+\s+(?:subjects?|patients?)\s+in\b'            # (62 subjects in
+    r'|\b\d+\s*/\s*\d+\s+(?:subjects?|patients?|participants?)\b'  # 62/73 patients
+    r'|\b\d+\s*\(\d+(?:\.\d+)?%\)\b',                        # 62 (84.9%), 11 (52.4%)
     re.I,
 )
 
@@ -230,24 +235,52 @@ _OR_NUM_RE = re.compile(
 # Isolated percentage: entire short CI is just a percentage value
 _PURE_PERCENTAGE_NUM_RE  = re.compile(r'^\s*\d+(?:\.\d+)?%\s*$')
 
-# Comparative percentages: "30% of placebo ... 67%", "from X% to Y%"
+# Enhanced percentage patterns: ORR 73%, response rate 73%, 73% ORR, ORR was 73%, etc.
 _COMP_PERCENTAGE_NUM_RE = re.compile(
     r'\b\d+(?:\.\d+)?%\s+of\b'
     r'|\bfrom\s+\d+(?:\.\d+)?%\s+to\s+\d+(?:\.\d+)?%\b'
-    r'|\bcompared\s+to\s+\d+(?:\.\d+)?%\b',
+    r'|\bcompared\s+to\s+\d+(?:\.\d+)?%\b'
+    r'|\b(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|progression\s*[-–]free\s+survival)\s+(?:of\s+)?\d+(?:\.\d+)?%\b'  # metric FIRST
+    r'|\d+(?:\.\d+)?%\s+(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|progression\s*[-–]free\s+survival)\b',  # percentage FIRST
+    re.I,
+)
+
+# NEW: Numeric range patterns (MMSE 8–22, age 65–75, 95% CI 27–48 days)
+_NUMERIC_RANGE_RE = re.compile(
+    r'\b(?:MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\s+(?:of\s+)?(\d+)(?:\s*[-–]\s*|\s+to\s+)(\d+)\b'  # metric 8-22 or 8 to 22
+    r'|\b(\d+)(?:\s*[-–]\s*|\s+to\s+)(\d+)\s+(?:years?|years?\s+old|days?|weeks?|months?|points?|scores?)\b'  # 8-22 score/points
+    r'|\b(\d+)%\s*[-–]\s*(\d+)%\b',                          # 20-30%
+    re.I,
+)
+
+# NEW: Dosage patterns (0.4 mg/kg, 5 mg, 10 mg twice daily, 40 mg/m2, 1.5 mg/kg)
+_DOSAGE_RE = re.compile(
+    r'\b(?:\d+(?:\.\d+)?)\s*(?:mg(?:/kg|/m2|/m²)?|µg|ug|ng|g|unit?s?|IU)\b'  # dose + unit
+    r'|\b(?:\d+(?:\.\d+)?)\s*(?:mg|µg|ug|ng|g)\s*(?:twice\s+daily|once\s+daily|three\s+times|per\s+day|BID|QID|TID|daily|weekly|monthly)\b',  # dose + frequency
+    re.I,
+)
+
+# NEW: Age/demographic patterns (age ≥ 18 years, 18 years or older, aged 18-65, pediatric < 18)
+_AGE_DEMOGRAPHIC_RE = re.compile(
+    r'\bage\s*[≥≤><≠]\s*\d+\s+years?\b'
+    r'|\b\d+\s+years?\s+(?:old|or\s+older|or\s+younger)\b'
+    r'|\baged?\s+\d+(?:\s*[-–]\s*\d+)?\s+years?\b'
+    r'|\b(?:pediatric|adult|geriatric|elderly)\s+(?:patients?|subjects?)\s+[≥≤><]\s*\d+\s+years?\b'
+    r'|\b(?:\d+\s+)?years?\s+of\s+age\b',
     re.I,
 )
 
 # Temporal patterns: ranges, durations, timepoints, cycles
+# Enhanced: excludes 4-digit years (2010, 2023) which are metadata not temporal constraints
 # Covers: "26 weeks", "26-week", "26 weeks of follow-up", "within 26 weeks",
 #         "Week 26", "at week 26", "C3D1", "26 days", "26 months", etc.
 _TEMPORAL_NUM_RE = re.compile(
-    r'\b(?:within|for|over|during|after|at|week|week|day|days?|month|months|year|years?|cycle|cycles?|timepoint|C\d+D\d+)\s+\d{1,3}(?:\s+(?:weeks?|days?|months?|years?|cycles?|timepoints?))?\b'  # temporal context + 1-3 digit number
-    r'|\b\d{1,3}\s+(?:weeks?|days?|months?|years?|cycles?|timepoints?)(?:\s+(?:of|post|follow-up|post-baseline|assessment|window|intervention|treatment|visits?))?\b'  # 1-3 digit number + temporal unit
+    r'\b(?:within|for|over|during|after|at|week|week|day|days?|month|months|cycle|cycles?|timepoint)\s+\d{1,3}(?:\s+(?:weeks?|days?|months?|cycles?|timepoints?))?\b'  # temporal context + 1-3 digit number
+    r'|\b\d{1,3}\s+(?:weeks?|days?|months?|cycles?|timepoints?)(?:\s+(?:of|post|follow-up|post-baseline|assessment|window|intervention|treatment|visits?))?\b'  # 1-3 digit number + temporal unit
     r'|\b(?:Week|Day|Month|Cycle)\s+\d{1,3}\b'             # Week 26, Day 1, Month 3, Cycle 2 (1-3 digits, excludes years like 2023)
     r'|\bC\d+D\d+\b'                                         # C3D1 (Cycle 3 Day 1)
-    r'|\b\d{1,2}[-–]\s*(?:week|day|month)\s+(?:study|visit|follow-up|assessment|treatment)\b'  # 1-2 digit 26-week study, 52-week follow-up (excludes years)
-    r'|\b\d{1,2}[-–]week(?:\s+|-)\w*\b'                    # 26-week, 52-week-old, etc. (1-2 digits)
+    r'|\b\d{1,2}[-–]\s*(?:week|day|month)\s+(?:study|visit|follow-up|assessment|treatment)\b'  # 1-2 digit 26-week study, 52-week follow-up
+    r'|\b\d{1,2}[-–]week(?:\s+|-)\w*\b'                    # 26-week, 52-week-old, etc. (1-2 digits only)
     r'|\bfollow[-–]up\s+(?:to|at)?\s+(?:week|day|month)\s+\d{1,3}\b',  # follow-up at week 26, follow-up to 52 weeks
     re.I,
 )
@@ -263,9 +296,12 @@ def _classify_numeric(text: str) -> str | None:
         P_VALUE              — "p<0.0001"
         HAZARD_RATIO         — "HR = 0.82"
         ODDS_RATIO           — "OR = 1.23"
-        NUMERIC_PERCENTAGE   — "73%" or "30% of placebo ... 67%"
+        NUMERIC_PERCENTAGE   — "73%" or "ORR 73%"
+        NUMERIC_RANGE        — "MMSE 8–22", "age 65–75", "20–30%"
         NUMERIC_SAMPLE_SIZE  — "n = 8", "254 subjects", "n=(62)", "100 in each of 3 groups"
         TEMPORAL_CONSTRAINT  — "26 weeks", "within 26 weeks", "Week 26", "C3D1", etc.
+        DOSAGE               — "0.4 mg/kg", "5 mg", "10 mg twice daily"
+        AGE_DEMOGRAPHIC      — "age ≥ 18 years", "18 years or older"
         None                 — not a numeric CI
 
     Takes precedence over the category-map so that a CI labelled
@@ -279,6 +315,7 @@ def _classify_numeric(text: str) -> str | None:
     Temporal constraints are also routed to numeric retriever to leverage the
     temporal_context field for matching.
     """
+    # Priority order: most specific first
     if _CONFIDENCE_INTERVAL_NUM_RE.search(text):
         return "CONFIDENCE_INTERVAL"
     if _P_VALUE_NUM_RE.search(text):
@@ -287,6 +324,12 @@ def _classify_numeric(text: str) -> str | None:
         return "HAZARD_RATIO"
     if _OR_NUM_RE.search(text):
         return "ODDS_RATIO"
+    if _NUMERIC_RANGE_RE.search(text):
+        return "NUMERIC_RANGE"
+    if _DOSAGE_RE.search(text):
+        return "DOSAGE"
+    if _AGE_DEMOGRAPHIC_RE.search(text):
+        return "AGE_DEMOGRAPHIC"
     if _PURE_PERCENTAGE_NUM_RE.match(text) or _COMP_PERCENTAGE_NUM_RE.search(text):
         return "NUMERIC_PERCENTAGE"
     if _SAMPLE_SIZE_NUM_RE.search(text):
