@@ -324,8 +324,9 @@ def _extract_numeric_facts_from_text(text: str, ci_type: str) -> list[dict]:
             facts.append({"kind": "p_value", "value": m.group(2), "operator": operator})
 
     elif ci_type == "CONFIDENCE_INTERVAL":
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%\s*CI\b.{0,80}?(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)(\d+(?:\.\d+)?)", text, re.I|re.S):
-            facts.append({"kind": "confidence_interval", "level": float(m.group(1)), "lower": float(m.group(2)), "upper": float(m.group(3)), "operator": "="})
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%\s*CI\b.{0,80}?(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)(\d+(?:\.\d+)?)\s*(?:(days?|months?|years?|hours?|weeks?|seconds?|minutes?))?\b", text, re.I|re.S):
+            unit = m.group(4).lower() if m.group(4) else None
+            facts.append({"kind": "confidence_interval", "level": float(m.group(1)), "lower": float(m.group(2)), "upper": float(m.group(3)), "unit": unit, "operator": "="})
 
     elif ci_type == "NUMERIC_RANGE":
         for m in re.finditer(r"\b(MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\b\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*(?:[-–]|to)\s*(\d+(?:\.\d+)?)", text, re.I):
@@ -344,7 +345,7 @@ def _ci_numeric_facts(ci: dict, ci_type: str) -> list[dict]:
     if si.get("type") == "sample_size" and si.get("sample_size") is not None:
         return [{"kind": "sample_size", "value": si["sample_size"], "operator": si.get("operator", "=")}]
     if si.get("type") == "confidence_interval" and si.get("lower_ci") is not None and si.get("upper_ci") is not None:
-        return [{"kind": "confidence_interval", "lower": si["lower_ci"], "upper": si["upper_ci"], "operator": "="}]
+        return [{"kind": "confidence_interval", "lower": si["lower_ci"], "upper": si["upper_ci"], "unit": si.get("unit"), "operator": "="}]
     if si.get("type") == "percentage" and si.get("percentage_value") is not None:
         return [{"kind": "percentage", "value": si["percentage_value"], "operator": si.get("operator", "="), "metric": si.get("metric")}]
     for typ, key, kind in [("p_value","p_value","p_value"),("hazard_ratio","hazard_ratio","hazard_ratio"),("odds_ratio","odds_ratio","odds_ratio")]:
@@ -414,10 +415,19 @@ def _compare_numeric_constraint(ci: dict, candidate: dict, ci_type: str) -> tupl
         
         if kind == "confidence_interval":
             for f in same:
+                target_unit = target.get("unit")
+                fact_unit = f.get("unit")
+                # If both have units, they must match
+                if target_unit and fact_unit and target_unit != fact_unit:
+                    continue
                 if (_number_equal(f.get("lower"), target.get("lower")) and 
                     _number_equal(f.get("upper"), target.get("upper")) and
                     f.get("operator") == target.get("operator", "=")):
                     return "MATCH", "confidence interval bounds match"
+            # If any candidate has different unit than target, return UNKNOWN
+            for f in same:
+                if f.get("unit") and target.get("unit") and f.get("unit") != target.get("unit"):
+                    return "UNKNOWN", f"different CI units ({target.get('unit')} vs {f.get('unit')})"
             return "MISMATCH", "confidence interval bounds or operator differs"
         
         if kind == "score_range":
