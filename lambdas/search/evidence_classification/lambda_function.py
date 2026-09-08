@@ -64,8 +64,7 @@ def _classify_evidence(ci_text: str, hit: dict, doc_ctx: dict) -> dict:
         }
         resp      = br.invoke_model(
             modelId=VERIFIER_MODEL, contentType="application/json",
-            accept="application/json", body=json.dumps(body).encode(),
-            region_name=BEDROCK_REGION,
+            accept="application/json", body=json.dumps(body).encode()
         )
         import re as _re
         resp_body    = json.loads(resp["body"].read())
