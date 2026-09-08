@@ -3,8 +3,8 @@ Search Pipeline — Stage 6: LLM Verifier
 =========================================
 Asks Bedrock Claude for a YES/NO/MAYBE verdict on each top-ranked candidate.
 
-Prompt returns structured JSON: { "verdict": "YES"|"NO"|"MAYBE", "reason": str,
-                                   "confidence": float 0-1 }
+Prompt returns structured JSON with verdict, confidence, identity, and explicit
+constraint statuses for temporal/numeric requirements.
 
 Input:  re-ranked search request  (must have "ranked_candidates")
 Appends: "verified_candidates": list[VerifiedCandidate]
@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -84,8 +85,13 @@ _TEMPORAL_CONSTRAINT_PATTERNS = [
     r'\b(?:within|over|during|after|before|prior to|following|for|at)\s+'
     r'(?:approximately\s+)?\d+(?:\.\d+)?\s*'
     r'(?:days?|weeks?|months?|years?|hours?|minutes?)\b',
+    # Also recognize a bare duration such as "26 weeks".
+    r'\b(?:approximately\s+)?\d+(?:\.\d+)?\s*'
+    r'(?:days?|weeks?|months?|years?|hours?|minutes?)\b',
     r'\b(?:cycle\s*\d+\s*day\s*\d+|c\d+\s*d\d+)\b',
     r'\b(?:week|day|month|year)\s*\d+\b',
+    r'\b(?:baseline|screening|randomization|first\s+dose|last\s+dose|'
+    r'end\s+of\s+(?:treatment|study)|follow[\s-]?up)\b',
 ]
 
 _NUMERIC_CONSTRAINT_PATTERNS = [
@@ -97,31 +103,39 @@ _NUMERIC_CONSTRAINT_PATTERNS = [
     r'\bodds\s+ratio\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
     r'\bOR\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
     r'\b\d+(?:\.\d+)?\s*%\b',
+    r'\b(?:score|range|value)\s+(?:of\s+)?\d+(?:\.\d+)?\s*(?:to|-|–|—)\s*\d+(?:\.\d+)?\b',
 ]
 
+def _dedupe_constraints(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        normalized = re.sub(r'\s+', ' ', value or '').strip()
+        key = normalized.casefold()
+        if normalized and key not in seen:
+            seen.add(key)
+            result.append(normalized)
+    return result
+
+
 def _extract_explicit_constraints(ci_text: str) -> dict:
-    """Extract visible CI constraints so the LLM verifier cannot ignore them.
+    """Extract explicit CI constraints for LLM + deterministic guarding.
 
-    This is advisory only. It does not hard-filter candidates.
+    Explicit numeric/temporal constraints must be supported by the authoritative
+    candidate text, never by surrounding context.
     """
-    import re
-
     text = ci_text or ""
     temporal, numeric = [], []
 
     for pattern in _TEMPORAL_CONSTRAINT_PATTERNS:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            value = re.sub(r'\s+', ' ', match.group(0)).strip()
-            if value and value.lower() not in {x.lower() for x in temporal}:
-                temporal.append(value)
-
+        temporal.extend(m.group(0) for m in re.finditer(pattern, text, flags=re.IGNORECASE))
     for pattern in _NUMERIC_CONSTRAINT_PATTERNS:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            value = re.sub(r'\s+', ' ', match.group(0)).strip()
-            if value and value.lower() not in {x.lower() for x in numeric}:
-                numeric.append(value)
+        numeric.extend(m.group(0) for m in re.finditer(pattern, text, flags=re.IGNORECASE))
 
-    return {"temporal": temporal[:12], "numeric": numeric[:12]}
+    return {
+        "temporal": _dedupe_constraints(temporal)[:16],
+        "numeric": _dedupe_constraints(numeric)[:16],
+    }
 
 
 def _strict_constraint_instructions(ci_text: str) -> str:
@@ -130,34 +144,201 @@ def _strict_constraint_instructions(ci_text: str) -> str:
         return ""
 
     return (
-        "STRICT CONSTRAINT CHECK — MANDATORY FOR VERDICT:\n"
-        f"Temporal constraints explicitly present in CI: "
-        f"{json.dumps(constraints['temporal'], ensure_ascii=False)}\n"
-        f"Numeric/statistical constraints explicitly present in CI: "
-        f"{json.dumps(constraints['numeric'], ensure_ascii=False)}\n\n"
-        "Before deciding YES, check every explicit constraint against the "
-        "candidate excerpt.\n"
-        "1. A constraint that is contradicted => verdict MUST be NO.\n"
-        "2. A required constraint that is not mentioned or supported => "
-        "verdict MUST NOT be YES. Use NO when the missing constraint makes "
-        "the candidate incomplete; use MAYBE only when the excerpt is "
-        "genuinely insufficient to determine whether the constraint applies.\n"
-        "3. Semantic similarity does NOT satisfy a missing numeric or temporal "
-        "constraint.\n"
-        "4. Preserve the meaning of =, <, <=, >, >=, and explicit ranges.\n"
-        "5. For durations/timepoints, preserve units and meaning: 26 weeks "
-        "is not equivalent to an unspecified occurrence; Week 26 is not "
-        "automatically equivalent to within 26 weeks.\n"
-        "6. Do not invent a value that is not present in the candidate.\n\n"
-        "Critical example:\n"
-        'CI: "RPLS occurring within 26 weeks"\n'
-        'Candidate: "Reverse Posterior Leukoencephalopathy Syndrome (RPLS)"\n'
-        "=> NO: RPLS matches semantically, but the required 26-week "
-        "constraint is absent.\n"
-        'Candidate: "RPLS occurring within 26 weeks"\n'
-        "=> YES: both the RPLS identity and the required temporal constraint "
-        "are explicitly supported.\n\n"
+        "<strict_constraints>\n"
+        "These constraints are MANDATORY, not ranking hints.\n"
+        f"Temporal constraints: {json.dumps(constraints['temporal'], ensure_ascii=False)}\n"
+        f"Numeric/statistical constraints: {json.dumps(constraints['numeric'], ensure_ascii=False)}\n\n"
+        "SOURCE AUTHORITY RULE: CANDIDATE TEXT is the only authoritative evidence "
+        "for satisfying a constraint. SUPPORTING CONTEXT is context only. "
+        "A value or fact appearing only in SUPPORTING CONTEXT does NOT satisfy the CI.\n"
+        "For EVERY candidate, evaluate EVERY explicit constraint independently.\n"
+        "1. CONTRADICTED constraint => verdict MUST be NO.\n"
+        "2. Missing/unsupported required constraint in CANDIDATE TEXT => verdict MUST NOT be YES.\n"
+        "3. Use MAYBE only when CANDIDATE TEXT is genuinely insufficient to determine whether "
+        "the constraint is satisfied.\n"
+        "4. Semantic similarity NEVER substitutes for an explicit numeric or temporal constraint.\n"
+        "5. Preserve operators and ranges exactly: =, <, <=, >, >=, ≤, ≥.\n"
+        "6. Preserve temporal meaning and units. '26 weeks', 'within 26 weeks', "
+        "'after 26 weeks', and 'Week 26' are different constraints.\n"
+        "7. Never invent a value from SUPPORTING CONTEXT or document profile metadata.\n"
+        "8. A candidate that matches the entity but omits a required constraint is incomplete.\n\n"
+        "<examples>\n"
+        "<example>CI: 26 weeks; CANDIDATE TEXT: Participants were followed for 16 weeks; "
+        "SUPPORTING CONTEXT: another section says 26 weeks. Result: NO.</example>\n"
+        "<example>CI: 26 weeks; CANDIDATE TEXT: The assessment occurred at 26 weeks; "
+        "Result: YES if identity is also supported.</example>\n"
+        "<example>CI: RPLS occurring within 26 weeks; CANDIDATE TEXT: RPLS. "
+        "SUPPORTING CONTEXT: RPLS occurred within 26 weeks. Result: NO.</example>\n"
+        "<example>CI: RPLS occurring within 26 weeks; "
+        "CANDIDATE TEXT: RPLS occurring within 26 weeks. Result: YES.</example>\n"
+        "<example>CI: N=8 patients; CANDIDATE TEXT: 12 patients. Result: NO — contradicted.</example>\n"
+        "<example>CI: pValue >= 0.05; CANDIDATE TEXT: pValue = 0.06. Result: YES.</example>\n"
+        "<example>CI: pValue >= 0.05; CANDIDATE TEXT: pValue = 0.03. Result: NO.</example>\n"
+        "</examples>\n"
+        "</strict_constraints>\n\n"
     )
+
+
+def _normalize_verdict_item(item: dict) -> dict:
+    verdict = str(item.get("verdict", "MAYBE")).upper()
+    if verdict not in {"YES", "NO", "MAYBE"}:
+        verdict = "MAYBE"
+    try:
+        confidence = float(item.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+
+    identity = item.get("identity", {})
+    if not isinstance(identity, dict):
+        identity = {}
+    constraints = item.get("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+
+    return {
+        "verdict": verdict,
+        "reason": str(item.get("reason", "")),
+        "confidence": confidence,
+        "identity": identity,
+        "constraints": constraints,
+    }
+
+
+def _constraint_status_summary(item: dict) -> tuple[bool, bool, str]:
+    constraints = item.get("constraints", {})
+    if not isinstance(constraints, dict):
+        return False, False, ""
+
+    statuses = []
+    for key in ("temporal", "numeric"):
+        values = constraints.get(key, [])
+        if isinstance(values, list):
+            for entry in values:
+                if isinstance(entry, dict):
+                    status = str(entry.get("status", "")).upper()
+                    required = entry.get("required") or entry.get("constraint") or key
+                    if status:
+                        statuses.append((status, str(required)))
+
+    failed = [v for s, v in statuses if s in {"CONTRADICTS", "FAIL", "FAILED"}]
+    unknown = [v for s, v in statuses if s in {
+        "DOES_NOT_MENTION", "UNKNOWN", "UNSUPPORTED", "MISSING"
+    }]
+
+    if failed:
+        return True, False, f"Required constraint contradicted: {failed[0]}"
+    if unknown:
+        return False, True, f"Required constraint not supported by candidate: {unknown[0]}"
+    return False, False, ""
+
+
+def _candidate_authoritative_text(candidate: dict) -> str:
+    """Return only text that is allowed to satisfy a CI constraint."""
+    ctx = candidate.get("context", {}) or {}
+    if isinstance(ctx, dict) and ctx.get("current_text"):
+        return str(ctx["current_text"]).strip()
+
+    text = candidate.get("text")
+    return str(text).strip() if text else ""
+
+
+def _supporting_context_text(candidate: dict) -> str:
+    """Return context for interpretation only; never use this for constraint checks."""
+    ctx = candidate.get("context", {}) or {}
+    if not isinstance(ctx, dict):
+        ctx = {}
+
+    current = str(ctx.get("current_text", "") or "").strip()
+    parts = [
+        ctx.get("prev_text", ""),
+        ctx.get("next_text", ""),
+        candidate.get("context_text", ""),
+    ]
+    out = []
+    for part in parts:
+        part = str(part or "").strip()
+        if part and part != current:
+            out.append(part)
+    return "\n".join(out)[:3000]
+
+
+def _constraint_presence_guard(
+    ci_text: str, candidate_text: str
+) -> tuple[str | None, str | None]:
+    """Ensure explicit numeric/temporal tokens exist in authoritative candidate text.
+
+    This closes the context-leakage path even if the LLM mistakenly marks a
+    context-only constraint as SATISFIES.
+    """
+    constraints = _extract_explicit_constraints(ci_text)
+    if not constraints["temporal"] and not constraints["numeric"]:
+        return None, None
+
+    candidate = re.sub(r"\s+", " ", candidate_text or "").strip().casefold()
+
+    for required in constraints["temporal"]:
+        r = required.casefold().replace("–", "-").replace("—", "-")
+        m = re.search(
+            r"(?P<num>\d+(?:\.\d+)?)\s*(?P<unit>days?|weeks?|months?|years?|hours?|minutes?)",
+            r,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            if not re.search(
+                rf"\b{re.escape(m.group('num'))}\s*{re.escape(m.group('unit'))}\b",
+                candidate,
+                flags=re.IGNORECASE,
+            ):
+                return "NO", f"Required temporal constraint not present in candidate text: {required}"
+        elif r and r not in candidate:
+            return "NO", f"Required temporal constraint not present in candidate text: {required}"
+
+    for required in constraints["numeric"]:
+        r = required.casefold().replace("–", "-").replace("—", "-")
+        if r in candidate:
+            continue
+
+        nums = re.findall(r"\d+(?:\.\d+)?", r)
+        if nums and not any(
+            re.search(rf"(?<!\d){re.escape(n)}(?!\d)", candidate)
+            for n in nums
+        ):
+            return "NO", f"Required numeric constraint not present in candidate text: {required}"
+
+    return None, None
+
+
+def _apply_strict_constraint_guard(
+    ci_text: str, item: dict, candidate_text: str = ""
+) -> dict:
+    """Apply LLM-reported and deterministic constraint guards.
+
+    Supporting context is intentionally excluded from candidate_text.
+    """
+    normalized = _normalize_verdict_item(item)
+
+    failed, unknown, reason = _constraint_status_summary(normalized)
+    if failed:
+        normalized["verdict"] = "NO"
+        normalized["confidence"] = min(normalized["confidence"], 0.99)
+        normalized["reason"] = reason
+        return normalized
+
+    forced_verdict, forced_reason = _constraint_presence_guard(ci_text, candidate_text)
+    if forced_verdict == "NO":
+        normalized["verdict"] = "NO"
+        normalized["confidence"] = min(normalized["confidence"], 0.99)
+        normalized["reason"] = forced_reason or "Required constraint is absent from candidate text."
+        return normalized
+
+    if unknown and normalized["verdict"] == "YES":
+        normalized["verdict"] = "NO"
+        normalized["confidence"] = min(normalized["confidence"], 0.95)
+        normalized["reason"] = reason
+
+    return normalized
+
 
 def _verify_batch(
     ci_text: str,
@@ -212,14 +393,18 @@ def _verify_batch(
         if desc:
             asset_ctx = f"Drug/Regimen Context: {_re.sub(chr(60)+'[^>]+>','',desc).strip()[:500]}\n\n"
 
-    # Build one block per candidate
+    # Keep authoritative evidence physically separate from supporting context.
     blocks = []
     for i, c in enumerate(candidates, 1):
-        ctx = c.get("context", {})
-        excerpt = "\n".join(filter(None, [
-            ctx.get("prev_text", ""), ctx.get("current_text", ""), ctx.get("next_text", "")
-        ]))[:2500]
-        blocks.append(f"--- CANDIDATE {i} (p{c.get('page_start')}\u2013{c.get('page_end')}) ---\n{excerpt}")
+        candidate_text = _candidate_authoritative_text(c)
+        support_text = _supporting_context_text(c)
+        blocks.append(
+            f"--- CANDIDATE {i} (p{c.get('page_start')}–{c.get('page_end')}) ---\n"
+            f"CANDIDATE TEXT (AUTHORITATIVE EVIDENCE):\n"
+            f"{candidate_text[:2500] or '[empty]'}\n\n"
+            f"SUPPORTING CONTEXT (NOT EVIDENCE):\n"
+            f"{support_text[:3000] or '[none]'}"
+        )
 
     prompt = (
         f"You are a clinical document reviewer.\n\n"
@@ -227,19 +412,25 @@ def _verify_batch(
         f'Confidential Information (CI): "{ci_text}"\n\n'
         f"{_strict_constraint_instructions(ci_text)}"
         f"For each candidate below, decide if the excerpt contains or directly identifies the CI.\n\n"
-        f"For each identity dimension answer true or false:\n"
-        f"  same_drug       — excerpt discusses the same drug/regimen as the CI\n"
-        f"  same_study      — excerpt is from the same trial/study as the CI\n"
-        f"  same_objective  — excerpt shares the same primary/secondary objective\n"
-        f"  same_endpoint   — excerpt uses the same primary endpoint (PFS, ORR, etc.)\n"
-        f"  same_comparator — excerpt uses the same comparator arms/regimens\n\n"
+        f"CANDIDATE TEXT is the authoritative evidence. SUPPORTING CONTEXT may only help interpret it.\n"
+        f"Never satisfy a CI using information that appears only in SUPPORTING CONTEXT.\n\n"
+        f"For each identity dimension answer true or false based primarily on CANDIDATE TEXT:\n"
+        f"  same_drug       — candidate discusses the same drug/regimen as the CI\n"
+        f"  same_study      — candidate is from the same trial/study as the CI\n"
+        f"  same_objective  — candidate shares the same primary/secondary objective\n"
+        f"  same_endpoint   — candidate uses the same primary endpoint (PFS, ORR, etc.)\n"
+        f"  same_comparator — candidate uses the same comparator arms/regimens\n\n"
         f"identity_score: fraction of dimensions that are true (0.0–1.0)\n"
-        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n\n"
+        f"semantic_score: semantic similarity of CANDIDATE TEXT to the CI (0.0–1.0)\n\n"
         f"Reply ONLY with a JSON ARRAY of {len(candidates)} objects in the same order:\n"
         f'[{{"verdict":"YES"|"NO"|"MAYBE","reason":"<one sentence>",'
         f'"confidence":<0.0-1.0>,"identity":{{"same_drug":<bool>,"same_study":<bool>,'
         f'"same_objective":<bool>,"same_endpoint":<bool>,"same_comparator":<bool>,'
-        f'"identity_score":<0.0-1.0>,"semantic_score":<0.0-1.0>}}}}, ...]\n\n'
+        f'"identity_score":<0.0-1.0>,"semantic_score":<0.0-1.0}},'
+        f'"constraints":{{"temporal":[{{"required":"<constraint>",'
+        f'"status":"SATISFIES"|"CONTRADICTS"|"DOES_NOT_MENTION"|"UNKNOWN"}}],'
+        f'"numeric":[{{"required":"<constraint>",'
+        f'"status":"SATISFIES"|"CONTRADICTS"|"DOES_NOT_MENTION"|"UNKNOWN"}}]}}}}, ...]\n\n'
         + "\n\n".join(blocks)
     )
 
@@ -276,15 +467,22 @@ def _verify_batch(
         results = []
         per_tok = max(1, in_tok // len(candidates)), max(1, out_tok // len(candidates))
         for cand, item in zip(candidates, parsed):
+            guarded = _apply_strict_constraint_guard(ci_text, item, _candidate_authoritative_text(c))
             results.append({
                 **cand,
-                "verdict":    item.get("verdict", "MAYBE"),
-                "reason":     item.get("reason", ""),
-                "confidence": float(item.get("confidence", 0.5)),
-                "identity":   item.get("identity", {}),
+                "verdict":    guarded["verdict"],
+                "reason":     guarded["reason"],
+                "confidence": guarded["confidence"],
+                "identity":   guarded["identity"],
+                "constraints": guarded["constraints"],
                 "_tokens":    {"input": per_tok[0], "output": per_tok[1]},
             })
-        logger.info("[LLM Verifier] batch n=%d in_tok=%d out_tok=%d", len(candidates), in_tok, out_tok)
+        constraint_count = _extract_explicit_constraints(ci_text)
+        logger.info(
+            "[LLM Verifier] batch n=%d in_tok=%d out_tok=%d temporal_constraints=%d numeric_constraints=%d",
+            len(candidates), in_tok, out_tok,
+            len(constraint_count["temporal"]), len(constraint_count["numeric"]),
+        )
         return results
     except Exception as exc:
         logger.warning("[LLM Verifier] batch failed (%s) — falling back to sequential", exc)
@@ -306,12 +504,8 @@ def _strip_code_fence(text: str) -> str:
 
 def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
             ci_assets: list | None = None) -> dict:
-    ctx      = candidate.get("context", {})
-    combined = "\n".join(filter(None, [
-        ctx.get("prev_text", ""),
-        ctx.get("current_text", ""),
-        ctx.get("next_text", ""),
-    ]))[:3000]
+    candidate_text = _candidate_authoritative_text(candidate)
+    supporting_context = _supporting_context_text(candidate)
 
     # Document profile header
     doc_profile = ""
@@ -379,24 +573,31 @@ def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
         f"{asset_ctx}"
         f"Confidential Information (CI): \"{ci_text}\"\n\n"
         f"{_strict_constraint_instructions(ci_text)}"
-        f"Document excerpt (pages {candidate.get('page_start')}–"
-        f"{candidate.get('page_end')}):\n{combined}\n\n"
-        f"Does this excerpt contain or directly identify the CI?\n\n"
-        f"For each identity dimension answer true or false:\n"
-        f"  same_drug       — excerpt discusses the same drug/regimen as the CI\n"
-        f"  same_study      — excerpt is from the same trial/study as the CI\n"
-        f"  same_objective  — excerpt shares the same primary/secondary objective\n"
-        f"  same_endpoint   — excerpt uses the same primary endpoint (PFS, ORR, etc.)\n"
-        f"  same_comparator — excerpt uses the same comparator arms/regimens\n\n"
+        f"CANDIDATE TEXT (AUTHORITATIVE EVIDENCE; pages {candidate.get('page_start')}–"
+        f"{candidate.get('page_end')}):\n{candidate_text[:3000] or '[empty]'}\n\n"
+        f"SUPPORTING CONTEXT (NOT EVIDENCE):\n{supporting_context[:3000] or '[none]'}\n\n"
+        f"Does CANDIDATE TEXT contain or directly identify the CI?\n\n"
+        f"CANDIDATE TEXT is the authoritative evidence. SUPPORTING CONTEXT may only help interpret it.\n"
+        f"Never satisfy a CI using information that appears only in SUPPORTING CONTEXT.\n\n"
+        f"For each identity dimension answer true or false based primarily on CANDIDATE TEXT:\n"
+        f"  same_drug       — candidate discusses the same drug/regimen as the CI\n"
+        f"  same_study      — candidate is from the same trial/study as the CI\n"
+        f"  same_objective  — candidate shares the same primary/secondary objective\n"
+        f"  same_endpoint   — candidate uses the same primary endpoint (PFS, ORR, etc.)\n"
+        f"  same_comparator — candidate uses the same comparator arms/regimens\n\n"
         f"identity_score: fraction of dimensions that are true (0.0–1.0)\n"
-        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n\n"
+        f"semantic_score: semantic similarity of CANDIDATE TEXT to the CI (0.0–1.0)\n\n"
         f"Reply ONLY with valid JSON:\n"
-        f"{{\"verdict\": \"YES\"|\"NO\"|\"MAYBE\", \"reason\": \"<one sentence>\", "
-        f"\"confidence\": <0.0-1.0>, "
-        f"\"identity\": {{\"same_drug\": <bool>, \"same_study\": <bool>, "
-        f"\"same_objective\": <bool>, \"same_endpoint\": <bool>, "
-        f"\"same_comparator\": <bool>, "
-        f"\"identity_score\": <0.0-1.0>, \"semantic_score\": <0.0-1.0>}}}}"
+        f'{{"verdict": "YES"|"NO"|"MAYBE", "reason": "<one sentence>", '
+        f'"confidence": <0.0-1.0>, '
+        f'"identity": {{"same_drug": <bool>, "same_study": <bool>, '
+        f'"same_objective": <bool>, "same_endpoint": <bool>, '
+        f'"same_comparator": <bool>, '
+        f'"identity_score": <0.0-1.0>, "semantic_score": <0.0-1.0>}}, '
+        f'"constraints": {{"temporal": [{{"required": "<constraint>", '
+        f'"status": "SATISFIES"|"CONTRADICTS"|"DOES_NOT_MENTION"|"UNKNOWN"}}], '
+        f'"numeric": [{{"required": "<constraint>", '
+        f'"status": "SATISFIES"|"CONTRADICTS"|"DOES_NOT_MENTION"|"UNKNOWN"}}]}}}}' 
     )
 
     try:
@@ -418,19 +619,21 @@ def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
         output_tokens = usage.get("output_tokens", 0)
         text   = _strip_code_fence(text)
         parsed = json.loads(text)
-        verdict  = parsed.get("verdict", "MAYBE")
-        reason   = parsed.get("reason", "")
-        conf     = float(parsed.get("confidence", 0.5))
-        identity = parsed.get("identity", {})
+        guarded = _apply_strict_constraint_guard(ci_text, parsed, candidate_text)
+        verdict  = guarded["verdict"]
+        reason   = guarded["reason"]
+        conf     = guarded["confidence"]
+        identity = guarded["identity"]
+        constraints = guarded["constraints"]
     except json.JSONDecodeError as exc:
         logger.warning("[LLM Verifier] JSON parse failed chunk=%s: %s | raw=%r",
                        candidate.get("chunk_id"), exc, text[:200] if "text" in dir() else "")
-        verdict, reason, conf, identity = "MAYBE", "LLM response was not valid JSON", 0.3, {}
+        verdict, reason, conf, identity, constraints = "MAYBE", "LLM response was not valid JSON", 0.3, {}, {}
         input_tokens, output_tokens = 0, 0
     except Exception as exc:
         logger.warning("[LLM Verifier] call failed chunk=%s error=%s",
                        candidate.get("chunk_id"), exc)
-        verdict, reason, conf, identity = "MAYBE", str(exc), 0.0, {}
+        verdict, reason, conf, identity, constraints = "MAYBE", str(exc), 0.0, {}, {}
         input_tokens, output_tokens = 0, 0
 
     return {
@@ -439,5 +642,6 @@ def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
         "reason":     reason,
         "confidence": conf,
         "identity":   identity,
+        "constraints": constraints,
         "_tokens":    {"input": input_tokens, "output": output_tokens},
     }
