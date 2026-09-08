@@ -1234,21 +1234,41 @@ def _clean_result(result: dict) -> dict:
 
 
 def _strip_vectors(obj: dict | list | str | int | float | bool | None) -> dict | list | str | int | float | bool | None:
-    """Recursively remove all vector fields from an object to reduce payload size.
+    """Recursively remove all vector/embedding fields from an object.
+    
+    COMPREHENSIVE: Catches dense_vector, sparse_vector, embeddings in indexed_object,
+    entities, facts, and anywhere else they might hide to reduce payload size.
     
     Vector fields are large (1000+ dimensions) and irrelevant for the Orchestrator.
-    Removes: dense_vector, sparse_vector, embedding, vector, dense_embedding, sparse_embedding
+    Removes:
+    - dense_vector, sparse_vector
+    - embedding, vector, _embedding, _vector  
+    - dense_embedding, sparse_embedding
+    - dense, sparse (when they're vectors)
+    - Any *_vector or *_embedding fields
     """
+    # Aggressive list of vector field patterns
+    VECTOR_KEYWORDS = {
+        "dense_vector", "sparse_vector", "dense", "sparse",
+        "embedding", "vector", "_embedding", "_vector",
+        "dense_embedding", "sparse_embedding",
+        "_dense", "_sparse", "embeddings", "vectors",
+        "dense_embeddings", "sparse_embeddings"
+    }
+    
     if isinstance(obj, dict):
-        # Strip vector fields and recurse on remaining values
-        vector_fields = {
-            "dense_vector", "sparse_vector", "embedding", "vector",
-            "dense_embedding", "sparse_embedding", "_dense", "_sparse"
-        }
-        return {k: _strip_vectors(v) for k, v in obj.items() if k not in vector_fields}
+        result = {}
+        for k, v in obj.items():
+            # Skip if key matches vector patterns (case-insensitive)
+            if k.lower() in VECTOR_KEYWORDS or k.endswith("_vector") or k.endswith("_embedding"):
+                continue
+            # Recursively strip from values
+            result[k] = _strip_vectors(v)
+        return result
     elif isinstance(obj, list):
         return [_strip_vectors(item) for item in obj]
     else:
+        # Primitives are returned as-is
         return obj
 
 
@@ -1361,14 +1381,8 @@ def handler(event: dict, context: Any) -> dict:
     results = [_build_result(r) for r in completed_cis]  # Only return completed CIs
     total_hits = sum(len(r.get("final_hits", [])) for r in results)
     
-    logger.info(
-        "[SearchWorker] done wall=%.1fs "
-        "cis_total=%d completed=%d failed=%d hits=%d",
-        wall_time,
-        len(enriched_cis), len(completed_cis), len(failed_cis), total_hits
-    )
-
-    return {
+    # Build response
+    response = {
         "document_id":   document_id,
         "search_id":     search_id,
         "batch_idx":     batch_idx,
@@ -1381,3 +1395,16 @@ def handler(event: dict, context: Any) -> dict:
         "wall_time":     wall_time,
         "debug_s3_url":  s3_url,
     }
+    
+    # CRITICAL: Strip ALL vectors from entire response before returning
+    # This is the final safety net to prevent 6MB Lambda response limit
+    response = _strip_vectors(response)
+    
+    logger.info(
+        "[SearchWorker] done wall=%.1fs "
+        "cis_total=%d completed=%d failed=%d hits=%d payload_safe=true",
+        wall_time,
+        len(enriched_cis), len(completed_cis), len(failed_cis), total_hits
+    )
+
+    return response

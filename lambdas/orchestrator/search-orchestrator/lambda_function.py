@@ -345,26 +345,35 @@ def _invoke_worker(batch_payload: dict) -> dict:
 # ── Result merge ───────────────────────────────────────────────────────────────
 
 def _clean_response_object(value):
-    """Recursively remove retrieval-only vector data from response objects.
+    """Recursively remove ALL vector/embedding data from response objects.
 
     The full CI/document metadata remains available to the UI, but embedding
     vectors are never serialized into the terminal S3 response.  Vectors can
-    appear either at the top level or inside nested ``embedding`` objects, so
-    this must be recursive.
+    appear anywhere (top level, nested ``embedding`` objects, inside indexed_object,
+    entities, facts, etc.), so this must be deeply recursive and aggressive.
+    
+    Removes:
+    - dense_vector, sparse_vector
+    - embedding, vector, _embedding, _vector  
+    - dense_embedding, sparse_embedding
+    - Any *_vector or *_embedding fields
     """
-    vector_keys = {
-        "dense_vector",
-        "sparse_vector",
-        "vector",
-        "dense_embedding",
-        "sparse_embedding",
+    # Aggressive list of vector field patterns (same as Worker's _strip_vectors)
+    VECTOR_KEYWORDS = {
+        "dense_vector", "sparse_vector", "dense", "sparse",
+        "embedding", "vector", "_embedding", "_vector",
+        "dense_embedding", "sparse_embedding",
+        "_dense", "_sparse", "embeddings", "vectors",
+        "dense_embeddings", "sparse_embeddings"
     }
 
     if isinstance(value, dict):
         cleaned = {}
         for key, item in value.items():
-            if key in vector_keys or key == "embedding":
+            # Skip if key matches vector patterns (case-insensitive)
+            if key.lower() in VECTOR_KEYWORDS or key.endswith("_vector") or key.endswith("_embedding"):
                 continue
+            # Recursively clean values
             cleaned[key] = _clean_response_object(item)
         return cleaned
 
@@ -693,6 +702,10 @@ def _process_payload(event: dict, context: Any = None) -> dict:
 
         if errors:
             response["errors"] = errors
+
+        # CRITICAL: Strip ALL vectors from entire response to prevent 6MB Lambda limit
+        # This is the final safety net before serializing for S3 or Lambda response
+        response = _clean_response_object(response)
 
         if bucket_name and s3_result_path:
             s3_key = s3_result_path
