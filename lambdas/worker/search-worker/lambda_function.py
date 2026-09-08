@@ -244,155 +244,138 @@ def _is_related(ev: str) -> bool:
 
 def _numeric_gate_pattern(ci: dict):
     """
-    Build a strict-but-whitespace-flexible regex for numeric/statistical CIs.
+    Build the exact numeric/statistical gate for a CI.
 
-    The candidate must contain the same numeric constraint represented by the CI.
-    We do NOT accept a bare number.  For example:
+    The structured statistical_identity is authoritative.  The candidate must
+    contain the requested labelled numeric constraint; a bare number is not
+    sufficient.
 
-        N = 8       -> matches N=8, N = 8, N  =  8
-        N < 3       -> matches N<3, N < 3
-        pValue >= 9 -> matches pValue>=9, pValue >= 9
-        p = 0.03    -> matches p=0.03, p = 0.03
+    Examples:
+      CI n=(62)  -> N=62 / N = 62 PASS, N=361 DROP, "62 patients" DROP
+      CI p>=0.05 -> p>=0.05 / p >= 0.05 PASS, p=0.01 DROP
+      CI HR=1.2  -> HR=1.2 PASS, HR=1.3 DROP
+      CI OR=2.5  -> OR=2.5 PASS, OR=3.0 DROP
 
-    Clinical operators/symbols are preserved:
-        =, >, <, >=, <=, ≥, ≤, ≠, ×, /, %, µ, °, ^
-
-    If a numeric constraint cannot be safely derived, return None so the
-    numeric gate is skipped rather than accidentally filtering candidates.
+    Confidence intervals require both endpoints.
     """
     import re as _re
 
     si = ci.get("statistical_identity") or {}
-    si_type = si.get("type")
+    si_type = str(si.get("type") or "").strip().lower()
     ci_text = str(ci.get("knownCI") or "").strip()
 
     def _tok(v) -> str:
         try:
-            return str(int(v)) if float(v) == int(float(v)) else str(v)
+            f = float(v)
+            return str(int(f)) if f == int(f) else str(v).strip()
         except (TypeError, ValueError):
             return str(v).strip()
 
-    def _escape_numeric(v) -> str:
-        """
-        Escape a numeric value while allowing harmless formatting differences
-        around decimal points only when the source value itself is numeric.
-        """
-        s = _tok(v)
-        return _re.escape(s)
-
-    def _constraint_pattern(label: str, operator: str, value: str):
-        """
-        Match the complete labelled numeric constraint.
-
-        The label is required, so a candidate containing only the number does
-        not pass the gate.
-        """
-        label = str(label).strip()
-        operator = str(operator).strip()
-        value = str(value).strip()
-
-        if not label or not operator or not value:
+    def _constraint(label: str, operator: str, value) -> _re.Pattern | None:
+        if not label or value is None:
             return None
 
-        # Whitespace is flexible inside the label/operator/value boundary.
-        label_pattern = _re.escape(label).replace(r"\ ", r"\s*")
-        op_pattern = {
-            ">=": r"(?:>=|≥)",
-            "<=": r"(?:<=|≤)",
-            "!=": r"(?:!=|≠)",
+        op_map = {
             "=": r"=",
             ">": r">",
             "<": r"<",
-        }.get(operator)
-
-        if op_pattern is None:
+            ">=": r"(?:>=|≥)",
+            "<=": r"(?:<=|≤)",
+            "!=": r"(?:!=|≠)",
+            "≥": r"(?:>=|≥)",
+            "≤": r"(?:<=|≤)",
+            "≠": r"(?:!=|≠)",
+        }
+        op = op_map.get(str(operator).strip())
+        if op is None:
             return None
 
-        value_pattern = _escape_numeric(value)
+        # Match labels such as N, n, p, pValue, p-value, HR, OR.
+        label_pat = _re.escape(str(label).strip()).replace(r"\ ", r"\s*")
+        value_pat = _re.escape(_tok(value))
 
         return _re.compile(
-            rf"(?<!\w){label_pattern}\s*{op_pattern}\s*{value_pattern}(?![\d.])",
+            rf"(?<![A-Za-z0-9]){label_pat}\s*{op}\s*"
+            rf"\(?\s*{value_pat}\s*\)?(?![0-9.])",
             _re.IGNORECASE,
         )
 
-    # ------------------------------------------------------------------
-    # First preference: derive the exact labelled constraint from knownCI.
-    # This handles all numeric/statistical CI types consistently, including
-    # pValue>=9, N=8, HR=1.2, OR=2.5, etc.
-    # ------------------------------------------------------------------
-    #
-    # Examples:
-    #   N=4
-    #   N < 3
-    #   pValue>=9
-    #   p-value <= 0.05
-    #   HR = 1.2
-    #   OR > 2
-    #
-    # Keep / inside labels (e.g. PK/PD) rather than treating it as an
-    # operator.  Operators are only comparison operators here.
-    comparison_re = _re.compile(
-        r"(?P<label>[A-Za-zµμ][A-Za-z0-9µμ_./%°^+\- ]*?)"
-        r"\s*(?P<op>>=|<=|!=|≥|≤|≠|=|>|<)"
-        r"\s*(?P<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)"
-    )
+    # Normalize only the CI expression enough to recover a comparison.
+    # In particular, n=(62) means sample size 62.
+    compact_ci = _re.sub(r"\s+", " ", ci_text)
 
-    m = comparison_re.search(ci_text)
-    if m:
-        pat = _constraint_pattern(
-            m.group("label"),
-            m.group("op"),
-            m.group("value"),
+    # For sample_size, ALWAYS use statistical_identity.sample_size when it
+    # exists. This prevents n=(62) from accidentally becoming a generic
+    # numeric match and guarantees N=361 does not pass.
+    if si_type == "sample_size":
+        value = si.get("sample_size")
+        if value is not None:
+            return _constraint("N", "=", value)
+
+        m = _re.search(
+            r"\b[Nn]\s*(?:=|:)\s*\(?\s*"
+            r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\)?",
+            compact_ci,
         )
-        if pat is not None:
-            return pat
+        if m:
+            return _constraint("N", "=", m.group(1))
+        return None
 
-    # ------------------------------------------------------------------
-    # If statistical_identity has a structured value but knownCI did not
-    # contain a labelled comparison, build the same kind of labelled gate
-    # from the identity type.
-    # ------------------------------------------------------------------
-    identity_labels = {
-        "sample_size": ("N", "sample_size"),
-        "p_value": ("p", "p_value"),
+    # P-value / HR / OR: preserve an explicit operator from knownCI when
+    # present; otherwise use the structured value as equality.
+    label_by_type = {
+        "p_value": ("pValue", "p_value"),
         "hazard_ratio": ("HR", "hazard_ratio"),
         "odds_ratio": ("OR", "odds_ratio"),
     }
 
-    if si_type in identity_labels:
-        label, value_key = identity_labels[si_type]
+    if si_type in label_by_type:
+        label, value_key = label_by_type[si_type]
+
+        m = _re.search(
+            rf"\b{_re.escape(label)}\s*"
+            r"(>=|<=|!=|≥|≤|≠|=|>|<)\s*\(?\s*"
+            r"([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)?",
+            compact_ci,
+            _re.IGNORECASE,
+        )
+        if m:
+            return _constraint(label, m.group(1), m.group(2))
+
         value = si.get(value_key)
         if value is not None:
-            # Prefer equality when the structured identity gives only a value.
-            return _constraint_pattern(label, "=", _tok(value))
+            return _constraint(label, "=", value)
+        return None
 
-    # Confidence intervals require both endpoints. Match both values in the
-    # candidate, but do not accept either endpoint by itself.
+    # Confidence interval: both endpoints must occur in the same candidate.
     if si_type == "confidence_interval":
         lo = si.get("lower_ci")
         hi = si.get("upper_ci")
         if lo is not None and hi is not None:
-            lo_s = _tok(lo)
-            hi_s = _tok(hi)
-            lo_p = _re.compile(
-                rf"(?<![\d.]){_re.escape(lo_s)}(?![\d.])"
+            lo_pat = _re.compile(
+                rf"(?<![0-9.]){_re.escape(_tok(lo))}(?![0-9.])"
             )
-            hi_p = _re.compile(
-                rf"(?<![\d.]){_re.escape(hi_s)}(?![\d.])"
+            hi_pat = _re.compile(
+                rf"(?<![0-9.]){_re.escape(_tok(hi))}(?![0-9.])"
             )
 
             class _Both:
-                def search(self, t):
-                    return lo_p.search(t) and hi_p.search(t)
+                def search(self, text):
+                    return lo_pat.search(text) and hi_pat.search(text)
 
             return _Both()
 
-    # Numeric percentage / median / generic statistical values:
-    # only use the structured value when knownCI also provides a labelled
-    # comparison. A bare number is intentionally never enough.
-    #
-    # This final fallback supports forms where the CI text uses a label that
-    # is not one of the hard-coded statistical_identity types.
+    # Generic numeric types: only create a gate when knownCI has an explicit
+    # labelled comparison. Never gate on a bare numeric value.
+    m = _re.search(
+        r"(?P<label>[A-Za-zµμ][A-Za-z0-9µμ_./%°^+\- ]*?)\s*"
+        r"(?P<op>>=|<=|!=|≥|≤|≠|=|>|<)\s*"
+        r"(?P<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)",
+        compact_ci,
+    )
+    if m:
+        return _constraint(m.group("label"), m.group("op"), m.group("value"))
+
     return None
 
 def _candidate_confidence(c: dict) -> float:
@@ -517,31 +500,61 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
     req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
 
     # 5.5 Numeric gate
+    ci = req.get("ci") or {}
     ci_type = (req.get("classification") or {}).get("ci_type", "") or ""
-    if ci_type in _NUMERIC_GATE_TYPES:
-        pat = _numeric_gate_pattern(req["ci"])
+    si_type = str(
+        (ci.get("statistical_identity") or {}).get("type") or ""
+    ).strip().lower()
+
+    numeric_si_types = {
+        "sample_size",
+        "confidence_interval",
+        "p_value",
+        "hazard_ratio",
+        "odds_ratio",
+        "percentage",
+        "median",
+        "numeric",
+        "statistical",
+    }
+
+    # statistical_identity is authoritative. Classification is only a
+    # secondary trigger so cases such as n=(62) cannot bypass this gate.
+    if ci_type in _NUMERIC_GATE_TYPES or si_type in numeric_si_types:
+        pat = _numeric_gate_pattern(ci)
+
         if pat is not None:
             passed, gated = [], []
+
             for c in req.get("ranked_candidates", []):
-                txt = (
-                    (c.get("context") or {}).get("current_text", "")
-                    or c.get("snippet", "")
-                )
-                (passed if pat.search(txt) else gated).append(c)
+                context = c.get("context") or {}
 
-            req["ranked_candidates"] = passed
+                # Prefer the actual expanded/current candidate text. Only fall
+                # back to snippet when current_text is absent.
+                txt = context.get("current_text") or c.get("snippet") or ""
 
-            # Keep numeric-gated candidates auditable without sending them
-            # through verifier/highlight processing.
-            if gated:
-                req.setdefault("skipped_hits", []).extend(
-                    {
+                if pat.search(txt):
+                    passed.append(c)
+                else:
+                    gated.append({
                         **c,
                         "verdict": "SKIP",
                         "reason": "numeric_gate",
-                    }
-                    for c in gated
-                )
+                    })
+
+            req["ranked_candidates"] = passed
+            req.setdefault("skipped_hits", []).extend(gated)
+
+            logger.info(
+                "[NumericGate] ci=%s ci_type=%s statistical_type=%s "
+                "required=%r passed=%d dropped=%d",
+                ci.get("id"),
+                ci_type,
+                si_type,
+                ci.get("knownCI"),
+                len(passed),
+                len(gated),
+            )
 
     # 5.6 Chunk dedup
     by_chunk: dict[str, dict] = {}
