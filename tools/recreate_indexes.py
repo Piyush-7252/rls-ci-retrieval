@@ -9,14 +9,16 @@ This script:
   5. Prints the dispatch commands you need to run to re-index every document.
 
 Usage:
-    export OPENSEARCH_ENDPOINT=search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com
-    python tools/recreate_indexes.py [--ci-only] [--yes] [--region us-east-1]
+    export OPENSEARCH_ENDPOINT=search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.us-east-1.es.amazonaws.com
+    python tools/recreate_indexes.py [--ci-only] [--document-only] [--yes] [--region us-east-1]
 
 Flags:
-    --yes       Skip the confirmation prompt.
-    --region    AWS region (default: eu-west-1).
-    --chunks-index    Name of the chunks index (default: document-chunks).
-    --objects-index   Name of the objects index (default: semantic-objects).
+    --yes              Skip the confirmation prompt.
+    --region           AWS region (default: us-east-1).
+    --ci-only          Delete and recreate ONLY ci-objects index.
+    --document-only    Delete and recreate ONLY document-chunks and semantic-objects indexes.
+    --chunks-index     Name of the chunks index (default: document-chunks).
+    --objects-index    Name of the objects index (default: semantic-objects).
 """
 
 from __future__ import annotations
@@ -564,6 +566,7 @@ def main(
     yes: bool,
     chunks_shards: int,
     ci_only: bool,
+    document_only: bool,
 ) -> None:
     client = _get_os(endpoint, region)
 
@@ -624,6 +627,77 @@ def main(
 
         print(f"\\nDone. ONLY '{ci_index}' was deleted and recreated.")
         print(f"'{chunks_index}' and '{objects_index}' were not modified.")
+        return
+
+    if document_only:
+        print(f"\\n{'─' * 70}")
+        print(f"  Document-only OpenSearch recreation: {endpoint}")
+        print(f"{'─' * 70}\\n")
+
+        chunks_counts  = _doc_counts_per_document(client, chunks_index)
+        objects_counts = _doc_counts_per_document(client, objects_index)
+
+        all_doc_ids = sorted(set(chunks_counts) | set(objects_counts))
+
+        if all_doc_ids:
+            print(f"{'Document ID':<70}  {'chunks':>8}  {'objects':>9}")
+            print(f"{'─' * 70}  {'─' * 8}  {'─' * 9}")
+            for doc_id in all_doc_ids:
+                c = chunks_counts.get(doc_id, 0)
+                o = objects_counts.get(doc_id, 0)
+                print(f"{doc_id:<70}  {c:>8,}  {o:>9,}")
+            print(f"{'─' * 70}  {'─' * 8}  {'─' * 9}")
+            print(
+                f"{'TOTAL':<70}  "
+                f"{sum(chunks_counts.values()):>8,}  "
+                f"{sum(objects_counts.values()):>9,}"
+            )
+        else:
+            print("Both document indexes are empty — nothing to lose.")
+
+        print(f"'{ci_index}' will NOT be touched.\\n")
+
+        if not yes:
+            answer = input(
+                f"Delete and recreate '{chunks_index}' and '{objects_index}' ONLY? "
+                f"All data above will be PERMANENTLY deleted. [yes/N] "
+            ).strip().lower()
+            if answer != "yes":
+                print("Aborted.")
+                sys.exit(0)
+
+        for idx in (chunks_index, objects_index):
+            if client.indices.exists(index=idx):
+                print(f"  Deleting {idx} …", end=" ", flush=True)
+                client.indices.delete(index=idx)
+                print("deleted")
+            else:
+                print(f"  {idx} does not exist — skipping delete")
+
+        print(f"\\n  Creating {chunks_index} …", end=" ", flush=True)
+        resp = client.indices.create(index=chunks_index, body=_chunks_mapping(chunks_shards))
+        print(f"ok  (acknowledged={resp.get('acknowledged')})")
+
+        print(f"  Creating {objects_index} …", end=" ", flush=True)
+        resp = client.indices.create(index=objects_index, body=_objects_mapping())
+        print(f"ok  (acknowledged={resp.get('acknowledged')})")
+
+        print()
+        for idx in (chunks_index, objects_index):
+            mapping = client.indices.get_mapping(index=idx)
+            doc_id_type = mapping[idx]["mappings"]["properties"]["document_id"]["type"]
+            templates = mapping[idx]["mappings"].get("dynamic_templates", [])
+            has_template = any(
+                "strings_as_keyword" in t for t in templates
+            )
+            status = "✓" if doc_id_type == "keyword" and has_template else "✗"
+            print(
+                f"  [{status}] {idx}  document_id={doc_id_type}  "
+                f"dynamic_template={'keyword' if has_template else 'MISSING'}"
+            )
+
+        print(f"\\nDone. ONLY '{chunks_index}' and '{objects_index}' were deleted and recreated.")
+        print(f"'{ci_index}' was not modified.")
         return
 
     # ── 1. Show what is currently in both indexes ─────────────────────────────
@@ -806,7 +880,7 @@ def main(
         print(f"\n{'─' * 70}")
         print("  Re-dispatch commands (run these to re-index all documents):")
         print(f"{'─' * 70}\n")
-        queue_url = "https://sqs.eu-west-1.amazonaws.com/064051750322/rls-ci-retrieval-document-chunk-worker-queue"
+        queue_url = "https://sqs.us-east-1.amazonaws.com/064051750322/rls-ci-retrieval-document-chunk-worker-queue"
         for doc_id in all_doc_ids:
             print(
                 f"python3.12 tools/dispatch_chunks_to_sqs.py \\\n"
@@ -840,8 +914,8 @@ if __name__ == "__main__":
         help="Skip the confirmation prompt",
     )
     parser.add_argument(
-        "--region", default="eu-west-1",
-        help="AWS region (default: eu-west-1)",
+        "--region", default="us-east-1",
+        help="AWS region (default: us-east-1)",
     )
     parser.add_argument(
         "--chunks-index", default="document-chunks",
@@ -861,6 +935,11 @@ if __name__ == "__main__":
         help="Delete and recreate only ci-objects; never touch document indexes",
     )
     parser.add_argument(
+        "--document-only",
+        action="store_true",
+        help="Delete and recreate only document-chunks and semantic-objects; never touch ci-objects",
+    )
+    parser.add_argument(
         "--chunks-shards", type=int, default=5,
         help="Number of shards for document-chunks (default: 5)",
     )
@@ -868,7 +947,7 @@ if __name__ == "__main__":
 
     endpoint = os.environ.get(
         "OPENSEARCH_ENDPOINT",
-        "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com",
+        "search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com",
     )
     if not endpoint:
         print("ERROR: OPENSEARCH_ENDPOINT env var not set", file=sys.stderr)
@@ -883,4 +962,5 @@ if __name__ == "__main__":
         yes           = args.yes,
         chunks_shards = args.chunks_shards,
         ci_only       = args.ci_only,
+        document_only = args.document_only,
     )
