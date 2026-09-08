@@ -1259,9 +1259,16 @@ def _strip_vectors(obj: dict | list | str | int | float | bool | None) -> dict |
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
+            k_lower = k.lower()
+            
             # Skip if key matches vector patterns (case-insensitive)
-            if k.lower() in VECTOR_KEYWORDS or k.endswith("_vector") or k.endswith("_embedding"):
+            if (k_lower in VECTOR_KEYWORDS or 
+                k.endswith("_vector") or k.endswith("_embedding") or
+                k_lower.endswith("_vec") or k_lower.endswith("_emb") or
+                # Catch vector-like fields even if slightly different
+                k_lower.startswith("dense") or k_lower.startswith("sparse")):
                 continue
+            
             # Recursively strip from values
             result[k] = _strip_vectors(v)
         return result
@@ -1275,16 +1282,68 @@ def _strip_vectors(obj: dict | list | str | int | float | bool | None) -> dict |
 def _build_result(req: dict) -> dict:
     """Trim the request to a serialisable result dict (simple return to orchestrator).
     
-    Strips all dense/sparse vectors to keep payload under 6MB Lambda limit.
+    MINIMAL PAYLOAD: Only return essential result metadata to Orchestrator.
+    Full details (entities, facts, etc.) are in S3 debug logs.
+    This DRAMATICALLY reduces payload size to stay under 6MB Lambda limit.
+    
+    The Orchestrator will enrich these results with full CI metadata for S3 output.
     """
     final_hits = req.get("final_hits", [])
-    # Strip vectors from each hit to reduce payload size
-    cleaned_hits = [_strip_vectors(hit) for hit in final_hits]
+    
+    # Minimize each hit: only return essential fields, strip large metadata
+    minimal_hits = []
+    for hit in final_hits:
+        minimal_hit = {
+            # Core ID/type info
+            "retrieval_object_id": hit.get("retrieval_object_id"),
+            "retrieval_object_type": hit.get("retrieval_object_type"),
+            "retrieved_type": hit.get("retrieved_type"),
+            "retrieval_section": hit.get("retrieval_section"),
+            # Retrieval scoring
+            "agg_score": hit.get("agg_score"),
+            "score_breakdown": hit.get("score_breakdown"),
+            "matched_distance": hit.get("matched_distance"),
+            "distance_ratio": hit.get("distance_ratio"),
+            # Retrieval context
+            "retrieval_origin": hit.get("retrieval_origin"),
+            "literal_match_count": hit.get("literal_match_count"),
+            "context_strategy": hit.get("context_strategy"),
+            "selection_reason": hit.get("selection_reason"),
+            # Pagination
+            "chunk_id": hit.get("chunk_id"),
+            "retrieval_chunk_id": hit.get("retrieval_chunk_id"),
+            # Verdict fields (CRITICAL for the pipeline)
+            "verdict": hit.get("verdict"),
+            "verdict_reason": hit.get("verdict_reason"),
+            "verdict_type": hit.get("verdict_type"),
+            "candidate_rank": hit.get("candidate_rank"),
+            "final_summary": hit.get("final_summary"),
+            # Location metadata (useful for UI without being too large)
+            "retrieval_heading_path": hit.get("retrieval_heading_path"),
+        }
+        
+        # Include minimal matched_object with just ID/text/geometry (no entities/facts)
+        matched_obj = hit.get("matched_object")
+        if matched_obj:
+            minimal_hit["matched_object"] = {
+                "object_id": matched_obj.get("object_id"),
+                "type": matched_obj.get("type"),
+                "text": matched_obj.get("text"),
+                "paragraph_text": matched_obj.get("paragraph_text"),
+                "geometry": matched_obj.get("geometry"),
+                "page": matched_obj.get("page"),
+                "bbox": matched_obj.get("bbox"),
+                "section_category": matched_obj.get("section_category"),
+            }
+        
+        # Remove all None values to reduce payload
+        minimal_hit = {k: v for k, v in minimal_hit.items() if v is not None}
+        minimal_hits.append(_strip_vectors(minimal_hit))
     
     return {
         "ci_id":          req["ci"].get("id"),
         "search_id":      req.get("search_id"),
-        "final_hits":     cleaned_hits,
+        "final_hits":     minimal_hits,
     }
 
 
@@ -1398,13 +1457,21 @@ def handler(event: dict, context: Any) -> dict:
     
     # CRITICAL: Strip ALL vectors from entire response before returning
     # This is the final safety net to prevent 6MB Lambda response limit
+    import json
+    pre_strip_size = len(json.dumps(response, default=str).encode())
+    
     response = _strip_vectors(response)
+    
+    post_strip_size = len(json.dumps(response, default=str).encode())
+    reduction_pct = round(100 * (1 - post_strip_size / max(pre_strip_size, 1)), 1)
     
     logger.info(
         "[SearchWorker] done wall=%.1fs "
-        "cis_total=%d completed=%d failed=%d hits=%d payload_safe=true",
+        "cis_total=%d completed=%d failed=%d hits=%d "
+        "payload_before_strip=%d bytes payload_after_strip=%d bytes reduction=%.1f%%",
         wall_time,
-        len(enriched_cis), len(completed_cis), len(failed_cis), total_hits
+        len(enriched_cis), len(completed_cis), len(failed_cis), total_hits,
+        pre_strip_size, post_strip_size, reduction_pct
     )
 
     return response
