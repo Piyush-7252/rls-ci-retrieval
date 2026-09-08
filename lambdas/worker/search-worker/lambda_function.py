@@ -1233,12 +1233,38 @@ def _clean_result(result: dict) -> dict:
     }
 
 
+def _strip_vectors(obj: dict | list | str | int | float | bool | None) -> dict | list | str | int | float | bool | None:
+    """Recursively remove all vector fields from an object to reduce payload size.
+    
+    Vector fields are large (1000+ dimensions) and irrelevant for the Orchestrator.
+    Removes: dense_vector, sparse_vector, embedding, vector, dense_embedding, sparse_embedding
+    """
+    if isinstance(obj, dict):
+        # Strip vector fields and recurse on remaining values
+        vector_fields = {
+            "dense_vector", "sparse_vector", "embedding", "vector",
+            "dense_embedding", "sparse_embedding", "_dense", "_sparse"
+        }
+        return {k: _strip_vectors(v) for k, v in obj.items() if k not in vector_fields}
+    elif isinstance(obj, list):
+        return [_strip_vectors(item) for item in obj]
+    else:
+        return obj
+
+
 def _build_result(req: dict) -> dict:
-    """Trim the request to a serialisable result dict (simple return to orchestrator)."""
+    """Trim the request to a serialisable result dict (simple return to orchestrator).
+    
+    Strips all dense/sparse vectors to keep payload under 6MB Lambda limit.
+    """
+    final_hits = req.get("final_hits", [])
+    # Strip vectors from each hit to reduce payload size
+    cleaned_hits = [_strip_vectors(hit) for hit in final_hits]
+    
     return {
         "ci_id":          req["ci"].get("id"),
         "search_id":      req.get("search_id"),
-        "final_hits":     req.get("final_hits", []),
+        "final_hits":     cleaned_hits,
     }
 
 
