@@ -59,14 +59,12 @@ def _process(req: dict) -> dict:
     ci_assets  = req["ci"].get("assets", [])
     doc_ctx    = req.get("document_context", {})
     ranked     = req.get("ranked_candidates", [])
-    # Stage 1 CI Classifier is the single source of truth for CI type.
-    ci_type = (req.get("classification") or {}).get("ci_type", "")
 
     # Verify all candidates that cleared the reranker score threshold (no position cap)
     to_verify  = [c for c in ranked]
     skip       = []
 
-    verified = _verify_batch(ci_text, ci_type, to_verify, doc_ctx, ci_assets)
+    verified = _verify_batch(ci_text, to_verify, doc_ctx, ci_assets)
 
     # Candidates below threshold are marked SKIP without an LLM call
     for cand in skip:
@@ -81,35 +79,9 @@ def _process(req: dict) -> dict:
 
 _MAX_VERIFY_BATCH = 40  # max candidates per Bedrock call (8000 token output cap)
 
-# Exact CI types emitted by Stage 1 that require strict candidate-local verification.
-_STRICT_NUMERIC_CI_TYPES = {
-    "NUMERIC_SAMPLE_SIZE", "CONFIDENCE_INTERVAL", "P_VALUE", "HAZARD_RATIO",
-    "ODDS_RATIO", "NUMERIC_PERCENTAGE", "NUMERIC_RANGE", "MEDIAN",
-    "TEMPORAL_CONSTRAINT", "DOSAGE", "AGE_DEMOGRAPHIC", "NUMERIC", "STATISTICAL",
-}
-
-
-def _numeric_prompt_rules(ci_type: str) -> str:
-    if ci_type not in _STRICT_NUMERIC_CI_TYPES:
-        return ""
-    return (
-        f"CI TYPE (from Stage 1 classifier): {ci_type}\n"
-        f"STRICT NUMERIC/STATISTICAL/TEMPORAL MODE:\n"
-        f"- Stage 1 classification is authoritative; do not re-classify the CI text.\n"
-        f"- Evaluate numeric evidence ONLY from the candidate text shown for that candidate.\n"
-        f"- Ignore previous/next sentences, paragraph/chunk context, headings, document profile, drug notes, asset descriptions, and other surrounding context.\n"
-        f"- Do NOT infer semantic equivalence or convert prose into the CI's numeric fact.\n"
-        f"- Candidate must explicitly state the same fact type represented by CI TYPE.\n"
-        f"- Require compatible exact value/operator/range/unit and metric identity where applicable.\n"
-        f"- Same number with a different meaning is NOT a match.\n"
-        f"- Missing, ambiguous, or differently expressed numeric information is NO.\n"
-        f"- Example: NUMERIC_SAMPLE_SIZE CI n=62 + candidate '62 patients' => NO; candidate 'n=62' or 'N=62' => YES.\n"
-        f"- Return only a short reason; do not narrate surrounding evidence.\n\n"
-    )
 
 def _verify_batch(
     ci_text: str,
-    ci_type: str,
     candidates: list[dict],
     doc_ctx: dict | None = None,
     ci_assets: list | None = None,
@@ -118,12 +90,12 @@ def _verify_batch(
     if not candidates:
         return []
     if len(candidates) == 1:
-        return [_verify(ci_text, ci_type, candidates[0], doc_ctx, ci_assets)]
+        return [_verify(ci_text, candidates[0], doc_ctx, ci_assets)]
     # Split oversized batches to avoid hitting the 8000-token output cap
     if len(candidates) > _MAX_VERIFY_BATCH:
         results = []
         for i in range(0, len(candidates), _MAX_VERIFY_BATCH):
-            results.extend(_verify_batch(ci_text, ci_type, candidates[i:i+_MAX_VERIFY_BATCH], doc_ctx, ci_assets))
+            results.extend(_verify_batch(ci_text, candidates[i:i+_MAX_VERIFY_BATCH], doc_ctx, ci_assets))
         return results
 
     import re as _re
@@ -164,89 +136,81 @@ def _verify_batch(
     # Build one block per candidate
     blocks = []
     for i, c in enumerate(candidates, 1):
-        candidate = c
         ctx = c.get("context", {})
-        if ci_type in _STRICT_NUMERIC_CI_TYPES:
-            # Numeric/statistical/temporal CIs: candidate-local text only.
-            excerpt = (ctx.get("current_text", "") or c.get("text", ""))[:2500]
-        else:
-            excerpt = "\n".join(filter(None, [
-                ctx.get("prev_text", ""), ctx.get("current_text", ""), ctx.get("next_text", "")
-            ]))[:2500]
+        excerpt = "\n".join(filter(None, [
+            ctx.get("prev_text", ""), ctx.get("current_text", ""), ctx.get("next_text", "")
+        ]))[:2500]
         blocks.append(f"--- CANDIDATE {i} (p{c.get('page_start')}\u2013{c.get('page_end')}) ---\n{excerpt}")
-
-    if ci_type in _STRICT_NUMERIC_CI_TYPES:
-        doc_profile = ""
-        ci_drug_note = ""
-        asset_ctx = ""
 
     prompt = (
         f"You are a clinical document reviewer.\n\n"
         f"{doc_profile}{ci_drug_note}{asset_ctx}"
         f'Confidential Information (CI): "{ci_text}"\n\n'
         f"For each candidate below, decide if the excerpt contains or directly identifies the CI.\n\n"
-        f"{_numeric_prompt_rules(ci_type)}"
-        f"{'' if ci_type in _STRICT_NUMERIC_CI_TYPES else (
-            'For each identity dimension answer true or false:\\n'
-            '  same_drug       — excerpt discusses the same drug/regimen as the CI\\n'
-            '  same_study      — excerpt is from the same trial/study as the CI\\n'
-            '  same_objective  — excerpt shares the same primary/secondary objective\\n'
-            '  same_endpoint   — excerpt uses the same primary endpoint (PFS, ORR, etc.)\\n'
-            '  same_comparator — excerpt uses the same comparator arms/regimens\\n\\n'
-        )}"
-        f"identity_score: fraction of identity dimensions that are true (0.0–1.0)\n"
-        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n"
-        f"Reply ONLY with valid JSON:\n"
-        f"{{\"verdict\": \"YES\"|\"NO\"|\"MAYBE\", \"reason\": \"<one sentence>\", "
-        f"\"confidence\": <0.0-1.0>, "
-        f"\"identity\": {{\"same_drug\": <bool>, \"same_study\": <bool>, "
-        f"\"same_objective\": <bool>, \"same_endpoint\": <bool>, "
-        f"\"same_comparator\": <bool>, "
-        f"\"identity_score\": <0.0-1.0>, \"semantic_score\": <0.0-1.0>}}}}"
+        f"For each identity dimension answer true or false:\n"
+        f"  same_drug       — excerpt discusses the same drug/regimen as the CI\n"
+        f"  same_study      — excerpt is from the same trial/study as the CI\n"
+        f"  same_objective  — excerpt shares the same primary/secondary objective\n"
+        f"  same_endpoint   — excerpt uses the same primary endpoint (PFS, ORR, etc.)\n"
+        f"  same_comparator — excerpt uses the same comparator arms/regimens\n\n"
+        f"identity_score: fraction of dimensions that are true (0.0–1.0)\n"
+        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n\n"
+        f"Reply ONLY with a JSON ARRAY of {len(candidates)} objects in the same order:\n"
+        f'[{{"verdict":"YES"|"NO"|"MAYBE","reason":"<one sentence>",'
+        f'"confidence":<0.0-1.0>,"identity":{{"same_drug":<bool>,"same_study":<bool>,'
+        f'"same_objective":<bool>,"same_endpoint":<bool>,"same_comparator":<bool>,'
+        f'"identity_score":<0.0-1.0>,"semantic_score":<0.0-1.0>}}}}, ...]\n\n'
+        + "\n\n".join(blocks)
     )
 
     try:
         body = {
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens":        500,
+            "max_tokens": min(200 * len(candidates), 8000),  # ~85 actual/candidate; cap at API limit
             "messages": [{"role": "user", "content": prompt}],
         }
-        resp     = _get("bedrock-runtime", BEDROCK_REGION).invoke_model(
-            modelId     = BEDROCK_MODEL,
-            contentType = "application/json",
-            accept      = "application/json",
-            body        = json.dumps(body).encode(),
+        resp      = _get("bedrock-runtime", BEDROCK_REGION).invoke_model(
+            modelId=BEDROCK_MODEL, contentType="application/json",
+            accept="application/json", body=json.dumps(body).encode(),
         )
         resp_body = json.loads(resp["body"].read())
-        text      = resp_body["content"][0]["text"].strip()
+        raw       = resp_body["content"][0]["text"].strip()
+        # Strip code fences then find the array — NOT _strip_code_fence which seeks {
+        import re as _re2
+        raw = _re2.sub(r"^```(?:json)?\s*", "", raw)
+        raw = _re2.sub(r"\s*```$", "", raw.strip())
+        bracket = raw.find("[")
+        if bracket > 0:
+            raw = raw[bracket:]
+        text      = raw
         usage     = resp_body.get("usage", {})
-        input_tokens  = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        text   = _strip_code_fence(text)
-        parsed = json.loads(text)
-        verdict  = parsed.get("verdict", "MAYBE")
-        reason   = parsed.get("reason", "")
-        conf     = float(parsed.get("confidence", 0.5))
-        identity = parsed.get("identity", {})
-    except json.JSONDecodeError as exc:
-        logger.warning("[LLM Verifier] JSON parse failed chunk=%s: %s | raw=%r",
-                       candidate.get("chunk_id"), exc, text[:200] if "text" in dir() else "")
-        verdict, reason, conf, identity = "MAYBE", "LLM response was not valid JSON", 0.3, {}
-        input_tokens, output_tokens = 0, 0
+        in_tok    = usage.get("input_tokens", 0)
+        out_tok   = usage.get("output_tokens", 0)
+        parsed    = json.loads(text)
+        if not isinstance(parsed, list) or len(parsed) == 0:
+            raise ValueError(f"Expected list of {len(candidates)}, got {len(parsed) if isinstance(parsed,list) else type(parsed)}")
+        # Pad if Claude returned fewer items than expected rather than doing full sequential fallback
+        while len(parsed) < len(candidates):
+            parsed.append({"verdict": "MAYBE", "confidence": 0.5, "reason": "batch_missing"})
+        parsed = parsed[:len(candidates)]  # truncate any extra items Claude occasionally adds
+        results = []
+        per_tok = max(1, in_tok // len(candidates)), max(1, out_tok // len(candidates))
+        for cand, item in zip(candidates, parsed):
+            results.append({
+                **cand,
+                "verdict":    item.get("verdict", "MAYBE"),
+                "reason":     item.get("reason", ""),
+                "confidence": float(item.get("confidence", 0.5)),
+                "identity":   item.get("identity", {}),
+                "_tokens":    {"input": per_tok[0], "output": per_tok[1]},
+            })
+        logger.info("[LLM Verifier] batch n=%d in_tok=%d out_tok=%d", len(candidates), in_tok, out_tok)
+        return results
     except Exception as exc:
-        logger.warning("[LLM Verifier] call failed chunk=%s error=%s",
-                       candidate.get("chunk_id"), exc)
-        verdict, reason, conf, identity = "MAYBE", str(exc), 0.0, {}
-        input_tokens, output_tokens = 0, 0
+        logger.warning("[LLM Verifier] batch failed (%s) — falling back to sequential", exc)
+        return [_verify(ci_text, c, doc_ctx, ci_assets) for c in candidates]
 
-    return {
-        **candidate,
-        "verdict":    verdict,
-        "reason":     reason,
-        "confidence": conf,
-        "identity":   identity,
-        "_tokens":    {"input": input_tokens, "output": output_tokens},
-    }
+
 def _strip_code_fence(text: str) -> str:
     """Remove markdown code fences that Claude sometimes wraps JSON in."""
     import re
@@ -329,63 +293,25 @@ def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
             asset_ctx = f"Drug/Regimen Context: {desc_clean}\n\n"
 
     prompt = (
-        f"You are a clinical document reviewer evaluating whether a document excerpt "
-        f"contains evidence for a specific Confidential Information (CI) constraint.\n\n"
+        f"You are a clinical document reviewer.\n\n"
         f"{doc_profile}"
         f"{ci_drug_note}"
         f"{asset_ctx}"
         f"Confidential Information (CI): \"{ci_text}\"\n\n"
         f"Document excerpt (pages {candidate.get('page_start')}–"
         f"{candidate.get('page_end')}):\n{combined}\n\n"
-        f"Does this excerpt contain or directly support the CI?\n\n"
+        f"Does this excerpt contain or directly identify the CI?\n\n"
         f"For each identity dimension answer true or false:\n"
         f"  same_drug       — excerpt discusses the same drug/regimen as the CI\n"
         f"  same_study      — excerpt is from the same trial/study as the CI\n"
         f"  same_objective  — excerpt shares the same primary/secondary objective\n"
         f"  same_endpoint   — excerpt uses the same primary endpoint (PFS, ORR, etc.)\n"
         f"  same_comparator — excerpt uses the same comparator arms/regimens\n\n"
-        f"NUMERIC/STATISTICAL/TEMPORAL CONSTRAINTS (CRITICAL):\n"
-        f"───────────────────────────────────────────────────────────\n"
-        f"If the CI contains a numeric, statistical, range, or temporal constraint:\n\n"
-        f"STEP 1: Identify the constraint type and extract its details\n"
-        f"  Examples: 'ORR 73%', 'n=62', 'MMSE 8–22', 'within 26 weeks', 'HR 0.72', 'p<0.05'\n\n"
-        f"STEP 2: Find the corresponding fact in the excerpt\n"
-        f"  - Look in the excerpt text, tables, headings, and surrounding context\n"
-        f"  - Semantic equivalence counts (e.g., 'The primary endpoint of ORR was 73%' matches CI 'ORR 73%')\n"
-        f"  - The fact may be expressed differently but refer to the same value\n\n"
-        f"STEP 3: Compare ONLY equivalent facts and constraints\n"
-        f"  ✅ EQUIVALENT: ORR vs ORR, sample size vs sample size, 26 weeks vs 26-week duration\n"
-        f"  ❌ NOT EQUIVALENT: ORR vs PFS, sample size vs dose, duration vs timepoint\n\n"
-        f"STEP 4: Determine the relationship\n"
-        f"  🛑 EXPLICIT CONTRADICTION (REJECT — answer NO):\n"
-        f"     - CI: ORR 73% + Excerpt: ORR 68% (same metric, different value)\n"
-        f"     - CI: n=62 + Excerpt: n=254 (same fact type, different value)\n"
-        f"     - CI: within 26 weeks + Excerpt: within 52 weeks (same constraint type, different limit)\n"
-        f"     - CI: MMSE 8–22 + Excerpt: MMSE 10–20 (same metric, different range)\n"
-        f"     - CI: p<0.05 + Excerpt: p=0.08 (p-value violates CI constraint)\n\n"
-        f"  ✅ MATCH (supports YES):\n"
-        f"     - CI: ORR 73% + Excerpt: ORR 73% (exact match)\n"
-        f"     - CI: n=62 + Excerpt: 'The study enrolled 62 patients' (semantic match)\n"
-        f"     - CI: within 26 weeks + Excerpt: 'at Week 26' (timepoint within constraint)\n"
-        f"     - CI: MMSE 8–22 + Excerpt: MMSE 8–22 (exact range match)\n"
-        f"     - CI: p<0.05 + Excerpt: p=0.03 (value satisfies constraint)\n\n"
-        f"  ❓ UNKNOWN/COMPATIBLE (do NOT reject — answer YES if other dimensions match):\n"
-        f"     - CI: n=62 + Excerpt: 'Primary population X' (no number in excerpt, but compatible)\n"
-        f"     - CI: ORR 73% + Excerpt: 'Response rate was significant' (no numeric detail, but claims similarity)\n"
-        f"     - CI: 26 weeks + Excerpt: 'median follow-up was 52 weeks' (follow-up duration > CI window, not contradictory)\n"
-        f"     - CI: ORR 73% + Excerpt: '73% of adverse events' (same number, different metric — NOT a match but not contradictory)\n\n"
-        f"STEP 5: Final decision rules\n"
-        f"  • MISSING numeric data in excerpt ≠ CONTRADICTION (do NOT auto-reject)\n"
-        f"  • UNRELATED numbers (different metrics/units) ≠ CONTRADICTION\n"
-        f"  • Only EXPLICIT, SAME-FACT contradictions justify a NO verdict\n"
-        f"  • When in doubt, bias toward YES if identity dimensions align\n\n"
-        f"identity_score: fraction of identity dimensions that are true (0.0–1.0)\n"
-        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n"
-        f"numeric_reasoning: brief explanation of how numeric/temporal constraints were evaluated\n\n"
+        f"identity_score: fraction of dimensions that are true (0.0–1.0)\n"
+        f"semantic_score: how semantically similar excerpt is to the CI (0.0–1.0)\n\n"
         f"Reply ONLY with valid JSON:\n"
         f"{{\"verdict\": \"YES\"|\"NO\"|\"MAYBE\", \"reason\": \"<one sentence>\", "
         f"\"confidence\": <0.0-1.0>, "
-        f"\"numeric_reasoning\": \"<how numeric constraints were compared>\", "
         f"\"identity\": {{\"same_drug\": <bool>, \"same_study\": <bool>, "
         f"\"same_objective\": <bool>, \"same_endpoint\": <bool>, "
         f"\"same_comparator\": <bool>, "
