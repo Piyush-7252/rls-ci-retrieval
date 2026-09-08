@@ -80,6 +80,85 @@ def _process(req: dict) -> dict:
 _MAX_VERIFY_BATCH = 40  # max candidates per Bedrock call (8000 token output cap)
 
 
+_TEMPORAL_CONSTRAINT_PATTERNS = [
+    r'\b(?:within|over|during|after|before|prior to|following|for|at)\s+'
+    r'(?:approximately\s+)?\d+(?:\.\d+)?\s*'
+    r'(?:days?|weeks?|months?|years?|hours?|minutes?)\b',
+    r'\b(?:cycle\s*\d+\s*day\s*\d+|c\d+\s*d\d+)\b',
+    r'\b(?:week|day|month|year)\s*\d+\b',
+]
+
+_NUMERIC_CONSTRAINT_PATTERNS = [
+    r'\b(?:n|N)\s*=\s*\(?\s*\d+(?:\.\d+)?\s*\)?',
+    r'\b\d+(?:\.\d+)?\s*(?:patients?|subjects?|participants?)\b',
+    r'\bp(?:\s*[-_ ]?\s*value)?\s*[<>=≤≥]\s*\d+(?:\.\d+)?',
+    r'\bhazard\s+ratio\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
+    r'\bHR\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
+    r'\bodds\s+ratio\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
+    r'\bOR\s*[<>=≤≥]?\s*\d+(?:\.\d+)?',
+    r'\b\d+(?:\.\d+)?\s*%\b',
+]
+
+def _extract_explicit_constraints(ci_text: str) -> dict:
+    """Extract visible CI constraints so the LLM verifier cannot ignore them.
+
+    This is advisory only. It does not hard-filter candidates.
+    """
+    import re
+
+    text = ci_text or ""
+    temporal, numeric = [], []
+
+    for pattern in _TEMPORAL_CONSTRAINT_PATTERNS:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = re.sub(r'\s+', ' ', match.group(0)).strip()
+            if value and value.lower() not in {x.lower() for x in temporal}:
+                temporal.append(value)
+
+    for pattern in _NUMERIC_CONSTRAINT_PATTERNS:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            value = re.sub(r'\s+', ' ', match.group(0)).strip()
+            if value and value.lower() not in {x.lower() for x in numeric}:
+                numeric.append(value)
+
+    return {"temporal": temporal[:12], "numeric": numeric[:12]}
+
+
+def _strict_constraint_instructions(ci_text: str) -> str:
+    constraints = _extract_explicit_constraints(ci_text)
+    if not constraints["temporal"] and not constraints["numeric"]:
+        return ""
+
+    return (
+        "STRICT CONSTRAINT CHECK — MANDATORY FOR VERDICT:\n"
+        f"Temporal constraints explicitly present in CI: "
+        f"{json.dumps(constraints['temporal'], ensure_ascii=False)}\n"
+        f"Numeric/statistical constraints explicitly present in CI: "
+        f"{json.dumps(constraints['numeric'], ensure_ascii=False)}\n\n"
+        "Before deciding YES, check every explicit constraint against the "
+        "candidate excerpt.\n"
+        "1. A constraint that is contradicted => verdict MUST be NO.\n"
+        "2. A required constraint that is not mentioned or supported => "
+        "verdict MUST NOT be YES. Use NO when the missing constraint makes "
+        "the candidate incomplete; use MAYBE only when the excerpt is "
+        "genuinely insufficient to determine whether the constraint applies.\n"
+        "3. Semantic similarity does NOT satisfy a missing numeric or temporal "
+        "constraint.\n"
+        "4. Preserve the meaning of =, <, <=, >, >=, and explicit ranges.\n"
+        "5. For durations/timepoints, preserve units and meaning: 26 weeks "
+        "is not equivalent to an unspecified occurrence; Week 26 is not "
+        "automatically equivalent to within 26 weeks.\n"
+        "6. Do not invent a value that is not present in the candidate.\n\n"
+        "Critical example:\n"
+        'CI: "RPLS occurring within 26 weeks"\n'
+        'Candidate: "Reverse Posterior Leukoencephalopathy Syndrome (RPLS)"\n'
+        "=> NO: RPLS matches semantically, but the required 26-week "
+        "constraint is absent.\n"
+        'Candidate: "RPLS occurring within 26 weeks"\n'
+        "=> YES: both the RPLS identity and the required temporal constraint "
+        "are explicitly supported.\n\n"
+    )
+
 def _verify_batch(
     ci_text: str,
     candidates: list[dict],
@@ -146,6 +225,7 @@ def _verify_batch(
         f"You are a clinical document reviewer.\n\n"
         f"{doc_profile}{ci_drug_note}{asset_ctx}"
         f'Confidential Information (CI): "{ci_text}"\n\n'
+        f"{_strict_constraint_instructions(ci_text)}"
         f"For each candidate below, decide if the excerpt contains or directly identifies the CI.\n\n"
         f"For each identity dimension answer true or false:\n"
         f"  same_drug       — excerpt discusses the same drug/regimen as the CI\n"
@@ -298,6 +378,7 @@ def _verify(ci_text: str, candidate: dict, doc_ctx: dict | None = None,
         f"{ci_drug_note}"
         f"{asset_ctx}"
         f"Confidential Information (CI): \"{ci_text}\"\n\n"
+        f"{_strict_constraint_instructions(ci_text)}"
         f"Document excerpt (pages {candidate.get('page_start')}–"
         f"{candidate.get('page_end')}):\n{combined}\n\n"
         f"Does this excerpt contain or directly identify the CI?\n\n"
