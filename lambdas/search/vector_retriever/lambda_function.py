@@ -216,7 +216,21 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, t
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] semantic-objects knn failed: %s", exc)
+        logger.error(
+            "[Vector Retriever] semantic-objects knn FAILED",
+            exc_info=True,
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "document_id": document_id,
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "embedding_dim": len(ci_embedding),
+                "k": k,
+                "tie_buffer": TIE_BUFFER,
+                "fetch_size": k + TIE_BUFFER,
+            }
+        )
         return []
 
     return [
@@ -325,7 +339,21 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] heading knn failed: %s", exc)
+        logger.error(
+            "[Vector Retriever] heading knn FAILED",
+            exc_info=True,
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "document_id": document_id,
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "embedding_dim": len(ci_embedding),
+                "k": k,
+                "tie_buffer": TIE_BUFFER,
+                "fetch_size": k + TIE_BUFFER,
+            }
+        )
         return []
 
     return [
@@ -370,7 +398,21 @@ def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, te
     try:
         resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
     except Exception as exc:
-        logger.warning("[Vector Retriever] document-chunks knn failed: %s", exc)
+        logger.error(
+            "[Vector Retriever] document-chunks knn FAILED",
+            exc_info=True,
+            extra={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "document_id": document_id,
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "embedding_dim": len(ci_embedding),
+                "k": k,
+                "tie_buffer": TIE_BUFFER,
+                "fetch_size": k + TIE_BUFFER,
+            }
+        )
         return []
 
     return [
