@@ -257,196 +257,417 @@ def _number_equal(a: Any, b: Any) -> bool:
 
 
 def _extract_numeric_facts_from_text(text: str, ci_type: str) -> list[dict]:
-    """Extract numeric facts with STRICT operator matching.
-    
-    All numeric facts include the operator/relation that defines them.
-    Only exact operator matches are considered compatible.
+    """Extract candidate numeric facts conservatively.
+
+    Strict rules:
+    - A bare number is NEVER enough to establish a numeric match.
+    - Matching is based only on candidate-local text.
+    - Expanded previous/next sentences and broad context cannot manufacture
+      a numeric MATCH.
+    - UNKNOWN is rejected by _s5_numeric_gate.
     """
     text = text or ""
-    facts = []
+    facts: list[dict] = []
+
+    def _op(raw: str | None, default: str = "=") -> str:
+        raw = (raw or "").strip()
+        return raw or default
 
     if ci_type == "NUMERIC_SAMPLE_SIZE":
-        # STRICT MODE: Only explicit n= or N= notation
-        for m in re.finditer(r"\b[nN]\s*([=:]?)\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?", text):
-            operator = m.group(1) or "="
-            facts.append({"kind": "sample_size", "value": float(m.group(2)), "operator": operator})
-        # Group structure ONLY with explicit n= notation
-        for m in re.finditer(r"\b[nN]\s*([=:]?)\s*(\d+(?:\.\d+)?)\s+(?:subjects?|patients?|participants?|individuals?)\s+in\s+each\s+of\s+(\d+)\s+(?:groups?|cohorts?|arms?)\b", text, re.I):
-            operator = m.group(1) or "="
-            facts.append({"kind": "group_sample_size", "group_size": float(m.group(2)), "group_count": int(m.group(3)), "total_size": float(m.group(2))*int(m.group(3)), "operator": operator})
+        # ONLY explicit n= / n: / N= / N: syntax.
+        # "62 patients", "62 subjects", "age 62" are NOT sample size.
+        for m in re.finditer(
+            r"\b[nN]\s*([=:])\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?(?!\d)",
+            text,
+        ):
+            facts.append({
+                "kind": "sample_size",
+                "value": float(m.group(2)),
+                "operator": _op(m.group(1)),
+            })
+
+        # Group sample size also requires explicit n/N syntax.
+        for m in re.finditer(
+            r"\b[nN]\s*([=:])\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?\s+"
+            r"(?:subjects?|patients?|participants?|individuals?)\s+in\s+each\s+of\s+"
+            r"(\d+)\s+(?:groups?|cohorts?|arms?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "group_sample_size",
+                "group_size": float(m.group(2)),
+                "group_count": int(m.group(3)),
+                "total_size": float(m.group(2)) * int(m.group(3)),
+                "operator": _op(m.group(1)),
+            })
 
     elif ci_type == "NUMERIC_PERCENTAGE":
-        metric_pattern = r"(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|progression\s*[-–]free\s+survival)"
-        # Metric before percentage: "ORR 62%"
-        for m in re.finditer(rf"\b({metric_pattern})\b(?:\s+(?:was|of)|\s*([=:]))?\s*(\d+(?:\.\d+)?)%", text, re.I):
-            # Normalize metric names to canonical form
-            raw_metric = m.group(1).upper()
-            if "RESPONSE" in raw_metric:
-                metric_name = "RR"
-            elif "OVERALL" in raw_metric:
-                metric_name = "ORR"
-            elif "PROGRESSION" in raw_metric or "FREE" in raw_metric:
-                metric_name = "PFS"
-            else:
-                metric_name = raw_metric
-            operator = m.group(2) or "="
-            value = float(m.group(3))
-            facts.append({"kind": "percentage", "value": value, "operator": operator, "metric": metric_name})
-        # Percentage before metric: "62% ORR"
-        for m in re.finditer(rf"(\d+(?:\.\d+)?)%\s+({metric_pattern})\b", text, re.I):
-            value = float(m.group(1))
-            raw_metric = m.group(2).upper()
-            if "RESPONSE" in raw_metric:
-                metric_name = "RR"
-            elif "OVERALL" in raw_metric:
-                metric_name = "ORR"
-            elif "PROGRESSION" in raw_metric or "FREE" in raw_metric:
-                metric_name = "PFS"
-            else:
-                metric_name = raw_metric
-            facts.append({"kind": "percentage", "value": value, "operator": "=", "metric": metric_name})
-        # Bare percentage (only if no metric found)
-        if not facts:
-            for m in re.finditer(r"\b(\d+(?:\.\d+)?)%", text):
-                facts.append({"kind": "percentage", "value": float(m.group(1)), "operator": "=", "metric": None})
+        metric_pattern = (
+            r"(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|"
+            r"progression\s*[-–]free\s+survival)"
+        )
+
+        def _metric(raw: str) -> str:
+            raw = raw.upper()
+            if "OVERALL" in raw:
+                return "ORR"
+            if "RESPONSE" in raw:
+                return "RR"
+            if "PROGRESSION" in raw or "FREE" in raw:
+                return "PFS"
+            return raw
+
+        # Metric is mandatory. Bare "62%" is UNKNOWN -> reject.
+        for m in re.finditer(
+            rf"\b({metric_pattern})\b\s*(?:(?:was|of)\s+)?([=:])?\s*"
+            rf"(\d+(?:\.\d+)?)%",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "percentage",
+                "value": float(m.group(3)),
+                "operator": _op(m.group(2)),
+                "metric": _metric(m.group(1)),
+            })
+
+        for m in re.finditer(
+            rf"(\d+(?:\.\d+)?)%\s+\b({metric_pattern})\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "percentage",
+                "value": float(m.group(1)),
+                "operator": "=",
+                "metric": _metric(m.group(2)),
+            })
 
     elif ci_type in {"HAZARD_RATIO", "ODDS_RATIO"}:
         words = r"(?:HR|hazard\s+ratio)" if ci_type == "HAZARD_RATIO" else r"(?:OR|odds\s+ratio)"
         kind = "hazard_ratio" if ci_type == "HAZARD_RATIO" else "odds_ratio"
-        for m in re.finditer(rf"\b{words}\b\s*(?:was|of)?([=:])?\s*(\d+(?:\.\d+)?)", text, re.I):
-            operator = m.group(1) or "="
-            facts.append({"kind": kind, "value": float(m.group(2)), "operator": operator})
+
+        # Ratio marker is mandatory. Bare 0.72 is UNKNOWN -> reject.
+        for m in re.finditer(
+            rf"\b{words}\b\s*(?:was|of)?\s*([=:])\s*(\d+(?:\.\d+)?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": kind,
+                "value": float(m.group(2)),
+                "operator": _op(m.group(1)),
+            })
 
     elif ci_type == "P_VALUE":
-        # STRICT: Capture the exact operator (<, =, >, <=, >=)
-        for m in re.finditer(r"\bp\s*(?:-?\s*value)?\s*([<>=≤≥]+)\s*(0?\.\d+(?:[eE][+-]?\d+)?)", text, re.I):
-            operator = m.group(1)
-            facts.append({"kind": "p_value", "value": m.group(2), "operator": operator})
+        for m in re.finditer(
+            r"\bp\s*(?:-?\s*value)?\s*([<>]=?|=|≤|≥)\s*"
+            r"(0?\.\d+(?:[eE][+-]?\d+)?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "p_value",
+                "value": m.group(2),
+                "operator": m.group(1),
+            })
 
     elif ci_type == "CONFIDENCE_INTERVAL":
-        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%\s*CI\b.{0,80}?(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)(\d+(?:\.\d+)?)\s*(?:(days?|months?|years?|hours?|weeks?|seconds?|minutes?))?\b", text, re.I|re.S):
-            unit = m.group(4).lower() if m.group(4) else None
-            facts.append({"kind": "confidence_interval", "level": float(m.group(1)), "lower": float(m.group(2)), "upper": float(m.group(3)), "unit": unit, "operator": "="})
+        # Explicit confidence level + CI + both bounds required.
+        for m in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*%\s*CI\b\s*(?:[:=]\s*)?"
+            r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)"
+            r"(\d+(?:\.\d+)?)(?:\s*(days?|months?|years?|hours?|weeks?|"
+            r"seconds?|minutes?))?\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "confidence_interval",
+                "level": float(m.group(1)),
+                "lower": float(m.group(2)),
+                "upper": float(m.group(3)),
+                "unit": m.group(4).lower() if m.group(4) else None,
+                "operator": "=",
+            })
 
     elif ci_type == "NUMERIC_RANGE":
-        for m in re.finditer(r"\b(MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\b\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*(?:[-–]|to)\s*(\d+(?:\.\d+)?)", text, re.I):
-            facts.append({"kind": "score_range", "metric": re.sub(r"\s+", " ", m.group(1)).lower(), "lower": float(m.group(2)), "upper": float(m.group(3)), "operator": "="})
+        for m in re.finditer(
+            r"\b(MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\b"
+            r"\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(?:[-–]|to)\s*"
+            r"(\d+(?:\.\d+)?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "score_range",
+                "metric": re.sub(r"\s+", " ", m.group(1)).lower(),
+                "lower": float(m.group(2)),
+                "upper": float(m.group(3)),
+                "operator": "=",
+            })
+
+    elif ci_type == "MEDIAN":
+        for m in re.finditer(
+            r"\bmedian\b\s*(?:was|of|=|:)?\s*(\d+(?:\.\d+)?)\b"
+            r"(?:\s*(days?|months?|years?|hours?|weeks?|seconds?|minutes?))?",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "median",
+                "value": float(m.group(1)),
+                "unit": m.group(2).lower().rstrip("s") if m.group(2) else None,
+                "operator": "=",
+            })
+
+    elif ci_type == "TEMPORAL_CONSTRAINT":
+        # A temporal value requires an explicit temporal unit.
+        for m in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*(days?|months?|years?|hours?|weeks?|"
+            r"seconds?|minutes?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "temporal",
+                "value": float(m.group(1)),
+                "unit": m.group(2).lower().rstrip("s"),
+            })
+
+    elif ci_type == "DOSAGE":
+        for m in re.finditer(
+            r"(?:\b(?:dose|dosage|administered|received|given)\b\s*)?"
+            r"(\d+(?:\.\d+)?)\s*(mg/kg|mcg/kg|μg/kg|mg/m2|mg/m²|mg|mcg|μg|ug|g|kg)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "dosage",
+                "value": float(m.group(1)),
+                "unit": m.group(2).lower(),
+            })
+
+    elif ci_type == "AGE_DEMOGRAPHIC":
+        for m in re.finditer(
+            r"\b(?:age|aged)\b\s*(?:=|:|of|was)?\s*"
+            r"(\d+(?:\.\d+)?)\s*(years?|months?)\b",
+            text, re.I,
+        ):
+            facts.append({
+                "kind": "age",
+                "value": float(m.group(1)),
+                "unit": m.group(2).lower().rstrip("s"),
+            })
 
     return facts
 
 
+
 def _ci_numeric_facts(ci: dict, ci_type: str) -> list[dict]:
+    """Get the authoritative numeric constraint from the enriched CI."""
     facts = ci.get("numeric_facts") or ci.get("numeric_constraints") or []
     if isinstance(facts, dict):
         facts = [facts]
     if facts:
         return facts
+
     si = ci.get("statistical_identity") or {}
+
     if si.get("type") == "sample_size" and si.get("sample_size") is not None:
-        return [{"kind": "sample_size", "value": si["sample_size"], "operator": si.get("operator", "=")}]
-    if si.get("type") == "confidence_interval" and si.get("lower_ci") is not None and si.get("upper_ci") is not None:
-        return [{"kind": "confidence_interval", "lower": si["lower_ci"], "upper": si["upper_ci"], "unit": si.get("unit"), "operator": "="}]
+        return [{
+            "kind": "sample_size",
+            "value": si["sample_size"],
+            "operator": si.get("operator", "="),
+        }]
+
+    if (
+        si.get("type") == "confidence_interval"
+        and si.get("lower_ci") is not None
+        and si.get("upper_ci") is not None
+    ):
+        return [{
+            "kind": "confidence_interval",
+            "lower": si["lower_ci"],
+            "upper": si["upper_ci"],
+            "unit": si.get("unit"),
+            "operator": "=",
+        }]
+
     if si.get("type") == "percentage" and si.get("percentage_value") is not None:
-        return [{"kind": "percentage", "value": si["percentage_value"], "operator": si.get("operator", "="), "metric": si.get("metric")}]
-    for typ, key, kind in [("p_value","p_value","p_value"),("hazard_ratio","hazard_ratio","hazard_ratio"),("odds_ratio","odds_ratio","odds_ratio")]:
+        return [{
+            "kind": "percentage",
+            "value": si["percentage_value"],
+            "operator": si.get("operator", "="),
+            "metric": si.get("metric"),
+        }]
+
+    for typ, key, kind in [
+        ("p_value", "p_value", "p_value"),
+        ("hazard_ratio", "hazard_ratio", "hazard_ratio"),
+        ("odds_ratio", "odds_ratio", "odds_ratio"),
+    ]:
         if si.get("type") == typ and si.get(key) is not None:
-            return [{"kind": kind, "value": si[key], "operator": si.get("operator", "=")}]
+            return [{
+                "kind": kind,
+                "value": si[key],
+                "operator": si.get("operator", "="),
+            }]
+
     return _extract_numeric_facts_from_text(ci.get("knownCI", ""), ci_type)
+
+def _candidate_local_numeric_text(candidate: dict) -> str:
+    """Return only text belonging to the retrieved candidate itself.
+
+    Do NOT include prev/next sentences, paragraph context, or context_chunk_text.
+    Those can contain unrelated numbers and create false numeric matches.
+    """
+    ctx = candidate.get("context") or {}
+    obj = candidate.get("matched_object") or {}
+
+    parts = [
+        candidate.get("match_span"),
+        candidate.get("text"),
+        ctx.get("current_text"),
+        obj.get("text"),
+    ]
+
+    seen = set()
+    local = []
+    for value in parts:
+        value = str(value or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            local.append(value)
+    return " ".join(local)
 
 
 def _compare_numeric_constraint(ci: dict, candidate: dict, ci_type: str) -> tuple[str, str]:
+    """Strict typed numeric comparison.
+
+    MATCH    = exact typed numeric fact on the candidate itself.
+    MISMATCH = same typed fact exists but value/operator differs.
+    UNKNOWN  = candidate does not explicitly express the required fact.
+
+    The numeric gate rejects both MISMATCH and UNKNOWN.
+    """
     target_facts = _ci_numeric_facts(ci, ci_type)
     if not target_facts:
         return "UNKNOWN", "no_numeric_constraint"
-    ctx = candidate.get("context") or {}
-    candidate_text = " ".join(x for x in [ctx.get("current_text", ""), ctx.get("prev_sentence_text", ""), ctx.get("next_sentence_text", ""), candidate.get("snippet", ""), candidate.get("text", "")] if x)
+
+    candidate_text = _candidate_local_numeric_text(candidate)
     facts = _extract_numeric_facts_from_text(candidate_text, ci_type)
+
     if not facts:
-        return "UNKNOWN", "candidate_fact_not_identified"
-    
+        return "UNKNOWN", "candidate_local_fact_not_identified"
+
     for target in target_facts:
         kind = target.get("kind")
         same = [f for f in facts if f.get("kind") == kind]
+
         if not same:
             continue
-        
+
         if kind == "sample_size":
             for f in same:
-                if _number_equal(f.get("value"), target.get("value")) and f.get("operator") == target.get("operator", "="):
-                    return "MATCH", f"sample_size={target.get('value')} with operator={target.get('operator', '=')}"
-            return "MISMATCH", f"sample_size or operator differs from {target.get('value')}"
-        
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", f"sample_size={target.get('value')} operator={target.get('operator', '=')}"
+            return "MISMATCH", f"sample_size/operator differs from {target.get('value')}"
+
         if kind == "group_sample_size":
             for f in same:
-                if (_number_equal(f.get("group_size"), target.get("group_size")) and 
-                    f.get("group_count") == target.get("group_count") and
-                    f.get("operator") == target.get("operator", "=")):
-                    return "MATCH", "group sample size matches"
-            return "MISMATCH", "group sample size or operator differs"
-        
+                if (
+                    _number_equal(f.get("group_size"), target.get("group_size"))
+                    and f.get("group_count") == target.get("group_count")
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", "group sample size matches exactly"
+            return "MISMATCH", "group sample size/operator differs"
+
         if kind == "percentage":
-            # For percentages, also check metric if both have it
             for f in same:
-                target_metric = target.get("metric")
-                fact_metric = f.get("metric")
-                # If both have metrics, they must match
-                if target_metric and fact_metric and target_metric != fact_metric:
+                if target.get("metric") and f.get("metric") and target.get("metric") != f.get("metric"):
                     continue
-                # If value and operator match, it's a match
-                if _number_equal(f.get("value"), target.get("value")) and f.get("operator") == target.get("operator", "="):
-                    return "MATCH", f"percentage matches {target.get('value')}% with operator={target.get('operator', '=')}"
-            return "MISMATCH", f"percentage value, operator, or metric differs"
-        
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", "percentage value/operator/metric matches exactly"
+            return "MISMATCH", "percentage value/operator/metric differs"
+
         if kind in {"hazard_ratio", "odds_ratio"}:
             for f in same:
-                # Normalize : to = for ratio types (they're synonymous separators)
-                f_op = "=" if f.get("operator") == ":" else f.get("operator", "=")
-                t_op = "=" if target.get("operator") == ":" else target.get("operator", "=")
-                if _number_equal(f.get("value"), target.get("value")) and f_op == t_op:
-                    return "MATCH", f"{kind} matches with operator={t_op}"
-            return "MISMATCH", f"{kind} value or operator differs"
-        
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", f"{kind} matches exactly"
+            return "MISMATCH", f"{kind} value/operator differs"
+
         if kind == "p_value":
-            # STRICT: Both value AND operator must match
             for f in same:
-                if _number_equal(f.get("value"), target.get("value")) and f.get("operator") == target.get("operator"):
-                    return "MATCH", f"p_value matches {target.get('operator')}{target.get('value')}"
-            return "MISMATCH", f"p_value differs (expected {target.get('operator')}{target.get('value')})"
-        
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("operator") == target.get("operator")
+                ):
+                    return "MATCH", "p-value value/operator matches exactly"
+            return "MISMATCH", "p-value value/operator differs"
+
         if kind == "confidence_interval":
             for f in same:
-                target_unit = target.get("unit")
-                fact_unit = f.get("unit")
-                # If both have units, they must match
-                if target_unit and fact_unit and target_unit != fact_unit:
+                if target.get("unit") and f.get("unit") and target.get("unit") != f.get("unit"):
                     continue
-                if (_number_equal(f.get("lower"), target.get("lower")) and 
-                    _number_equal(f.get("upper"), target.get("upper")) and
-                    f.get("operator") == target.get("operator", "=")):
-                    return "MATCH", "confidence interval bounds match"
-            # If any candidate has different unit than target, return UNKNOWN
-            for f in same:
-                if f.get("unit") and target.get("unit") and f.get("unit") != target.get("unit"):
-                    return "UNKNOWN", f"different CI units ({target.get('unit')} vs {f.get('unit')})"
-            return "MISMATCH", "confidence interval bounds or operator differs"
-        
+                if (
+                    _number_equal(f.get("lower"), target.get("lower"))
+                    and _number_equal(f.get("upper"), target.get("upper"))
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", "confidence interval bounds/unit match exactly"
+            return "MISMATCH", "confidence interval bounds/operator/unit differs"
+
         if kind == "score_range":
             for f in same:
-                # If metrics exist and are different, continue (no match)
-                if f.get("metric") and target.get("metric") and f.get("metric") != target.get("metric"):
+                if target.get("metric") and f.get("metric") and target.get("metric") != f.get("metric"):
                     continue
-                if ((_number_equal(f.get("lower"), target.get("lower")) and 
-                    _number_equal(f.get("upper"), target.get("upper")) and
-                    f.get("operator") == target.get("operator", "="))):
-                    return "MATCH", "score range matches"
-            # If any candidate has different metric than target, return UNKNOWN
-            for f in same:
-                if f.get("metric") and target.get("metric") and f.get("metric") != target.get("metric"):
-                    return "UNKNOWN", f"different score metrics ({target.get('metric')} vs {f.get('metric')})"
-            return "MISMATCH", "score range or operator differs"
-    
-    return "UNKNOWN", "no_same_fact"
+                if (
+                    _number_equal(f.get("lower"), target.get("lower"))
+                    and _number_equal(f.get("upper"), target.get("upper"))
+                    and f.get("operator") == target.get("operator", "=")
+                ):
+                    return "MATCH", "numeric range metric/bounds match exactly"
+            return "MISMATCH", "numeric range metric/bounds differ"
 
+        if kind == "median":
+            for f in same:
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and (not target.get("unit") or f.get("unit") == target.get("unit"))
+                ):
+                    return "MATCH", "median value/unit matches exactly"
+            return "MISMATCH", "median value/unit differs"
+
+        if kind == "temporal":
+            for f in same:
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("unit") == target.get("unit")
+                ):
+                    return "MATCH", "temporal value/unit matches exactly"
+            return "MISMATCH", "temporal value/unit differs"
+
+        if kind == "dosage":
+            for f in same:
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("unit") == target.get("unit")
+                ):
+                    return "MATCH", "dosage value/unit matches exactly"
+            return "MISMATCH", "dosage value/unit differs"
+
+        if kind == "age":
+            for f in same:
+                if (
+                    _number_equal(f.get("value"), target.get("value"))
+                    and f.get("unit") == target.get("unit")
+                ):
+                    return "MATCH", "age value/unit matches exactly"
+            return "MISMATCH", "age value/unit differs"
+
+    return "UNKNOWN", "no_same_typed_numeric_fact"
 
 def _candidate_confidence(c: dict) -> float:
     return round(
@@ -556,7 +777,7 @@ def _s4_context_expand(req: dict) -> dict:
 
 
 def _s5_numeric_gate(req: dict) -> dict:
-    """Stage 5a: Conservative numeric constraint gate — only reject explicit contradictions."""
+    """Stage 5a: Strict numeric constraint gate — MATCH passes; MISMATCH/UNKNOWN reject."""
     if req.get("_failed") or req.get("_early_exit"):
         return req
     t0 = time.perf_counter()
@@ -574,14 +795,14 @@ def _s5_numeric_gate(req: dict) -> dict:
     for c in candidates:
         result, reason = _compare_numeric_constraint(ci, c, ci_type)
         if result == "MISMATCH":
-            # Reject only explicit contradictions
+            # Explicit contradiction -> reject
             gated.append({**c, "verdict": "NO", "reason": f"numeric_gate: {reason}"})
 
         elif result == "UNKNOWN":
-            # UNKNOWN — dont pass to verifier
+            # Unknown/unproven numeric fact -> reject in strict mode
             gated.append({**c, "verdict": "NO", "reason": f"numeric_gate: {reason}"})
         else:
-            # MATCH or UNKNOWN — pass to verifier
+            # Only an exact typed MATCH may reach the verifier
             passed.append(c)
     
     req["expanded_candidates"] = passed
