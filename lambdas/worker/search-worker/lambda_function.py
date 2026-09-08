@@ -54,7 +54,7 @@ from contextvars import ContextVar, copy_context
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
+import re
 
 # ── Logging Context Variables (thread-safe for concurrent execution) ───────
 _ctx_tenant = ContextVar("tenant", default="-")
@@ -231,7 +231,8 @@ _EVIDENCE_RANK: dict[str, int] = {
 
 _NUMERIC_GATE_TYPES: frozenset[str] = frozenset({
     "NUMERIC_SAMPLE_SIZE", "CONFIDENCE_INTERVAL", "P_VALUE",
-    "HAZARD_RATIO", "ODDS_RATIO", "NUMERIC_PERCENTAGE", "MEDIAN",
+    "HAZARD_RATIO", "ODDS_RATIO", "NUMERIC_PERCENTAGE", "NUMERIC_RANGE",
+    "MEDIAN", "TEMPORAL_CONSTRAINT", "DOSAGE", "AGE_DEMOGRAPHIC",
     "NUMERIC", "STATISTICAL",
 })
 
@@ -242,59 +243,115 @@ def _is_related(ev: str) -> bool:
     return ev.startswith("SAME_") or ev.startswith("RELATED_") or ev == "BACKGROUND"
 
 
-def _numeric_gate_pattern(ci: dict):
-    """
-    Return a pattern whose .search(text) must be truthy for a candidate to pass
-    the numeric gate.  Returns None when no meaningful constraint can be derived
-    (in which case the gate is skipped and all candidates pass through).
+def _normalize_numeric_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().replace("–", "-").replace("—", "-")
 
-    Uses statistical_identity.type + value when available; falls back to a
-    direct regex on the CI text for common forms like "n = 8".
-    """
-    import re as _re
 
-    si      = ci.get("statistical_identity") or {}
-    si_type = si.get("type")
-    ci_text = ci.get("knownCI", "")
+def _number_equal(a: Any, b: Any) -> bool:
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return _normalize_numeric_text(a) == _normalize_numeric_text(b)
 
-    def _tok(v) -> str:
-        try:
-            return str(int(v)) if float(v) == int(float(v)) else str(v)
-        except (TypeError, ValueError):
-            return str(v)
 
-    if si_type == "sample_size" and si.get("sample_size") is not None:
-        n = _tok(si["sample_size"])
-        # Match N=X regardless of whether the CI used =, ≥, >, ≤, < —
-        # the document will always express the measured value as N=X.
-        return _re.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{_re.escape(n)}\b')
+def _extract_numeric_facts_from_text(text: str, ci_type: str) -> list[dict]:
+    """Extract numeric facts relevant to the classified CI type."""
+    text = text or ""
+    facts = []
 
-    if si_type == "confidence_interval":
-        lo = si.get("lower_ci")
-        hi = si.get("upper_ci")
-        if lo is not None and hi is not None:
-            lo_p = _re.compile(rf'\b{_re.escape(_tok(lo))}\b')
-            hi_p = _re.compile(rf'\b{_re.escape(_tok(hi))}\b')
-            class _Both:
-                def search(self, t): return lo_p.search(t) and hi_p.search(t)
-            return _Both()
+    if ci_type == "NUMERIC_SAMPLE_SIZE":
+        for m in re.finditer(r"\b[nN]\s*[=:]?\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?", text):
+            facts.append({"kind": "sample_size", "value": float(m.group(1))})
+        for m in re.finditer(r"\b(\d+(?:\.\d+)?)\s+(?:subjects?|patients?|participants?|individuals?|volunteers?)\b", text, re.I):
+            facts.append({"kind": "sample_size", "value": float(m.group(1))})
+        for m in re.finditer(r"\b(\d+(?:\.\d+)?)\s+(?:subjects?|patients?|participants?|individuals?)\s+in\s+each\s+of\s+(\d+)\s+(?:groups?|cohorts?|arms?)\b", text, re.I):
+            facts.append({"kind": "group_sample_size", "group_size": float(m.group(1)), "group_count": int(m.group(2)), "total_size": float(m.group(1))*int(m.group(2))})
 
-    if si_type == "p_value" and si.get("p_value") is not None:
-        return _re.compile(rf'\b{_re.escape(str(si["p_value"]))}\b')
+    elif ci_type == "NUMERIC_PERCENTAGE":
+        metric = r"(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|progression\s*[-–]free\s+survival)"
+        for m in re.finditer(rf"\b{metric}\b(?:\s+(?:was|of)|\s*[:=])?\s*(\d+(?:\.\d+)?)%", text, re.I):
+            facts.append({"kind": "percentage", "value": float(m.group(1))})
+        for m in re.finditer(rf"(\d+(?:\.\d+)?)%\s+{metric}\b", text, re.I):
+            facts.append({"kind": "percentage", "value": float(m.group(1))})
+        if not facts:
+            for m in re.finditer(r"\b(\d+(?:\.\d+)?)%", text):
+                facts.append({"kind": "percentage", "value": float(m.group(1))})
 
-    if si_type == "hazard_ratio" and si.get("hazard_ratio") is not None:
-        return _re.compile(rf'\b{_re.escape(_tok(si["hazard_ratio"]))}\b')
+    elif ci_type in {"HAZARD_RATIO", "ODDS_RATIO"}:
+        words = r"(?:HR|hazard\s+ratio)" if ci_type == "HAZARD_RATIO" else r"(?:OR|odds\s+ratio)"
+        kind = "hazard_ratio" if ci_type == "HAZARD_RATIO" else "odds_ratio"
+        for m in re.finditer(rf"\b{words}\b\s*(?:was|of|[:=])?\s*(\d+(?:\.\d+)?)", text, re.I):
+            facts.append({"kind": kind, "value": float(m.group(1))})
 
-    if si_type == "odds_ratio" and si.get("odds_ratio") is not None:
-        return _re.compile(rf'\b{_re.escape(_tok(si["odds_ratio"]))}\b')
+    elif ci_type == "P_VALUE":
+        for m in re.finditer(r"\bp\s*(?:-?\s*value)?\s*[<>=≤≥]?\s*(0?\.\d+(?:[eE][+-]?\d+)?)", text, re.I):
+            facts.append({"kind": "p_value", "value": m.group(1)})
 
-    # Fallback: "n = 8" / "N>=8" / "N≥8" style CI text
-    import re as _re2
-    m = _re2.match(r'[Nn]\s*[=\u2265\u2264><]=?\s*(\d+)', ci_text.strip())
-    if m:
-        return _re2.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{m.group(1)}\b')
+    elif ci_type == "CONFIDENCE_INTERVAL":
+        for m in re.finditer(r"(\d+(?:\.\d+)?)\s*%\s*CI\b.{0,80}?(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)(\d+(?:\.\d+)?)", text, re.I|re.S):
+            facts.append({"kind": "confidence_interval", "level": float(m.group(1)), "lower": float(m.group(2)), "upper": float(m.group(3))})
 
-    return None   # no constraint determinable → don't filter
+    elif ci_type == "NUMERIC_RANGE":
+        for m in re.finditer(r"\b(MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\b\s+(?:of\s+)?(\d+(?:\.\d+)?)\s*(?:[-–]|to)\s*(\d+(?:\.\d+)?)", text, re.I):
+            facts.append({"kind": "score_range", "metric": re.sub(r"\s+", " ", m.group(1)).lower(), "lower": float(m.group(2)), "upper": float(m.group(3))})
+
+    return facts
+
+
+def _ci_numeric_facts(ci: dict, ci_type: str) -> list[dict]:
+    facts = ci.get("numeric_facts") or ci.get("numeric_constraints") or []
+    if isinstance(facts, dict):
+        facts = [facts]
+    if facts:
+        return facts
+    si = ci.get("statistical_identity") or {}
+    if si.get("type") == "sample_size" and si.get("sample_size") is not None:
+        return [{"kind": "sample_size", "value": si["sample_size"]}]
+    if si.get("type") == "confidence_interval" and si.get("lower_ci") is not None and si.get("upper_ci") is not None:
+        return [{"kind": "confidence_interval", "lower": si["lower_ci"], "upper": si["upper_ci"]}]
+    for typ, key, kind in [("p_value","p_value","p_value"),("hazard_ratio","hazard_ratio","hazard_ratio"),("odds_ratio","odds_ratio","odds_ratio")]:
+        if si.get("type") == typ and si.get(key) is not None:
+            return [{"kind": kind, "value": si[key]}]
+    return _extract_numeric_facts_from_text(ci.get("knownCI", ""), ci_type)
+
+
+def _compare_numeric_constraint(ci: dict, candidate: dict, ci_type: str) -> tuple[str, str]:
+    target_facts = _ci_numeric_facts(ci, ci_type)
+    if not target_facts:
+        return "UNKNOWN", "no_numeric_constraint"
+    ctx = candidate.get("context") or {}
+    candidate_text = " ".join(x for x in [ctx.get("current_text", ""), ctx.get("prev_sentence_text", ""), ctx.get("next_sentence_text", ""), candidate.get("snippet", ""), candidate.get("text", "")] if x)
+    facts = _extract_numeric_facts_from_text(candidate_text, ci_type)
+    if not facts:
+        return "UNKNOWN", "candidate_fact_not_identified"
+    for target in target_facts:
+        kind = target.get("kind")
+        same = [f for f in facts if f.get("kind") == kind]
+        if not same:
+            continue
+        if kind == "sample_size":
+            if any(_number_equal(f.get("value"), target.get("value")) for f in same):
+                return "MATCH", f"sample_size={target.get('value')}"
+            return "MISMATCH", f"sample_size differs from {target.get('value')}"
+        if kind == "group_sample_size":
+            if any(_number_equal(f.get("group_size"), target.get("group_size")) and f.get("group_count") == target.get("group_count") for f in same):
+                return "MATCH", "group sample size matches"
+            return "MISMATCH", "group sample size differs"
+        if kind in {"percentage", "hazard_ratio", "odds_ratio", "p_value"}:
+            if any(_number_equal(f.get("value"), target.get("value")) for f in same):
+                return "MATCH", f"{kind} matches"
+            return "MISMATCH", f"{kind} differs"
+        if kind == "confidence_interval":
+            if any(_number_equal(f.get("lower"), target.get("lower")) and _number_equal(f.get("upper"), target.get("upper")) for f in same):
+                return "MATCH", "confidence interval bounds match"
+            return "MISMATCH", "confidence interval bounds differ"
+        if kind == "score_range":
+            if any(f.get("metric") == target.get("metric") and _number_equal(f.get("lower"), target.get("lower")) and _number_equal(f.get("upper"), target.get("upper")) for f in same):
+                return "MATCH", "score range matches"
+            return "MISMATCH", "score range differs"
+    return "UNKNOWN", "no_same_fact"
 
 
 def _candidate_confidence(c: dict) -> float:
@@ -404,6 +461,37 @@ def _s4_context_expand(req: dict) -> dict:
     return req
 
 
+def _s5_numeric_gate(req: dict) -> dict:
+    """Stage 5a: Conservative numeric constraint gate — only reject explicit contradictions."""
+    if req.get("_failed") or req.get("_early_exit"):
+        return req
+    t0 = time.perf_counter()
+    ci = req.get("ci", {})
+    ci_type = req.get("classification", {}).get("type", "")
+    
+    # Only apply gate for numeric CI types
+    if ci_type not in _NUMERIC_GATE_TYPES:
+        req["_st"]["numeric_gate"] = round(time.perf_counter() - t0, 3)
+        return req
+    
+    candidates = req.get("expanded_candidates", [])
+    passed, gated = [], []
+    
+    for c in candidates:
+        result, reason = _compare_numeric_constraint(ci, c, ci_type)
+        if result == "MISMATCH":
+            # Reject only explicit contradictions
+            gated.append({**c, "verdict": "NO", "reason": f"numeric_gate: {reason}"})
+        else:
+            # MATCH or UNKNOWN — pass to verifier
+            passed.append(c)
+    
+    req["expanded_candidates"] = passed
+    req.setdefault("skipped_hits", []).extend(gated)
+    req["_st"]["numeric_gate"] = round(time.perf_counter() - t0, 3)
+    return req
+
+
 def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
     """Reranking stage — currently always skips reranker for cold start reduction."""
     if req.get("_failed") or req.get("_early_exit"):
@@ -416,19 +504,7 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
         {**c, "cross_encoder_score": 10.0}
         for c in expanded
     ]
-    req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
-
-    # 5.5 Numeric gate
-    ci_type = (req.get("classification") or {}).get("ci_type", "") or ""
-    if ci_type in _NUMERIC_GATE_TYPES:
-        pat = _numeric_gate_pattern(req["ci"])
-        if pat is not None:
-            passed, gated = [], []
-            for c in req.get("ranked_candidates", []):
-                txt = ((c.get("context") or {}).get("current_text", "") or c.get("snippet", ""))
-                (passed if pat.search(txt) else gated).append(c)
-            req["ranked_candidates"] = passed
-
+    
     # 5.6 Chunk dedup
     by_chunk: dict[str, dict] = {}
     for c in req.get("ranked_candidates", []):
@@ -446,6 +522,9 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
             gated.append({**c, "verdict": "NO", "reason": "candidate_confidence_gate"})
     req["ranked_candidates"] = passed
     req.setdefault("skipped_hits", []).extend(gated)
+    
+    req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
+    return req
     return req
 
 
@@ -599,15 +678,16 @@ def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
     """Run stage-parallel pipeline, return (all_reqs, stage_wall)."""
     # Reranker uses max_workers=1 to serialise CrossEncoder.predict() calls.
     STAGES = [
-        ("S1:classify",          lambda r: _s1_classify(r),                         n_workers),
-        ("S2:retrieve",          lambda r: _s2_retrieve(r),                         n_workers),
-        ("S3:aggregate",         lambda r: _s3_aggregate(r),                        n_workers),
-        ("S4:context_expand",    lambda r: _s4_context_expand(r),                   n_workers),
-        ("S5:rerank",            lambda r: _s5_rerank(r, skip_rerank),         1),
-        ("S6:llm_verify",        lambda r: _s6_llm_verify(r, skip_verify),     n_workers),
-        ("S7:highlight",         lambda r: _s7_highlight_extract(r),                n_workers),
-        ("S8:merge",             lambda r: _s8_merge(r),                            n_workers),
-        ("S9:evidence_classify", lambda r: _s9_evidence_classify(r, skip_verify), n_workers),
+        ("S1:classify",            lambda r: _s1_classify(r),                         n_workers),
+        ("S2:retrieve",            lambda r: _s2_retrieve(r),                         n_workers),
+        ("S3:aggregate",           lambda r: _s3_aggregate(r),                        n_workers),
+        ("S4:context_expand",      lambda r: _s4_context_expand(r),                   n_workers),
+        ("S5a:numeric_gate",       lambda r: _s5_numeric_gate(r),                     n_workers),
+        ("S5b:rerank",             lambda r: _s5_rerank(r, skip_rerank),              1),
+        ("S6:llm_verify",          lambda r: _s6_llm_verify(r, skip_verify),          n_workers),
+        ("S7:highlight",           lambda r: _s7_highlight_extract(r),                n_workers),
+        ("S8:merge",               lambda r: _s8_merge(r),                            n_workers),
+        ("S9:evidence_classify",   lambda r: _s9_evidence_classify(r, skip_verify),  n_workers),
     ]
 
     stage_wall: dict[str, float] = {}
