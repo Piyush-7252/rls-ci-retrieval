@@ -54,7 +54,7 @@ from contextvars import ContextVar, copy_context
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-import re
+
 
 # ── Logging Context Variables (thread-safe for concurrent execution) ───────
 _ctx_tenant = ContextVar("tenant", default="-")
@@ -231,8 +231,7 @@ _EVIDENCE_RANK: dict[str, int] = {
 
 _NUMERIC_GATE_TYPES: frozenset[str] = frozenset({
     "NUMERIC_SAMPLE_SIZE", "CONFIDENCE_INTERVAL", "P_VALUE",
-    "HAZARD_RATIO", "ODDS_RATIO", "NUMERIC_PERCENTAGE", "NUMERIC_RANGE",
-    "MEDIAN", "TEMPORAL_CONSTRAINT", "DOSAGE", "AGE_DEMOGRAPHIC",
+    "HAZARD_RATIO", "ODDS_RATIO", "NUMERIC_PERCENTAGE", "MEDIAN",
     "NUMERIC", "STATISTICAL",
 })
 
@@ -243,431 +242,60 @@ def _is_related(ev: str) -> bool:
     return ev.startswith("SAME_") or ev.startswith("RELATED_") or ev == "BACKGROUND"
 
 
-def _normalize_numeric_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().replace("–", "-").replace("—", "-")
-
-
-def _number_equal(a: Any, b: Any) -> bool:
-    try:
-        return float(a) == float(b)
-    except (TypeError, ValueError):
-        return _normalize_numeric_text(a) == _normalize_numeric_text(b)
-
-
-def _extract_numeric_facts_from_text(text: str, ci_type: str) -> list[dict]:
-    """Extract candidate numeric facts conservatively.
-
-    Strict rules:
-    - A bare number is NEVER enough to establish a numeric match.
-    - Matching is based only on candidate-local text.
-    - Expanded previous/next sentences and broad context cannot manufacture
-      a numeric MATCH.
-    - UNKNOWN is rejected by _s5_numeric_gate.
+def _numeric_gate_pattern(ci: dict):
     """
-    text = text or ""
-    facts: list[dict] = []
+    Return a pattern whose .search(text) must be truthy for a candidate to pass
+    the numeric gate.  Returns None when no meaningful constraint can be derived
+    (in which case the gate is skipped and all candidates pass through).
 
-    def _op(raw: str | None, default: str = "=") -> str:
-        raw = (raw or "").strip()
-        return raw or default
-
-    if ci_type == "NUMERIC_SAMPLE_SIZE":
-        # ONLY explicit n= / n: / N= / N: syntax.
-        # "62 patients", "62 subjects", "age 62" are NOT sample size.
-        for m in re.finditer(
-            r"\b[nN]\s*([=:])\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?(?!\d)",
-            text,
-        ):
-            facts.append({
-                "kind": "sample_size",
-                "value": float(m.group(2)),
-                "operator": _op(m.group(1)),
-            })
-
-        # Group sample size also requires explicit n/N syntax.
-        for m in re.finditer(
-            r"\b[nN]\s*([=:])\s*\(?\s*(\d+(?:\.\d+)?)\s*\)?\s+"
-            r"(?:subjects?|patients?|participants?|individuals?)\s+in\s+each\s+of\s+"
-            r"(\d+)\s+(?:groups?|cohorts?|arms?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "group_sample_size",
-                "group_size": float(m.group(2)),
-                "group_count": int(m.group(3)),
-                "total_size": float(m.group(2)) * int(m.group(3)),
-                "operator": _op(m.group(1)),
-            })
-
-    elif ci_type == "NUMERIC_PERCENTAGE":
-        metric_pattern = (
-            r"(?:ORR|RR|DOR|PFS|OS|CR|response\s+rate|overall\s+response|"
-            r"progression\s*[-–]free\s+survival)"
-        )
-
-        def _metric(raw: str) -> str:
-            raw = raw.upper()
-            if "OVERALL" in raw:
-                return "ORR"
-            if "RESPONSE" in raw:
-                return "RR"
-            if "PROGRESSION" in raw or "FREE" in raw:
-                return "PFS"
-            return raw
-
-        # Metric is mandatory. Bare "62%" is UNKNOWN -> reject.
-        for m in re.finditer(
-            rf"\b({metric_pattern})\b\s*(?:(?:was|of)\s+)?([=:])?\s*"
-            rf"(\d+(?:\.\d+)?)%",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "percentage",
-                "value": float(m.group(3)),
-                "operator": _op(m.group(2)),
-                "metric": _metric(m.group(1)),
-            })
-
-        for m in re.finditer(
-            rf"(\d+(?:\.\d+)?)%\s+\b({metric_pattern})\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "percentage",
-                "value": float(m.group(1)),
-                "operator": "=",
-                "metric": _metric(m.group(2)),
-            })
-
-    elif ci_type in {"HAZARD_RATIO", "ODDS_RATIO"}:
-        words = r"(?:HR|hazard\s+ratio)" if ci_type == "HAZARD_RATIO" else r"(?:OR|odds\s+ratio)"
-        kind = "hazard_ratio" if ci_type == "HAZARD_RATIO" else "odds_ratio"
-
-        # Ratio marker is mandatory. Bare 0.72 is UNKNOWN -> reject.
-        for m in re.finditer(
-            rf"\b{words}\b\s*(?:was|of)?\s*([=:])\s*(\d+(?:\.\d+)?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": kind,
-                "value": float(m.group(2)),
-                "operator": _op(m.group(1)),
-            })
-
-    elif ci_type == "P_VALUE":
-        for m in re.finditer(
-            r"\bp\s*(?:-?\s*value)?\s*([<>]=?|=|≤|≥)\s*"
-            r"(0?\.\d+(?:[eE][+-]?\d+)?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "p_value",
-                "value": m.group(2),
-                "operator": m.group(1),
-            })
-
-    elif ci_type == "CONFIDENCE_INTERVAL":
-        # Explicit confidence level + CI + both bounds required.
-        for m in re.finditer(
-            r"(\d+(?:\.\d+)?)\s*%\s*CI\b\s*(?:[:=]\s*)?"
-            r"(\d+(?:\.\d+)?)\s*(?:[-–]\s*|to\s+)"
-            r"(\d+(?:\.\d+)?)(?:\s*(days?|months?|years?|hours?|weeks?|"
-            r"seconds?|minutes?))?\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "confidence_interval",
-                "level": float(m.group(1)),
-                "lower": float(m.group(2)),
-                "upper": float(m.group(3)),
-                "unit": m.group(4).lower() if m.group(4) else None,
-                "operator": "=",
-            })
-
-    elif ci_type == "NUMERIC_RANGE":
-        for m in re.finditer(
-            r"\b(MMSE|Mini-Mental\s+State\s+Examination|score|age|ages?)\b"
-            r"\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(?:[-–]|to)\s*"
-            r"(\d+(?:\.\d+)?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "score_range",
-                "metric": re.sub(r"\s+", " ", m.group(1)).lower(),
-                "lower": float(m.group(2)),
-                "upper": float(m.group(3)),
-                "operator": "=",
-            })
-
-    elif ci_type == "MEDIAN":
-        for m in re.finditer(
-            r"\bmedian\b\s*(?:was|of|=|:)?\s*(\d+(?:\.\d+)?)\b"
-            r"(?:\s*(days?|months?|years?|hours?|weeks?|seconds?|minutes?))?",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "median",
-                "value": float(m.group(1)),
-                "unit": m.group(2).lower().rstrip("s") if m.group(2) else None,
-                "operator": "=",
-            })
-
-    elif ci_type == "TEMPORAL_CONSTRAINT":
-        # A temporal value requires an explicit temporal unit.
-        for m in re.finditer(
-            r"(\d+(?:\.\d+)?)\s*(days?|months?|years?|hours?|weeks?|"
-            r"seconds?|minutes?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "temporal",
-                "value": float(m.group(1)),
-                "unit": m.group(2).lower().rstrip("s"),
-            })
-
-    elif ci_type == "DOSAGE":
-        for m in re.finditer(
-            r"(?:\b(?:dose|dosage|administered|received|given)\b\s*)?"
-            r"(\d+(?:\.\d+)?)\s*(mg/kg|mcg/kg|μg/kg|mg/m2|mg/m²|mg|mcg|μg|ug|g|kg)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "dosage",
-                "value": float(m.group(1)),
-                "unit": m.group(2).lower(),
-            })
-
-    elif ci_type == "AGE_DEMOGRAPHIC":
-        for m in re.finditer(
-            r"\b(?:age|aged)\b\s*(?:=|:|of|was)?\s*"
-            r"(\d+(?:\.\d+)?)\s*(years?|months?)\b",
-            text, re.I,
-        ):
-            facts.append({
-                "kind": "age",
-                "value": float(m.group(1)),
-                "unit": m.group(2).lower().rstrip("s"),
-            })
-
-    return facts
-
-
-
-def _ci_numeric_facts(ci: dict, ci_type: str) -> list[dict]:
-    """Get the authoritative numeric constraint from the enriched CI."""
-    facts = ci.get("numeric_facts") or ci.get("numeric_constraints") or []
-    if isinstance(facts, dict):
-        facts = [facts]
-    if facts:
-        return facts
-
-    si = ci.get("statistical_identity") or {}
-
-    if si.get("type") == "sample_size" and si.get("sample_size") is not None:
-        return [{
-            "kind": "sample_size",
-            "value": si["sample_size"],
-            "operator": si.get("operator", "="),
-        }]
-
-    if (
-        si.get("type") == "confidence_interval"
-        and si.get("lower_ci") is not None
-        and si.get("upper_ci") is not None
-    ):
-        return [{
-            "kind": "confidence_interval",
-            "lower": si["lower_ci"],
-            "upper": si["upper_ci"],
-            "unit": si.get("unit"),
-            "operator": "=",
-        }]
-
-    if si.get("type") == "percentage" and si.get("percentage_value") is not None:
-        return [{
-            "kind": "percentage",
-            "value": si["percentage_value"],
-            "operator": si.get("operator", "="),
-            "metric": si.get("metric"),
-        }]
-
-    for typ, key, kind in [
-        ("p_value", "p_value", "p_value"),
-        ("hazard_ratio", "hazard_ratio", "hazard_ratio"),
-        ("odds_ratio", "odds_ratio", "odds_ratio"),
-    ]:
-        if si.get("type") == typ and si.get(key) is not None:
-            return [{
-                "kind": kind,
-                "value": si[key],
-                "operator": si.get("operator", "="),
-            }]
-
-    return _extract_numeric_facts_from_text(ci.get("knownCI", ""), ci_type)
-
-def _candidate_local_numeric_text(candidate: dict) -> str:
-    """Return only text belonging to the retrieved candidate itself.
-
-    Do NOT include prev/next sentences, paragraph context, or context_chunk_text.
-    Those can contain unrelated numbers and create false numeric matches.
+    Uses statistical_identity.type + value when available; falls back to a
+    direct regex on the CI text for common forms like "n = 8".
     """
-    ctx = candidate.get("context") or {}
-    obj = candidate.get("matched_object") or {}
+    import re as _re
 
-    parts = [
-        candidate.get("match_span"),
-        candidate.get("text"),
-        ctx.get("current_text"),
-        obj.get("text"),
-    ]
+    si      = ci.get("statistical_identity") or {}
+    si_type = si.get("type")
+    ci_text = ci.get("knownCI", "")
 
-    seen = set()
-    local = []
-    for value in parts:
-        value = str(value or "").strip()
-        if value and value not in seen:
-            seen.add(value)
-            local.append(value)
-    return " ".join(local)
+    def _tok(v) -> str:
+        try:
+            return str(int(v)) if float(v) == int(float(v)) else str(v)
+        except (TypeError, ValueError):
+            return str(v)
 
+    if si_type == "sample_size" and si.get("sample_size") is not None:
+        n = _tok(si["sample_size"])
+        # Match N=X regardless of whether the CI used =, ≥, >, ≤, < —
+        # the document will always express the measured value as N=X.
+        return _re.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{_re.escape(n)}\b')
 
-def _compare_numeric_constraint(ci: dict, candidate: dict, ci_type: str) -> tuple[str, str]:
-    """Strict typed numeric comparison.
+    if si_type == "confidence_interval":
+        lo = si.get("lower_ci")
+        hi = si.get("upper_ci")
+        if lo is not None and hi is not None:
+            lo_p = _re.compile(rf'\b{_re.escape(_tok(lo))}\b')
+            hi_p = _re.compile(rf'\b{_re.escape(_tok(hi))}\b')
+            class _Both:
+                def search(self, t): return lo_p.search(t) and hi_p.search(t)
+            return _Both()
 
-    MATCH    = exact typed numeric fact on the candidate itself.
-    MISMATCH = same typed fact exists but value/operator differs.
-    UNKNOWN  = candidate does not explicitly express the required fact.
+    if si_type == "p_value" and si.get("p_value") is not None:
+        return _re.compile(rf'\b{_re.escape(str(si["p_value"]))}\b')
 
-    The numeric gate rejects both MISMATCH and UNKNOWN.
-    """
-    target_facts = _ci_numeric_facts(ci, ci_type)
-    if not target_facts:
-        return "UNKNOWN", "no_numeric_constraint"
+    if si_type == "hazard_ratio" and si.get("hazard_ratio") is not None:
+        return _re.compile(rf'\b{_re.escape(_tok(si["hazard_ratio"]))}\b')
 
-    candidate_text = _candidate_local_numeric_text(candidate)
-    facts = _extract_numeric_facts_from_text(candidate_text, ci_type)
+    if si_type == "odds_ratio" and si.get("odds_ratio") is not None:
+        return _re.compile(rf'\b{_re.escape(_tok(si["odds_ratio"]))}\b')
 
-    if not facts:
-        return "UNKNOWN", "candidate_local_fact_not_identified"
+    # Fallback: "n = 8" / "N>=8" / "N≥8" style CI text
+    import re as _re2
+    m = _re2.match(r'[Nn]\s*[=\u2265\u2264><]=?\s*(\d+)', ci_text.strip())
+    if m:
+        return _re2.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{m.group(1)}\b')
 
-    for target in target_facts:
-        kind = target.get("kind")
-        same = [f for f in facts if f.get("kind") == kind]
+    return None   # no constraint determinable → don't filter
 
-        if not same:
-            continue
-
-        if kind == "sample_size":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", f"sample_size={target.get('value')} operator={target.get('operator', '=')}"
-            return "MISMATCH", f"sample_size/operator differs from {target.get('value')}"
-
-        if kind == "group_sample_size":
-            for f in same:
-                if (
-                    _number_equal(f.get("group_size"), target.get("group_size"))
-                    and f.get("group_count") == target.get("group_count")
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", "group sample size matches exactly"
-            return "MISMATCH", "group sample size/operator differs"
-
-        if kind == "percentage":
-            for f in same:
-                if target.get("metric") and f.get("metric") and target.get("metric") != f.get("metric"):
-                    continue
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", "percentage value/operator/metric matches exactly"
-            return "MISMATCH", "percentage value/operator/metric differs"
-
-        if kind in {"hazard_ratio", "odds_ratio"}:
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", f"{kind} matches exactly"
-            return "MISMATCH", f"{kind} value/operator differs"
-
-        if kind == "p_value":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("operator") == target.get("operator")
-                ):
-                    return "MATCH", "p-value value/operator matches exactly"
-            return "MISMATCH", "p-value value/operator differs"
-
-        if kind == "confidence_interval":
-            for f in same:
-                if target.get("unit") and f.get("unit") and target.get("unit") != f.get("unit"):
-                    continue
-                if (
-                    _number_equal(f.get("lower"), target.get("lower"))
-                    and _number_equal(f.get("upper"), target.get("upper"))
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", "confidence interval bounds/unit match exactly"
-            return "MISMATCH", "confidence interval bounds/operator/unit differs"
-
-        if kind == "score_range":
-            for f in same:
-                if target.get("metric") and f.get("metric") and target.get("metric") != f.get("metric"):
-                    continue
-                if (
-                    _number_equal(f.get("lower"), target.get("lower"))
-                    and _number_equal(f.get("upper"), target.get("upper"))
-                    and f.get("operator") == target.get("operator", "=")
-                ):
-                    return "MATCH", "numeric range metric/bounds match exactly"
-            return "MISMATCH", "numeric range metric/bounds differ"
-
-        if kind == "median":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and (not target.get("unit") or f.get("unit") == target.get("unit"))
-                ):
-                    return "MATCH", "median value/unit matches exactly"
-            return "MISMATCH", "median value/unit differs"
-
-        if kind == "temporal":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("unit") == target.get("unit")
-                ):
-                    return "MATCH", "temporal value/unit matches exactly"
-            return "MISMATCH", "temporal value/unit differs"
-
-        if kind == "dosage":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("unit") == target.get("unit")
-                ):
-                    return "MATCH", "dosage value/unit matches exactly"
-            return "MISMATCH", "dosage value/unit differs"
-
-        if kind == "age":
-            for f in same:
-                if (
-                    _number_equal(f.get("value"), target.get("value"))
-                    and f.get("unit") == target.get("unit")
-                ):
-                    return "MATCH", "age value/unit matches exactly"
-            return "MISMATCH", "age value/unit differs"
-
-    return "UNKNOWN", "no_same_typed_numeric_fact"
 
 def _candidate_confidence(c: dict) -> float:
     return round(
@@ -776,41 +404,6 @@ def _s4_context_expand(req: dict) -> dict:
     return req
 
 
-def _s5_numeric_gate(req: dict) -> dict:
-    """Stage 5a: Strict numeric constraint gate — MATCH passes; MISMATCH/UNKNOWN reject."""
-    if req.get("_failed") or req.get("_early_exit"):
-        return req
-    t0 = time.perf_counter()
-    ci = req.get("ci", {})
-    ci_type = req.get("classification", {}).get("type", "")
-    
-    # Only apply gate for numeric CI types
-    if ci_type not in _NUMERIC_GATE_TYPES:
-        req["_st"]["numeric_gate"] = round(time.perf_counter() - t0, 3)
-        return req
-    
-    candidates = req.get("expanded_candidates", [])
-    passed, gated = [], []
-    
-    for c in candidates:
-        result, reason = _compare_numeric_constraint(ci, c, ci_type)
-        if result == "MISMATCH":
-            # Explicit contradiction -> reject
-            gated.append({**c, "verdict": "NO", "reason": f"numeric_gate: {reason}"})
-
-        elif result == "UNKNOWN":
-            # Unknown/unproven numeric fact -> reject in strict mode
-            gated.append({**c, "verdict": "NO", "reason": f"numeric_gate: {reason}"})
-        else:
-            # Only an exact typed MATCH may reach the verifier
-            passed.append(c)
-    
-    req["expanded_candidates"] = passed
-    req.setdefault("skipped_hits", []).extend(gated)
-    req["_st"]["numeric_gate"] = round(time.perf_counter() - t0, 3)
-    return req
-
-
 def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
     """Reranking stage — currently always skips reranker for cold start reduction."""
     if req.get("_failed") or req.get("_early_exit"):
@@ -823,7 +416,19 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
         {**c, "cross_encoder_score": 10.0}
         for c in expanded
     ]
-    
+    req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
+
+    # 5.5 Numeric gate
+    ci_type = (req.get("classification") or {}).get("ci_type", "") or ""
+    if ci_type in _NUMERIC_GATE_TYPES:
+        pat = _numeric_gate_pattern(req["ci"])
+        if pat is not None:
+            passed, gated = [], []
+            for c in req.get("ranked_candidates", []):
+                txt = ((c.get("context") or {}).get("current_text", "") or c.get("snippet", ""))
+                (passed if pat.search(txt) else gated).append(c)
+            req["ranked_candidates"] = passed
+
     # 5.6 Chunk dedup
     by_chunk: dict[str, dict] = {}
     for c in req.get("ranked_candidates", []):
@@ -841,9 +446,6 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
             gated.append({**c, "verdict": "NO", "reason": "candidate_confidence_gate"})
     req["ranked_candidates"] = passed
     req.setdefault("skipped_hits", []).extend(gated)
-    
-    req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
-    return req
     return req
 
 
@@ -997,16 +599,15 @@ def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
     """Run stage-parallel pipeline, return (all_reqs, stage_wall)."""
     # Reranker uses max_workers=1 to serialise CrossEncoder.predict() calls.
     STAGES = [
-        ("S1:classify",            lambda r: _s1_classify(r),                         n_workers),
-        ("S2:retrieve",            lambda r: _s2_retrieve(r),                         n_workers),
-        ("S3:aggregate",           lambda r: _s3_aggregate(r),                        n_workers),
-        ("S4:context_expand",      lambda r: _s4_context_expand(r),                   n_workers),
-        ("S5a:numeric_gate",       lambda r: _s5_numeric_gate(r),                     n_workers),
-        ("S5b:rerank",             lambda r: _s5_rerank(r, skip_rerank),              1),
-        ("S6:llm_verify",          lambda r: _s6_llm_verify(r, skip_verify),          n_workers),
-        ("S7:highlight",           lambda r: _s7_highlight_extract(r),                n_workers),
-        ("S8:merge",               lambda r: _s8_merge(r),                            n_workers),
-        ("S9:evidence_classify",   lambda r: _s9_evidence_classify(r, skip_verify),  n_workers),
+        ("S1:classify",          lambda r: _s1_classify(r),                         n_workers),
+        ("S2:retrieve",          lambda r: _s2_retrieve(r),                         n_workers),
+        ("S3:aggregate",         lambda r: _s3_aggregate(r),                        n_workers),
+        ("S4:context_expand",    lambda r: _s4_context_expand(r),                   n_workers),
+        ("S5:rerank",            lambda r: _s5_rerank(r, skip_rerank),         1),
+        ("S6:llm_verify",        lambda r: _s6_llm_verify(r, skip_verify),     n_workers),
+        ("S7:highlight",         lambda r: _s7_highlight_extract(r),                n_workers),
+        ("S8:merge",             lambda r: _s8_merge(r),                            n_workers),
+        ("S9:evidence_classify", lambda r: _s9_evidence_classify(r, skip_verify), n_workers),
     ]
 
     stage_wall: dict[str, float] = {}
