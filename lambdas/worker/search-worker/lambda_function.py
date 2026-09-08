@@ -1223,11 +1223,11 @@ def _clean_result(result: dict) -> dict:
         # granularity for the CSV exporter and for manual review.
         # Replaces the separate rejected_hits / skipped_hits split for
         # downstream tools; both are kept below for backward compatibility.
-        "candidates": [_full_candidate_record(v) for v in result.get("verified_candidates", [])],
+        # "candidates": [_full_candidate_record(v) for v in result.get("verified_candidates", [])],
         "final_hits":       [_hit_with_provenance(h) for h in result.get("final_hits", [])],
-        "rejected_hits":    rejected_hits,
-        "skipped_hits":     skipped_hits,
-        "ce_histogram":     result.get("ce_histogram"),
+        # "rejected_hits":    rejected_hits,
+        # "skipped_hits":     skipped_hits,
+        # "ce_histogram":     result.get("ce_histogram"),
         "timings":          result.get("timings", {}),
         "highlight_mode":   result.get("highlight_mode", "span"),
     }
