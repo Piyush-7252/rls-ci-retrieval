@@ -33,6 +33,7 @@ VECTOR_SCORE_RATIO     = float(os.environ.get("VECTOR_SCORE_RATIO", "0.0"))
 VECTOR_MAX_HITS        = int(os.environ.get("VECTOR_MAX_HITS", "100"))
 FETCH_SIZE             = int(os.environ.get("VECTOR_FETCH_SIZE", "100"))
 OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
+VECTOR_SEARCH_WORKERS = int(os.environ.get("VECTOR_SEARCH_WORKERS", "1"))
 # Comma-separated object types to exclude from semantic-objects vector search.
 # Useful for ablation: VECTOR_EXCLUDE_TYPES=sentence  → Variant B (no sentence vectors)
 #                      VECTOR_EXCLUDE_TYPES=sentence,heading → Variant C
@@ -121,7 +122,7 @@ def _process(req: dict) -> dict:
     # Lanes 1-3 are independent — run concurrently to eliminate serial latency
     from concurrent.futures import ThreadPoolExecutor as _TPE
     import time as _time
-    with _TPE(max_workers=3) as _pool:
+    with _TPE(max_workers=VECTOR_SEARCH_WORKERS) as _pool:
         _ts_obj  = _time.perf_counter()
         _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
         _ts_head = _time.perf_counter()

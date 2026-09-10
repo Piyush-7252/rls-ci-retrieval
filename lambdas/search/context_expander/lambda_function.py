@@ -45,6 +45,7 @@ OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
 # The matched table object is never replaced; this only augments its context.
 TABLE_CONTEXT_MAX_OBJECTS = int(os.environ.get("TABLE_CONTEXT_MAX_OBJECTS", "200"))
 TABLE_CONTEXT_MAX_CHARS = int(os.environ.get("TABLE_CONTEXT_MAX_CHARS", "16000"))
+CONTEXT_EXPANDER_WORKERS = int(os.environ.get("CONTEXT_EXPANDER_WORKERS", "1"))
 
 def _get_os():
     from shared.opensearch_client import get_opensearch_client
@@ -114,7 +115,7 @@ def _process(req: dict) -> dict:
     # ── Phase 2: run all 4 fetches concurrently (they're independent) ──────────
     from concurrent.futures import ThreadPoolExecutor as _TPE
     deduped_ids = list(dict.fromkeys(primary_ids))
-    with _TPE(max_workers=4) as _pool:
+    with _TPE(max_workers=CONTEXT_EXPANDER_WORKERS) as _pool:
         _f_chunk = _pool.submit(_mget_chunks, deduped_ids)
         _f_idx   = _pool.submit(_msearch_by_idx, document_id, list(idx_needed), tenant_id=tenant_id, project_id=project_id)
         _f_ctx   = _pool.submit(_fetch_context_objects_merged, document_id, ctx_keys, tenant_id=tenant_id, project_id=project_id)
