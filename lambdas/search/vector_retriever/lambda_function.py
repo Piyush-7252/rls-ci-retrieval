@@ -219,17 +219,6 @@ def _os_meta(resp: Any) -> dict:
         return {}
 
 
-def _redact_vector_body(value: Any) -> Any:
-    """Return a JSON-safe copy with embedding vectors redacted."""
-    if isinstance(value, dict):
-        return {
-            k: ("<1024-D VECTOR REDACTED>" if k == "vector" else _redact_vector_body(v))
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_vector_body(v) for v in value]
-    return value
-
 
 def _log_knn_request(search_id: str, lane: str, index: str, body: dict) -> None:
     """Log the exact OpenSearch request structure, but never the embedding values."""
