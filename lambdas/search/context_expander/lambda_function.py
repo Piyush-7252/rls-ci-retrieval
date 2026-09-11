@@ -30,6 +30,7 @@ import logging
 import os
 import re
 from typing import Any
+import time
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -54,7 +55,108 @@ def _get_os():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ── Diagnostic OpenSearch logging ─────────────────────────────────────────────
+VECTOR_DEBUG_LOG_BODY = os.environ.get("VECTOR_DEBUG_LOG_BODY", "true").lower() == "true"
+
+def _debug_redact(value: Any) -> Any:
+    """Redact embedding vectors while preserving the exact query structure."""
+    if isinstance(value, dict):
+        return {
+            k: ("<VECTOR REDACTED>" if k == "vector" else _debug_redact(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_debug_redact(v) for v in value]
+    return value
+
+def _debug_request(label: str, operation: str, index: str | None, body: Any = None) -> None:
+    if not VECTOR_DEBUG_LOG_BODY:
+        return
+    try:
+        logger.info(
+            "[OS DEBUG] REQUEST op=%s label=%s index=%s body=%s",
+            operation, label, index,
+            json.dumps(_debug_redact(body), separators=(",", ":"), default=str)
+        )
+    except Exception as exc:
+        logger.warning("[OS DEBUG] REQUEST_LOG_FAILED label=%s error=%s", label, exc)
+
+def _debug_search(label: str, index: str, body: dict, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "search", index, body)
+    try:
+        resp = _get_os().search(index=index, body=body, **kwargs)
+        logger.info(
+            "[OS DEBUG] DONE op=search label=%s index=%s elapsed_ms=%.1f "
+            "status=%s took_ms=%s hits=%s shard_total=%s shard_failed=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            getattr(getattr(resp, "meta", None), "status", None),
+            resp.get("took"),
+            len(resp.get("hits", {}).get("hits", [])),
+            resp.get("_shards", {}).get("total"),
+            resp.get("_shards", {}).get("failed"),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=search label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
+def _debug_msearch(label: str, index: str, body: Any, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "msearch", index, body)
+    try:
+        resp = _get_os().msearch(body=body, index=index, **kwargs)
+        responses = resp.get("responses", [])
+        logger.info(
+            "[OS DEBUG] DONE op=msearch label=%s index=%s elapsed_ms=%.1f "
+            "responses=%s errors=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            len(responses),
+            sum(1 for r in responses if r.get("error")),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=msearch label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
+def _debug_mget(label: str, index: str, body: Any, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "mget", index, body)
+    try:
+        resp = _get_os().mget(index=index, body=body, **kwargs)
+        logger.info(
+            "[OS DEBUG] DONE op=mget label=%s index=%s elapsed_ms=%.1f docs=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            len(resp.get("docs", [])),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=mget label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
 def handler(event: dict, context: Any) -> dict:
+    logger.info(
+        "[Context DEBUG] START search_id=%s ci_id=%s document_id=%s",
+        event.get("search_id"),
+        (event.get("ci") or {}).get("id"),
+        event.get("document_id"),
+    )
     search_id = event.get("search_id", "unknown")
     logger.info("[Context Expander] start search_id=%s", search_id)
     try:
@@ -500,7 +602,7 @@ def _fetch_table_context(document_id: str, table_ids: list[str], tenant_id: str 
             ],
         })
     try:
-        resp = _get_os().msearch(body=body, index=SEMANTIC_OBJECTS_INDEX)
+        resp = _debug_msearch("_fetch_table_context", index=SEMANTIC_OBJECTS_INDEX, body=body)
         result: dict[str, list[dict]] = {}
         responses = resp.get("responses", [])
         for i, table_id in enumerate(table_ids):
@@ -520,7 +622,7 @@ def _mget_chunks(chunk_ids: list[str]) -> dict[str, dict]:
     if not chunk_ids:
         return {}
     try:
-        resp = _get_os().mget(index=OPENSEARCH_INDEX, body={"ids": chunk_ids})
+        resp = _debug_mget("_mget_chunks", index=OPENSEARCH_INDEX, body={"ids": chunk_ids})
         return {
             doc["_id"]: doc["_source"]
             for doc in resp.get("docs", [])
@@ -554,7 +656,7 @@ def _msearch_neighbors_by_page(
             "_source": ["raw_text"],
         })
     try:
-        resp = _get_os().msearch(body=body, index=OPENSEARCH_INDEX)
+        resp = _debug_msearch("_msearch_neighbors_by_page", index=OPENSEARCH_INDEX, body=body)
         return {
             page_keys[i]: (r.get("hits", {}).get("hits") or [{}])[0].get("_source", {}).get("raw_text", "")
             for i, r in enumerate(resp.get("responses", []))
@@ -582,7 +684,7 @@ def _msearch_by_idx(document_id: str, idx_list: list[int], tenant_id: str | None
             "_source": ["raw_text"],
         })
     try:
-        resp = _get_os().msearch(body=body, index=OPENSEARCH_INDEX)
+        resp = _debug_msearch("_msearch_neighbors_by_page", index=OPENSEARCH_INDEX, body=body)
         result: dict[int, str] = {}
         for i, r in enumerate(resp.get("responses", [])):
             hits = r.get("hits", {}).get("hits", [])
@@ -625,7 +727,7 @@ def _fetch_context_objects_merged(
                 "sort": [{"global_position": "asc"}],
             })
         try:
-            resp = _get_os().msearch(body=body, index=SEMANTIC_OBJECTS_INDEX)
+            resp = _debug_msearch("_fetch_table_context", index=SEMANTIC_OBJECTS_INDEX, body=body)
             for i, r in enumerate(resp.get("responses", [])):
                 result[without_pos[i]] = [h["_source"] for h in r.get("hits", {}).get("hits", [])]
         except Exception as exc:
@@ -653,7 +755,8 @@ def _fetch_context_objects_merged(
     try:
         fetch_size = min(len(needed) * 6, 10000)
         _t_os = _time.perf_counter()
-        resp = _get_os().search(
+        resp = _debug_search(
+            "_fetch_context_objects_merged",
             index=SEMANTIC_OBJECTS_INDEX,
             body={
                 "size": fetch_size,

@@ -11,7 +11,9 @@ Output: { "retriever": "ner", "hits": list[Hit] }
 from __future__ import annotations
 
 import logging
+import json
 import os
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,114 @@ def _get_os():
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ── Diagnostic OpenSearch logging ─────────────────────────────────────────────
+VECTOR_DEBUG_LOG_BODY = os.environ.get("VECTOR_DEBUG_LOG_BODY", "true").lower() == "true"
+
+def _debug_redact(value: Any) -> Any:
+    """Redact embedding vectors while preserving the exact query structure."""
+    if isinstance(value, dict):
+        return {
+            k: ("<VECTOR REDACTED>" if k == "vector" else _debug_redact(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_debug_redact(v) for v in value]
+    return value
+
+def _debug_request(label: str, operation: str, index: str | None, body: Any = None) -> None:
+    if not VECTOR_DEBUG_LOG_BODY:
+        return
+    try:
+        logger.info(
+            "[OS DEBUG] REQUEST op=%s label=%s index=%s body=%s",
+            operation, label, index,
+            json.dumps(_debug_redact(body), separators=(",", ":"), default=str)
+        )
+    except Exception as exc:
+        logger.warning("[OS DEBUG] REQUEST_LOG_FAILED label=%s error=%s", label, exc)
+
+def _debug_search(label: str, index: str, body: dict, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "search", index, body)
+    try:
+        resp = _get_os().search(index=index, body=body, **kwargs)
+        logger.info(
+            "[OS DEBUG] DONE op=search label=%s index=%s elapsed_ms=%.1f "
+            "status=%s took_ms=%s hits=%s shard_total=%s shard_failed=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            getattr(getattr(resp, "meta", None), "status", None),
+            resp.get("took"),
+            len(resp.get("hits", {}).get("hits", [])),
+            resp.get("_shards", {}).get("total"),
+            resp.get("_shards", {}).get("failed"),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=search label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
+def _debug_msearch(label: str, index: str, body: Any, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "msearch", index, body)
+    try:
+        resp = _debug_msearch("_debug_msearch", index=index, **kwargs)
+        responses = resp.get("responses", [])
+        logger.info(
+            "[OS DEBUG] DONE op=msearch label=%s index=%s elapsed_ms=%.1f "
+            "responses=%s errors=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            len(responses),
+            sum(1 for r in responses if r.get("error")),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=msearch label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
+def _debug_mget(label: str, index: str, body: Any, **kwargs):
+    t0 = time.perf_counter()
+    _debug_request(label, "mget", index, body)
+    try:
+        resp = _debug_mget("_parse_hits", index=index, body=body, **kwargs)
+        logger.info(
+            "[OS DEBUG] DONE op=mget label=%s index=%s elapsed_ms=%.1f docs=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            len(resp.get("docs", [])),
+        )
+        return resp
+    except Exception as exc:
+        logger.error(
+            "[OS DEBUG] ERROR op=mget label=%s index=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            label, index, (time.perf_counter()-t0)*1000,
+            type(exc).__name__, exc, exc_info=True
+        )
+        raise
+
 def handler(event: dict, context: Any) -> dict:
+    logger.info(
+        "[Retriever DEBUG] START retriever=%s search_id=%s ci_id=%s ci_type=%s "
+        "strategies=%s document_id=%s",
+        __name__,
+        event.get("search_id"),
+        (event.get("ci") or {}).get("id"),
+        ((event.get("classification") or {}).get("ci_type")
+         if isinstance(event.get("classification"), dict) else None),
+        (event.get("classification") or {}).get("strategies", [])
+        if isinstance(event.get("classification"), dict) else [],
+        event.get("document_id"),
+    )
     search_id = event.get("search_id", "unknown")
     logger.info("[NER Retriever] start search_id=%s", search_id)
     try:
@@ -106,7 +215,7 @@ def _ner_search(entity_texts: list[str], document_id: str | None, tenant_id: str
                     "entities"],
     }
 
-    resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
+    resp = _debug_search("_ner_search", OPENSEARCH_INDEX, body)
     return _parse_hits(resp, entity_texts)
 
 

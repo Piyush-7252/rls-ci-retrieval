@@ -147,7 +147,8 @@ VERIFIER_MODEL         = os.environ.get("VERIFIER_MODEL",
 EMBEDDING_MODEL        = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 # Concurrency control (prevent overwhelming OpenSearch with nested thread pools)
 SEARCH_CI_WORKERS      = int(os.environ.get("SEARCH_CI_WORKERS", "5"))      # CIs per Worker
-RETRIEVER_WORKERS      = int(os.environ.get("RETRIEVER_WORKERS", "4"))      # Retrievers per CI
+RETRIEVER_WORKERS      = int(os.environ.get("RETRIEVER_WORKERS", "4"))
+SEARCH_FLOW_DEBUG      = os.environ.get("SEARCH_FLOW_DEBUG", "true").lower() == "true"      # Retrievers per CI
 SEARCH_RESULTS_DEBUG_BUCKET = os.environ.get("SEARCH_RESULTS_DEBUG_BUCKET", "rls-file-bucket-eu")
 RESULTS_DEBUG_PREFIX   = os.environ.get("RESULTS_DEBUG_PREFIX", "search-results")
 # ── Lazy singletons ────────────────────────────────────────────────────────────
@@ -330,17 +331,40 @@ def _calibrate_evidence(hit: dict, ec: dict) -> dict:
 def _s1_classify(req: dict) -> dict:
     if req.get("_failed") or req.get("_early_exit"):
         return req
-    t0  = time.perf_counter()
+    t0 = time.perf_counter()
+    ci = req.get("ci", {})
+    logger.info(
+        "[SearchFlow] S1_START search_id=%s ci_idx=%s ci_id=%s ci_type_before=%s "
+        "text=%r embedding_dim=%s",
+        req.get("search_id"), req.get("_ci_idx"), ci.get("id"),
+        ci.get("category") or ci.get("type"),
+        ci.get("knownCI", "")[:300],
+        len((ci.get("embedding") or {}).get("dense_vector", []) or []),
+    )
     mod = _load("search/classifier", "search_classifier")
     req = mod._process(req)
     req["_st"]["classifier"] = round(time.perf_counter() - t0, 3)
+    cls = req.get("classification") or {}
+    logger.info(
+        "[SearchFlow] S1_DONE search_id=%s ci_id=%s elapsed_s=%.3f ci_type=%s "
+        "strategies=%s reason=%r",
+        req.get("search_id"), ci.get("id"), req["_st"]["classifier"],
+        cls.get("ci_type"), cls.get("strategies", []), cls.get("reason"),
+    )
     return req
 
 
 def _s2_retrieve(req: dict) -> dict:
     if req.get("_failed") or req.get("_early_exit"):
         return req
-    strategies = req.get("classification", {}).get("strategies", list(RETRIEVER_MAP.keys()))
+    classification = req.get("classification") or {}
+    strategies = classification.get("strategies", list(RETRIEVER_MAP.keys()))
+    logger.info(
+        "[SearchFlow] S2_START search_id=%s ci_id=%s ci_type=%s strategies=%s "
+        "retriever_workers=%s",
+        req.get("search_id"), req.get("ci", {}).get("id"),
+        classification.get("ci_type"), strategies, RETRIEVER_WORKERS,
+    )
     valid = [(s, RETRIEVER_MAP[s]) for s in strategies if s in RETRIEVER_MAP]
     if not valid:
         req["retriever_results"]       = []
@@ -353,8 +377,32 @@ def _s2_retrieve(req: dict) -> dict:
         mod = _load(path, f"search_{strategy}")
         _inject_os(mod)
         t0 = time.perf_counter()
-        result = mod._process(req)
+        logger.info(
+            "[SearchFlow] RETRIEVER_START search_id=%s ci_id=%s ci_type=%s "
+            "strategy=%s module=%s",
+            req.get("search_id"), req.get("ci", {}).get("id"),
+            (req.get("classification") or {}).get("ci_type"),
+            strategy, path,
+        )
+        try:
+            result = mod._process(req)
+        except Exception as exc:
+            logger.error(
+                "[SearchFlow] RETRIEVER_ERROR search_id=%s ci_id=%s strategy=%s "
+                "module=%s elapsed_s=%.3f error_type=%s error=%s",
+                req.get("search_id"), req.get("ci", {}).get("id"),
+                strategy, path, time.perf_counter()-t0,
+                type(exc).__name__, exc, exc_info=True,
+            )
+            raise
         elapsed = round(time.perf_counter() - t0, 3)
+        logger.info(
+            "[SearchFlow] RETRIEVER_DONE search_id=%s ci_id=%s strategy=%s "
+            "elapsed_s=%.3f hits=%d keys=%s",
+            req.get("search_id"), req.get("ci", {}).get("id"),
+            strategy, elapsed, len(result.get("hits", [])),
+            sorted(result.keys()),
+        )
         return strategy, result, elapsed
 
     # Propagate ContextVar to nested retriever threads so [ci=...] appears in their logs
@@ -376,6 +424,13 @@ def _s2_retrieve(req: dict) -> dict:
     req["retriever_results"]       = retriever_results
     req["_st"]["retrievers"]       = timings
     req["_st"]["retrievers_total"] = round(sum(timings.values()), 3)
+    logger.info(
+        "[SearchFlow] S2_DONE search_id=%s ci_id=%s retrievers=%s "
+        "retriever_timings=%s total_reported_s=%.3f",
+        req.get("search_id"), req.get("ci", {}).get("id"),
+        [r.get("retriever") for r in retriever_results],
+        timings, req["_st"]["retrievers_total"],
+    )
     return req
 
 
@@ -579,10 +634,34 @@ def _safe_stage_wrapper(stage_key: str, stage_fn, req: dict) -> dict:
     ci_id = req["ci"].get("id")
     token = _ctx_ci_id.set(ci_id)
     
+    stage_t0 = time.perf_counter()
+    logger.info(
+        "[SearchFlow] STAGE_START stage=%s search_id=%s ci_idx=%s ci_id=%s "
+        "ci_type=%s strategies=%s",
+        stage_key, req.get("search_id"), req.get("_ci_idx"),
+        ci_id, (req.get("classification") or {}).get("ci_type"),
+        (req.get("classification") or {}).get("strategies", []),
+    )
     try:
-        return stage_fn(req)
+        result = stage_fn(req)
+        logger.info(
+            "[SearchFlow] STAGE_DONE stage=%s search_id=%s ci_id=%s elapsed_s=%.3f "
+            "failed=%s early_exit=%s candidates=%d expanded=%d final_hits=%d",
+            stage_key, req.get("search_id"), ci_id,
+            time.perf_counter()-stage_t0,
+            result.get("_failed"), result.get("_early_exit"),
+            len(result.get("candidates", []) or []),
+            len(result.get("expanded_candidates", []) or []),
+            len(result.get("final_hits", []) or []),
+        )
+        return result
     except Exception as exc:
-        logger.error("[SearchWorker] failed in stage %s: %s", stage_key, exc)
+        logger.error(
+            "[SearchFlow] STAGE_ERROR stage=%s search_id=%s ci_id=%s elapsed_s=%.3f "
+            "error_type=%s error=%s",
+            stage_key, req.get("search_id"), ci_id,
+            time.perf_counter()-stage_t0, type(exc).__name__, exc, exc_info=True,
+        )
         req["_failed"] = True
         req["_failure"] = {
             "stage": stage_key,
@@ -623,8 +702,13 @@ def _run_pipeline(all_reqs: list[dict], skip_rerank: bool, skip_verify: bool,
                 all_reqs
             ))
         stage_wall[stage_key] = round(time.perf_counter() - t_stage, 3)
-        logger.info("[SearchWorker] stage %s done in %.1fs (%d active)",
-                    stage_key, stage_wall[stage_key], active)
+        logger.info(
+            "[SearchFlow] STAGE_WALL stage=%s wall_s=%.3f active=%d "
+            "failed=%d early_exit=%d",
+            stage_key, stage_wall[stage_key], active,
+            sum(1 for r in all_reqs if r.get("_failed")),
+            sum(1 for r in all_reqs if r.get("_early_exit")),
+        )
     
     logger.info("[SearchWorker] stage wall summary: %s", stage_wall)
     return all_reqs, stage_wall
@@ -1344,7 +1428,22 @@ def handler(event: dict, context: Any) -> dict:
     
     # Test log to verify this version is deployed
     logger.info("🔥 SEARCH WORKER VERSION 2026-08-20 — context vars active")
-    logger.info("[SearchWorker] start cis=%d", len(enriched_cis))
+    logger.info(
+        "[SearchFlow] INVOCATION_START search_id=%s batch_idx=%s document_id=%s "
+        "cis=%d ci_workers=%s retriever_workers=%s theoretical_max_concurrent_retrievers=%s",
+        search_id, batch_idx, document_id, len(enriched_cis),
+        SEARCH_CI_WORKERS, RETRIEVER_WORKERS,
+        SEARCH_CI_WORKERS * RETRIEVER_WORKERS,
+    )
+    for i, ci in enumerate(enriched_cis):
+        logger.info(
+            "[SearchFlow] CI_INPUT search_id=%s ci_idx=%d ci_id=%s text=%r category=%s "
+            "strategies_preclass=%s",
+            search_id, i, ci.get("id"), ci.get("knownCI", "")[:300],
+            ci.get("category") or ci.get("type"),
+            (ci.get("classification") or {}).get("strategies", [])
+            if isinstance(ci.get("classification"), dict) else [],
+        )
 
     all_reqs = [
         {

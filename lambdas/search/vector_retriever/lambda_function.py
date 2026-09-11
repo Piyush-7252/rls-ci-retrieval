@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
+import json
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,8 @@ VECTOR_MAX_HITS        = int(os.environ.get("VECTOR_MAX_HITS", "100"))
 FETCH_SIZE             = int(os.environ.get("VECTOR_FETCH_SIZE", "100"))
 OPENSEARCH_MAXSIZE  = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))
 VECTOR_SEARCH_WORKERS = int(os.environ.get("VECTOR_SEARCH_WORKERS", "1"))
+VECTOR_DEBUG_HEALTH_ON_ERROR = os.environ.get("VECTOR_DEBUG_HEALTH_ON_ERROR", "true").lower() == "true"
+VECTOR_DEBUG_LOG_BODY = os.environ.get("VECTOR_DEBUG_LOG_BODY", "true").lower() == "true"
 # Comma-separated object types to exclude from semantic-objects vector search.
 # Useful for ablation: VECTOR_EXCLUDE_TYPES=sentence  → Variant B (no sentence vectors)
 #                      VECTOR_EXCLUDE_TYPES=sentence,heading → Variant C
@@ -95,13 +99,30 @@ def _score_decay_filter(sorted_hits: list[dict], ratio: float, max_hits: int) ->
 
 def handler(event: dict, context: Any) -> dict:
     search_id = event.get("search_id", "unknown")
-    logger.info("[Vector Retriever] start search_id=%s", search_id)
+    request_id = getattr(context, "aws_request_id", "unknown") if context else "unknown"
+    started = time.perf_counter()
+    logger.info(
+        "[Vector Retriever] START search_id=%s aws_request_id=%s document_id=%s tenant_id=%s "
+        "project_id=%s workers=%s",
+        search_id, request_id, event.get("document_id"),
+        (event.get("tenant") or {}).get("tenant_id"),
+        event.get("project_id"), VECTOR_SEARCH_WORKERS,
+    )
     try:
         result = _process(event)
     except Exception as exc:
-        logger.error("[Vector Retriever] failed search_id=%s error=%s", search_id, exc)
+        logger.error(
+            "[Vector Retriever] FAILED search_id=%s aws_request_id=%s elapsed_ms=%.1f "
+            "error_type=%s error=%s",
+            search_id, request_id, (time.perf_counter() - started) * 1000,
+            type(exc).__name__, exc, exc_info=True,
+        )
         raise
-    logger.info("[Vector Retriever] done search_id=%s hits=%d", search_id, len(result["hits"]))
+    logger.info(
+        "[Vector Retriever] DONE search_id=%s aws_request_id=%s elapsed_ms=%.1f hits=%d sub_timings=%s",
+        search_id, request_id, (time.perf_counter() - started) * 1000,
+        len(result["hits"]), result.get("_sub_timings"),
+    )
     return result
 
 
@@ -118,17 +139,25 @@ def _process(req: dict) -> dict:
 
     page_count = int(req.get("document_page_count", 0))
     k          = _adaptive_k(page_count, TOP_K)
+    search_id = req.get("search_id", "unknown")
+
+    logger.info(
+        "[Vector Retriever] PLAN search_id=%s page_count=%s adaptive_k=%s size=%s "
+        "tie_buffer=%s score_ratio=%s max_hits=%s exclude_types=%s embedding_dim=%s",
+        search_id, page_count, k, k + TIE_BUFFER, TIE_BUFFER,
+        VECTOR_SCORE_RATIO, VECTOR_MAX_HITS, VECTOR_EXCLUDE_TYPES, len(ci_embedding),
+    )
 
     # Lanes 1-3 are independent — run concurrently to eliminate serial latency
     from concurrent.futures import ThreadPoolExecutor as _TPE
     import time as _time
     with _TPE(max_workers=VECTOR_SEARCH_WORKERS) as _pool:
         _ts_obj  = _time.perf_counter()
-        _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
+        _f_obj   = _pool.submit(_vector_search_objects,         ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k, search_id=search_id)
         _ts_head = _time.perf_counter()
-        _f_head  = _pool.submit(_vector_search_objects_heading, ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
+        _f_head  = _pool.submit(_vector_search_objects_heading, ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k, search_id=search_id)
         _ts_chunk = _time.perf_counter()
-        _f_chunk = _pool.submit(_vector_search_chunks,          ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k)
+        _f_chunk = _pool.submit(_vector_search_chunks,          ci_embedding, document_id, tenant_id=tenant_id, project_id=project_id, k=k, search_id=search_id)
         obj_hits   = _f_obj.result();   _te_obj   = _time.perf_counter()
         head_hits  = _f_head.result();  _te_head  = _time.perf_counter()
         chunk_hits = _f_chunk.result(); _te_chunk = _time.perf_counter()
@@ -155,11 +184,21 @@ def _process(req: dict) -> dict:
 
     hits.sort(key=lambda x: x["score"], reverse=True)
 
+    logger.info(
+        "[Vector Retriever] MERGE search_id=%s body_hits=%d heading_hits=%d chunk_hits=%d unique_hits=%d",
+        search_id, len(obj_hits), len(head_hits), len(chunk_hits), len(hits),
+    )
+
     ratio = VECTOR_SCORE_RATIO
     if ratio > 0.0 and hits:
         hits = _score_decay_filter(hits, ratio, VECTOR_MAX_HITS)
     else:
         hits = _with_ties(hits, k)
+
+    logger.info(
+        "[Vector Retriever] FINAL search_id=%s final_hits=%d top_score=%s k=%d score_ratio=%s",
+        search_id, len(hits), hits[0]["score"] if hits else None, k, VECTOR_SCORE_RATIO,
+    )
 
     return {
         "retriever":    "vector",
@@ -168,7 +207,82 @@ def _process(req: dict) -> dict:
     }
 
 
-def _vector_search_objects(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
+def _os_meta(resp: Any) -> dict:
+    try:
+        meta = getattr(resp, "meta", None)
+        headers = getattr(meta, "headers", None) or {}
+        return {
+            "status": getattr(meta, "status", None),
+            "request_id": headers.get("x-amzn-requestid") or headers.get("x-amzn-request-id"),
+        }
+    except Exception:
+        return {}
+
+
+def _redact_vector_body(value: Any) -> Any:
+    """Return a JSON-safe copy with embedding vectors redacted."""
+    if isinstance(value, dict):
+        return {
+            k: ("<1024-D VECTOR REDACTED>" if k == "vector" else _redact_vector_body(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_vector_body(v) for v in value]
+    return value
+
+
+def _log_knn_request(search_id: str, lane: str, index: str, body: dict) -> None:
+    """Log the exact OpenSearch request structure, but never the embedding values."""
+    if not VECTOR_DEBUG_LOG_BODY:
+        return
+    try:
+        safe_body = _redact_vector_body(body)
+        logger.info(
+            "[Vector Retriever] KNN_REQUEST search_id=%s lane=%s index=%s body=%s",
+            search_id,
+            lane,
+            index,
+            json.dumps(safe_body, separators=(",", ":"), default=str),
+        )
+    except Exception as log_exc:
+        logger.warning(
+            "[Vector Retriever] KNN_REQUEST_LOG_FAILED search_id=%s lane=%s error=%s",
+            search_id, lane, log_exc,
+        )
+
+
+def _log_knn_error(search_id: str, lane: str, index: str, started: float, exc: Exception) -> None:
+    logger.error(
+        "[Vector Retriever] KNN_ERROR search_id=%s lane=%s index=%s elapsed_ms=%.1f "
+        "error_type=%s error=%s",
+        search_id, lane, index, (time.perf_counter() - started) * 1000,
+        type(exc).__name__, exc, exc_info=True,
+    )
+
+    if VECTOR_DEBUG_HEALTH_ON_ERROR:
+        try:
+            hs = time.perf_counter()
+            health = _get_os().cluster.health()
+            logger.error(
+                "[Vector Retriever] ERROR_HEALTH search_id=%s lane=%s elapsed_ms=%.1f "
+                "status=%s nodes=%s data_nodes=%s active_shards=%s unassigned=%s "
+                "initializing=%s relocating=%s pending_tasks=%s",
+                search_id, lane, (time.perf_counter() - hs) * 1000,
+                health.get("status"), health.get("number_of_nodes"),
+                health.get("number_of_data_nodes"), health.get("active_shards"),
+                health.get("unassigned_shards"), health.get("initializing_shards"),
+                health.get("relocating_shards"), health.get("number_of_pending_tasks"),
+            )
+        except Exception as health_exc:
+            logger.error(
+                "[Vector Retriever] ERROR_HEALTH_FAILED search_id=%s lane=%s "
+                "error_type=%s error=%s",
+                search_id, lane, type(health_exc).__name__, health_exc,
+                exc_info=True,
+            )
+
+
+def _vector_search_objects(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K, search_id: str = "unknown") -> list[dict]:
     """
     Search semantic-objects index by body dense_vector.
     Returns hits with full matched_object metadata.
@@ -214,10 +328,29 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, t
         ],
     }
 
+    started = time.perf_counter()
+    logger.info(
+        "[Vector Retriever] KNN_START search_id=%s lane=body index=%s k=%s size=%s "
+        "document_id=%s tenant_id=%s project_id=%s",
+        search_id, SEMANTIC_OBJECTS_INDEX, k, k + TIE_BUFFER,
+        document_id, tenant_id, project_id,
+    )
+    _log_knn_request(search_id, "body", SEMANTIC_OBJECTS_INDEX, body)
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
+        meta = _os_meta(resp)
+        raw_hits = resp.get("hits", {}).get("hits", [])
+        shards = resp.get("_shards", {})
+        logger.info(
+            "[Vector Retriever] KNN_DONE search_id=%s lane=body index=%s elapsed_ms=%.1f "
+            "status=%s request_id=%s hits=%s max_score=%s took_ms=%s shards_total=%s shards_failed=%s",
+            search_id, SEMANTIC_OBJECTS_INDEX, (time.perf_counter() - started) * 1000,
+            meta.get("status"), meta.get("request_id"), len(raw_hits),
+            resp.get("hits", {}).get("max_score"), resp.get("took"),
+            shards.get("total"), shards.get("failed"),
+        )
     except Exception as exc:
-        logger.warning("[Vector Retriever] semantic-objects knn failed: %s", exc)
+        _log_knn_error(search_id, "body", SEMANTIC_OBJECTS_INDEX, started, exc)
         return []
 
     return [
@@ -278,7 +411,7 @@ def _build_matched_object(s: dict) -> dict:
     }
 
 
-def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
+def _vector_search_objects_heading(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K, search_id: str = "unknown") -> list[dict]:
     """
     Search semantic-objects index by heading_dense_vector.
 
@@ -323,10 +456,29 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
             "modality", "study_context", "statement_type",
         ],
     }
+    started = time.perf_counter()
+    logger.info(
+        "[Vector Retriever] KNN_START search_id=%s lane=heading index=%s k=%s size=%s "
+        "document_id=%s tenant_id=%s project_id=%s",
+        search_id, SEMANTIC_OBJECTS_INDEX, k, k + TIE_BUFFER,
+        document_id, tenant_id, project_id,
+    )
+    _log_knn_request(search_id, "heading", SEMANTIC_OBJECTS_INDEX, body)
     try:
         resp = _get_os().search(index=SEMANTIC_OBJECTS_INDEX, body=body)
+        meta = _os_meta(resp)
+        raw_hits = resp.get("hits", {}).get("hits", [])
+        shards = resp.get("_shards", {})
+        logger.info(
+            "[Vector Retriever] KNN_DONE search_id=%s lane=heading index=%s elapsed_ms=%.1f "
+            "status=%s request_id=%s hits=%s max_score=%s took_ms=%s shards_total=%s shards_failed=%s",
+            search_id, SEMANTIC_OBJECTS_INDEX, (time.perf_counter() - started) * 1000,
+            meta.get("status"), meta.get("request_id"), len(raw_hits),
+            resp.get("hits", {}).get("max_score"), resp.get("took"),
+            shards.get("total"), shards.get("failed"),
+        )
     except Exception as exc:
-        logger.warning("[Vector Retriever] heading knn failed: %s", exc)
+        _log_knn_error(search_id, "heading", SEMANTIC_OBJECTS_INDEX, started, exc)
         return []
 
     return [
@@ -344,7 +496,7 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
     ]
 
 
-def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K) -> list[dict]:
+def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, tenant_id: str | None = None, project_id: str | None = None, k: int = TOP_K, search_id: str = "unknown") -> list[dict]:
     """KNN search on document-chunks dense_vector (chunk-level fallback)."""
     filter_clause = [{"term": {"document_id": document_id}}] if document_id else []
     if tenant_id:
@@ -368,10 +520,29 @@ def _vector_search_chunks(ci_embedding: list[float], document_id: str | None, te
         "_source": ["chunk_id", "document_id", "page_start", "page_end", "raw_text"],
     }
 
+    started = time.perf_counter()
+    logger.info(
+        "[Vector Retriever] KNN_START search_id=%s lane=chunk index=%s k=%s size=%s "
+        "document_id=%s tenant_id=%s project_id=%s",
+        search_id, OPENSEARCH_INDEX, k, k + TIE_BUFFER,
+        document_id, tenant_id, project_id,
+    )
+    _log_knn_request(search_id, "chunk", OPENSEARCH_INDEX, body)
     try:
         resp = _get_os().search(index=OPENSEARCH_INDEX, body=body)
+        meta = _os_meta(resp)
+        raw_hits = resp.get("hits", {}).get("hits", [])
+        shards = resp.get("_shards", {})
+        logger.info(
+            "[Vector Retriever] KNN_DONE search_id=%s lane=chunk index=%s elapsed_ms=%.1f "
+            "status=%s request_id=%s hits=%s max_score=%s took_ms=%s shards_total=%s shards_failed=%s",
+            search_id, OPENSEARCH_INDEX, (time.perf_counter() - started) * 1000,
+            meta.get("status"), meta.get("request_id"), len(raw_hits),
+            resp.get("hits", {}).get("max_score"), resp.get("took"),
+            shards.get("total"), shards.get("failed"),
+        )
     except Exception as exc:
-        logger.warning("[Vector Retriever] document-chunks knn failed: %s", exc)
+        _log_knn_error(search_id, "chunk", OPENSEARCH_INDEX, started, exc)
         return []
 
     return [
