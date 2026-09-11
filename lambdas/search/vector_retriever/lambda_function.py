@@ -236,7 +236,7 @@ def _log_knn_request(search_id: str, lane: str, index: str, body: dict) -> None:
     if not VECTOR_DEBUG_LOG_BODY:
         return
     try:
-        safe_body = _redact_vector_body(body)
+        safe_body =body
         logger.info(
             "[Vector Retriever] KNN_REQUEST search_id=%s lane=%s index=%s body=%s",
             search_id,
