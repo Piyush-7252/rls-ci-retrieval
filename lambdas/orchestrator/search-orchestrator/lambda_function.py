@@ -143,7 +143,8 @@ OPENSEARCH_ENDPOINT  = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX  = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
 OPENSEARCH_TIMEOUT   = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))
 OPENSEARCH_MAXSIZE   = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
-OPEN_SEARCH_REGION           = os.environ.get("OPEN_SEARCH_REGION", "eu-west-1")
+AWS_REGION              = os.environ.get("AWS_REGION", "us-east-1")
+OPEN_SEARCH_REGION           = os.environ.get("OPEN_SEARCH_REGION", AWS_REGION)
 EMBEDDING_MODEL      = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 DOCUMENT_ASSETS_PATH = os.environ.get(
     "DOCUMENT_ASSETS_PATH",

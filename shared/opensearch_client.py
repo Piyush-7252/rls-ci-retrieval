@@ -8,7 +8,8 @@ import os
 # Configuration
 OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com")
 OPENSEARCH_MAXSIZE     = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
-OPEN_SEARCH_REGION       = os.environ.get("OPEN_SEARCH_REGION", "eu-west-1")
+AWS_REGION              = os.environ.get("AWS_REGION", "us-east-1")
+OPEN_SEARCH_REGION           = os.environ.get("OPEN_SEARCH_REGION", AWS_REGION)
 OPENSEARCH_TIMEOUT       = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))  # Timeout in seconds
 
 _os_client = None

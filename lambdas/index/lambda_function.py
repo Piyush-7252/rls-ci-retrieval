@@ -52,7 +52,8 @@ OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX    = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
 OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
-OPEN_SEARCH_REGION             = os.environ.get("OPEN_SEARCH_REGION", "us-east-1")
+AWS_REGION              = os.environ.get("AWS_REGION", "us-east-1")
+OPEN_SEARCH_REGION           = os.environ.get("OPEN_SEARCH_REGION", AWS_REGION)
 
 # ─── lazy OpenSearch client ───────────────────────────────────────────────────
 _os_client = None
