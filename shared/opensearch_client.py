@@ -8,7 +8,7 @@ import os
 # Configuration
 OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com")
 OPENSEARCH_MAXSIZE     = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
-AWS_REGION             = os.environ.get("AWS_REGION", "eu-west-1")
+OPEN_SEARCH_REGION       = os.environ.get("OPEN_SEARCH_REGION", "eu-west-1")
 OPENSEARCH_TIMEOUT       = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))  # Timeout in seconds
 
 _os_client = None
@@ -31,7 +31,7 @@ def get_opensearch_client():
         
         frozen  = boto3.Session().get_credentials().get_frozen_credentials()
         awsauth = AWS4Auth(
-            frozen.access_key, frozen.secret_key, AWS_REGION, "es",
+            frozen.access_key, frozen.secret_key, OPEN_SEARCH_REGION, "es",
             session_token=frozen.token
         )
         

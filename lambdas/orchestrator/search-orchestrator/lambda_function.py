@@ -47,7 +47,7 @@ Env vars
   OPENSEARCH_CI_INDEX     — CI objects index (default: ci-objects)
   OPENSEARCH_MAXSIZE      — Connection pool size (default: 128)
   EMBEDDING_MODEL         — Bedrock embedding model for CI lookup fallback
-  AWS_REGION              — AWS region (required)
+  OPEN_SEARCH_REGION              — AWS region (required)
   CI_LOOKUP_WORKERS       — Concurrent threads for CI enrichment (default: 10)
   MAX_WORKERS             — Concurrent Worker Lambda invocations (default: 3, prevents OpenSearch 429s)
   DOCUMENT_ASSETS_PATH    — Local path to document_assets.json (optional)
@@ -143,7 +143,7 @@ OPENSEARCH_ENDPOINT  = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX  = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
 OPENSEARCH_TIMEOUT   = int(os.environ.get("OPENSEARCH_TIMEOUT", "30"))
 OPENSEARCH_MAXSIZE   = int(os.environ.get("OPENSEARCH_MAXSIZE", "256"))  # Connection pool size
-AWS_REGION           = os.environ.get("AWS_REGION", "eu-west-1")
+OPEN_SEARCH_REGION           = os.environ.get("OPEN_SEARCH_REGION", "eu-west-1")
 EMBEDDING_MODEL      = os.environ.get("EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0")
 DOCUMENT_ASSETS_PATH = os.environ.get(
     "DOCUMENT_ASSETS_PATH",
@@ -197,7 +197,7 @@ def _get_os():
                 self.session.mount("http://", adapter)
         
         frozen  = boto3.Session().get_credentials().get_frozen_credentials()
-        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, AWS_REGION, "es",
+        awsauth = AWS4Auth(frozen.access_key, frozen.secret_key, OPEN_SEARCH_REGION, "es",
                           session_token=frozen.token)
         _os_client = OpenSearch(
             hosts=[{"host": OPENSEARCH_ENDPOINT, "port": 443}],

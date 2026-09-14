@@ -18,7 +18,7 @@ Env vars
   OPENSEARCH_CI_INDEX     — default: ci-objects
   OPENSEARCH_INDEX        — default: document-chunks
   SEMANTIC_OBJECTS_INDEX  — default: semantic-objects
-  AWS_REGION              — default: us-east-1
+  OPEN_SEARCH_REGION              — default: us-east-1
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ OPENSEARCH_ENDPOINT    = os.environ.get("OPENSEARCH_ENDPOINT", "localhost")
 OPENSEARCH_CI_INDEX    = os.environ.get("OPENSEARCH_CI_INDEX", "ci-objects")
 OPENSEARCH_INDEX       = os.environ.get("OPENSEARCH_INDEX", "document-chunks")
 SEMANTIC_OBJECTS_INDEX = os.environ.get("SEMANTIC_OBJECTS_INDEX", "semantic-objects")
-AWS_REGION             = os.environ.get("AWS_REGION", "us-east-1")
+OPEN_SEARCH_REGION             = os.environ.get("OPEN_SEARCH_REGION", "us-east-1")
 
 # ─── lazy OpenSearch client ───────────────────────────────────────────────────
 _os_client = None
@@ -68,7 +68,7 @@ def _get_os():
         awsauth = AWS4Auth(
             frozen.access_key,
             frozen.secret_key,
-            AWS_REGION,
+            OPEN_SEARCH_REGION,
             "es",
             session_token=frozen.token,
         )
