@@ -34,6 +34,8 @@ EMBEDDING_MAX_WORKERS = max(1, int(os.environ.get("EMBEDDING_MAX_WORKERS", "1"))
 # Set EMBEDDING_DEBUG=true to log every successful Bedrock call.
 # Off by default — at 27k chunks × 150 embeddings that's 4M+ log lines.
 EMBEDDING_DEBUG = os.environ.get("EMBEDDING_DEBUG", "").lower() in ("1", "true", "yes")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION", AWS_REGION)
 
 # Titan Embed supports ~8 192 tokens; truncate at character level to be safe
 _MAX_INPUT_CHARS = 25_000
@@ -114,7 +116,7 @@ _aws: dict = {}
 def _get(service: str):
     if service not in _aws:
         import boto3
-        _aws[service] = boto3.client(service)
+        _aws[service] = boto3.client(service, region_name=BEDROCK_REGION)
     return _aws[service]
 
 
@@ -151,12 +153,6 @@ def handler(event: dict, context: Any) -> dict:
         logger.info("[Embedding] done source=document chunk_id=%s dimensions=%d",
                     chunk_id, result["embedding"]["dimensions"])
 
-    if INDEX_LAMBDA_ARN:
-        _get("lambda").invoke(
-            FunctionName   = INDEX_LAMBDA_ARN,
-            InvocationType = "Event",
-            Payload        = json.dumps(result).encode(),
-        )
     return result
 
 

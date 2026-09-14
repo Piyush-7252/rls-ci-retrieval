@@ -15,6 +15,7 @@ from typing import Any
 import boto3
 
 _REGION = os.environ.get("AWS_REGION", "eu-west-1")
+_SECRETS_MANAGER_REGION = os.environ.get("SECRETS_MANAGER_REGION", _REGION)
 _SECRET_CACHE_TTL = float(os.environ.get("TENANT_SECRET_CACHE_TTL", "300"))
 
 _secret_cache: dict[str, tuple[dict[str, Any], float]] = {}
@@ -24,7 +25,7 @@ _sm = None
 def _get_sm():
     global _sm
     if _sm is None:
-        _sm = boto3.client("secretsmanager", region_name=_REGION)
+        _sm = boto3.client("secretsmanager", region_name=_SECRETS_MANAGER_REGION)
     return _sm
 
 
