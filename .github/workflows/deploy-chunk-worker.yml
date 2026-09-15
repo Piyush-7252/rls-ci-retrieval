@@ -34,9 +34,11 @@ on:
           - search-orchestrator
 
 env:
-  AWS_REGION:      ${{ secrets.AWS_REGION }}
-  CALLBACK_URL:    ${{ secrets.CALLBACK_URL }}
-  OPENSEARCH_ENDPOINT: ${{ secrets.OPENSEARCH_ENDPOINT }}
+  AWS_REGION:           ${{ secrets.AWS_REGION }}
+  CALLBACK_URL:         ${{ secrets.CALLBACK_URL }}
+  OPENSEARCH_ENDPOINT:  ${{ secrets.OPENSEARCH_ENDPOINT }}
+  OPEN_SEARCH_REGION:   ${{ secrets.OPEN_SEARCH_REGION || secrets.AWS_REGION }}
+  SECRETS_MANAGER_REGION: ${{ secrets.SECRETS_MANAGER_REGION || secrets.AWS_REGION }}
 
 jobs:
   changes:
