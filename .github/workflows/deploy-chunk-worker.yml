@@ -95,7 +95,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        region: ${{ fromJson(secrets.DEPLOYMENT_REGIONS) }}
+        region: [us-west-2, us-east-2, eu-central-1, ap-south-1]
       max-parallel: 2
 
     env:
