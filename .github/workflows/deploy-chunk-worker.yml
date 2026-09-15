@@ -86,17 +86,22 @@ jobs:
 
   # ── document-chunk-worker ────────────────────────────────────────────────────────
   deploy-document-chunk-worker:
-    name: Deploy document-chunk-worker (rls-ci-retrieval-document-chunk-worker)
+    name: Deploy document-chunk-worker to ${{ matrix.region }}
     needs: changes
     if: |
       (github.event_name == 'push' && needs.changes.outputs.document_chunk_worker == 'true') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'document-chunk-worker'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      matrix:
+        region: ${{ fromJson(secrets.DEPLOYMENT_REGIONS) }}
+      max-parallel: 2
 
     env:
       FUNCTION_NAME: rls-ci-retrieval-document-chunk-worker
       ECR_REPO:      rls-ci-retrieval-document-chunk-worker
+      AWS_REGION:    ${{ matrix.region }}
 
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +109,7 @@ jobs:
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ secrets.AWS_REGION }}
+          aws-region:            ${{ matrix.region }}
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
