@@ -37,8 +37,10 @@ EMBEDDING_DEBUG = os.environ.get("EMBEDDING_DEBUG", "").lower() in ("1", "true",
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", AWS_REGION)
 
-# Titan Embed supports ~8 192 tokens; truncate at character level to be safe
-_MAX_INPUT_CHARS = 25_000
+# Titan Embed supports ~8,192 tokens; section_chunker.py ensures chunks ≤ ~250 words (~1,200 tokens).
+# Do NOT truncate here — truncation in embedding Lambda breaks vector/text consistency.
+# If text exceeds this, it's a chunking bug upstream (log and fail loudly).
+_MAX_INPUT_CHARS = 18_000  # safety threshold only; should never be reached with proper chunking
 
 # Retry config for Bedrock throttling (full-jitter exponential backoff)
 _EMBED_MAX_RETRIES = 8       # outer retries on top of boto3's 4 built-in attempts
