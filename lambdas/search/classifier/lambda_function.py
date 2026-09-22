@@ -45,7 +45,7 @@ _STRATEGIES: dict[str, list[str]] = {
     "IDENTIFIER":    ["regex", "bm25", "literal"],
     "CLINICAL_ROLE": ["ontology", "vector", "bm25", "literal"],
     "ORGANIZATION":  ["literal", "ner", "vector"],
-    "PHRASE":        ["bm25", "vector", "ontology", "literal"],
+    "PHRASE":        ["bm25", "vector", "ontology", "literal","regex","ner","numeric"],
     # Numeric/statistical CIs bypass vector/BM25 entirely — the number IS the secret.
     # The numeric retriever pre-filters to documents containing the exact numeric
     # tokens (sample size, CI bounds, p-value) rather than doing semantic search.
