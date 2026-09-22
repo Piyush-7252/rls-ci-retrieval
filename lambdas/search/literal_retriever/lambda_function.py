@@ -14,6 +14,7 @@ Hit schema
 
 from __future__ import annotations
 
+import difflib
 import logging
 import os
 import re
@@ -49,6 +50,21 @@ def _fold_quotes(text: str) -> str:
     return text.translate(_QUOTE_FOLD)
 
 
+# Rather than special-casing every possible decoration ci_text can carry
+# (numbering, bullets, quotes, trailing punctuation, section labels, name
+# initials, ...), find the longest contiguous span shared between ci_text and
+# raw_text and use that — this naturally absorbs ANY prefix/suffix mismatch
+# and also surfaces genuine PARTIAL matches when only part of ci_text is
+# actually present in raw_text.
+_MIN_PARTIAL_CHARS = 3      # floor so we never report a trivial common word
+_MIN_PARTIAL_RATIO = 0.5    # span must cover at least half of the (sub)phrase
+
+
+def _longest_common_span(needle_lower: str, haystack_lower: str):
+    matcher = difflib.SequenceMatcher(None, needle_lower, haystack_lower, autojunk=False)
+    return matcher.find_longest_match(0, len(needle_lower), 0, len(haystack_lower))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
@@ -81,15 +97,18 @@ def _process(req: dict) -> dict:
 
 def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     """
-    Find where ci_text (or its significant sub-phrases) appear in raw_text.
+    Find where ci_text (or its significant sub-phrases) appear in raw_text,
+    exactly or partially.
 
     Returns [{"text": str, "start": int, "end": int}, ...] sorted by position.
     Passed forward so Stage 6.5 can surface the exact matched term instead of
     re-discovering it through the scorer registry.
 
-    Strategy 1 — whole phrase: "adverse events, serious AEs" as one substring.
-    Strategy 2 — sub-phrases: split on commas/semicolons/newlines, search each
-                  phrase ≥ 5 chars independently.
+    Strategy 1 — whole phrase, exact substring match.
+    Strategy 2 — whole phrase, longest common substring (handles decoration
+                  mismatches and genuine partial matches).
+    Strategy 3 — sub-phrases: split on commas/semicolons/newlines, search each
+                  phrase ≥ 5 chars independently (exact, then fuzzy).
     """
     matches: list[dict] = []
     # Guard against None/non-str/blank inputs (upstream callers, malformed CI
@@ -107,19 +126,40 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     raw_folded = _fold_quotes(raw_text)
     raw_lower  = raw_folded.lower()
 
-    # Strategy 1 — whole phrase
+    # Strategy 1 — whole phrase, exact substring
     ci_s = _fold_quotes(ci_text.strip())
-    idx  = raw_lower.find(ci_s.lower())
+    ci_lower = ci_s.lower()
+    idx  = raw_lower.find(ci_lower)
     if idx >= 0:
         return [{"text": raw_text[idx: idx + len(ci_s)], "start": idx, "end": idx + len(ci_s)}]
 
-    # Strategy 2 — significant sub-phrases
+    # Strategy 2 — whole phrase, longest common substring. Absorbs any kind of
+    # decoration mismatch (markers, quotes, labels, punctuation, initials...)
+    # without needing to enumerate what the decoration looks like, and also
+    # surfaces a genuine partial match when only part of ci_text is present.
+    span = _longest_common_span(ci_lower, raw_lower)
+    min_len = max(_MIN_PARTIAL_CHARS, int(len(ci_lower) * _MIN_PARTIAL_RATIO))
+    if span.size >= min_len:
+        start, end = span.b, span.b + span.size
+        matches.append({"text": raw_text[start:end], "start": start, "end": end})
+
+    # Strategy 3 — significant sub-phrases, exact then fuzzy. Only meaningful
+    # when ci_text actually splits into more than one clause — a single-clause
+    # ci_text would just re-run Strategy 2 against the identical whole string.
     sub_phrases = [p.strip() for p in re.split(r'[,;\n]+', ci_s) if len(p.strip()) >= 5]
-    for phrase in sub_phrases:
-        idx = raw_lower.find(phrase.lower())
-        if idx >= 0:
-            matches.append({"text": raw_text[idx: idx + len(phrase)],
-                            "start": idx, "end": idx + len(phrase)})
+    if len(sub_phrases) > 1:
+        for phrase in sub_phrases:
+            phrase_lower = phrase.lower()
+            idx = raw_lower.find(phrase_lower)
+            if idx >= 0:
+                matches.append({"text": raw_text[idx: idx + len(phrase)],
+                                "start": idx, "end": idx + len(phrase)})
+                continue
+            span = _longest_common_span(phrase_lower, raw_lower)
+            min_len = max(_MIN_PARTIAL_CHARS, int(len(phrase_lower) * _MIN_PARTIAL_RATIO))
+            if span.size >= min_len:
+                start, end = span.b, span.b + span.size
+                matches.append({"text": raw_text[start:end], "start": start, "end": end})
 
     # Deduplicate overlapping spans, keep leftmost
     seen: set[int] = set()
