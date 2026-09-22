@@ -36,6 +36,19 @@ def _get_os():
     return get_opensearch_client()
 
 
+# Fold typographic quote variants to ASCII so substring matching agrees with
+# OpenSearch's analyzer (which treats curly/straight apostrophes the same).
+# 1:1 char mapping — never changes string length, so match offsets stay valid.
+_QUOTE_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u2032": "'", "\u00b4": "'",
+    "\u201c": '"', "\u201d": '"',
+})
+
+
+def _fold_quotes(text: str) -> str:
+    return text.translate(_QUOTE_FOLD)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
@@ -79,10 +92,23 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
                   phrase ≥ 5 chars independently.
     """
     matches: list[dict] = []
-    raw_lower = raw_text.lower()
+    # Guard against None/non-str/blank inputs (upstream callers, malformed CI
+    # records) — without this, ci_text="" spuriously "matches" every hit at
+    # position 0, and None/non-str crashes .strip()/.translate() below.
+    if not isinstance(ci_text, str) or not isinstance(raw_text, str):
+        return matches
+    if not ci_text.strip() or not raw_text:
+        return matches
+
+    # Fold quote variants before comparing so "Alzheimer's" (straight) still
+    # matches "Alzheimer's" (curly) — OpenSearch's match_phrase already treats
+    # them as equivalent, so the extractor must too or it silently returns no
+    # literal_matches for a hit it just found.
+    raw_folded = _fold_quotes(raw_text)
+    raw_lower  = raw_folded.lower()
 
     # Strategy 1 — whole phrase
-    ci_s = ci_text.strip()
+    ci_s = _fold_quotes(ci_text.strip())
     idx  = raw_lower.find(ci_s.lower())
     if idx >= 0:
         return [{"text": raw_text[idx: idx + len(ci_s)], "start": idx, "end": idx + len(ci_s)}]

@@ -43,7 +43,7 @@ logger.setLevel(logging.INFO)
 _STRATEGIES: dict[str, list[str]] = {
     "PERSON":        ["literal", "ner", "bm25", "vector"],
     "IDENTIFIER":    ["regex", "bm25", "literal"],
-    "CLINICAL_ROLE": ["ontology", "vector", "bm25"],
+    "CLINICAL_ROLE": ["ontology", "vector", "bm25", "literal"],
     "ORGANIZATION":  ["literal", "ner", "vector"],
     "PHRASE":        ["bm25", "vector", "ontology", "literal"],
     # Numeric/statistical CIs bypass vector/BM25 entirely — the number IS the secret.
@@ -349,8 +349,24 @@ def handler(event: dict, context: Any) -> dict:
     try:
         result = _process(event)
     except Exception as exc:
-        logger.error("[Classifier] failed search_id=%s error=%s", search_id, exc)
-        raise
+        # Never let a classification bug silently drop a CI from every
+        # retriever. Fall back to the safest catch-all strategy (PHRASE,
+        # which always includes "literal") so the CI still gets searched.
+        logger.error(
+            "[Classifier] failed search_id=%s ci_id=%s error=%s — "
+            "falling back to PHRASE strategy",
+            search_id, ci_id, exc,
+        )
+        result = {
+            **event,
+            "classification": {
+                "ci_type":       "PHRASE",
+                "strategies":    _STRATEGIES["PHRASE"],
+                "reason":        f"Classifier error, fell back to PHRASE: {exc}",
+                "category_id":   None,
+                "category_code": None,
+            },
+        }
 
     logger.info("[Classifier] done search_id=%s type=%s strategies=%s",
                 search_id,
@@ -364,6 +380,14 @@ def _process(req: dict) -> dict:
     ci_text  = req["ci"].get("knownCI", "")
     entities = req["ci"].get("ner", {}).get("entities", [])
     category = req["ci"].get("category") or {}
+    # ``category`` is normally an object ({code, name, id}) but the ci-objects
+    # index (and some upstream callers) flattens it down to a plain string
+    # (see lambdas/index/lambda_function.py). Accept both shapes so a
+    # malformed/legacy category never crashes classification and silently
+    # drops the CI from every retriever (including literal).
+    if not isinstance(category, dict):
+        cat_str  = str(category).strip()
+        category = {"code": cat_str, "name": cat_str, "id": None}
     cat_code = (category.get("code") or "").strip()
 
     # Numeric/statistical detection takes precedence over all other routing.
