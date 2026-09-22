@@ -65,6 +65,36 @@ def _longest_common_span(needle_lower: str, haystack_lower: str):
     return matcher.find_longest_match(0, len(needle_lower), 0, len(haystack_lower))
 
 
+# Spacing/wrapping punctuation varies a lot between how a CI is authored and
+# how the source document renders it ("n=62" vs "n = 62" vs "(N = 62)") even
+# though the content is identical. Compare with whitespace and wrapping
+# punctuation removed so this never has to fall through to the weaker
+# fuzzy/partial strategies just because of formatting, then map the found
+# span back to real raw_text offsets (including whatever original formatting
+# raw_text had there).
+def _is_ignorable_format_char(ch: str) -> bool:
+    return ch.isspace() or ch in '()[]{}'
+
+
+def _find_ignoring_whitespace(needle_lower: str, haystack_lower: str) -> tuple[int, int] | None:
+    compact_chars: list[str] = []
+    index_map: list[int] = []
+    for i, ch in enumerate(haystack_lower):
+        if not _is_ignorable_format_char(ch):
+            compact_chars.append(ch)
+            index_map.append(i)
+    compact_haystack = ''.join(compact_chars)
+    compact_needle = ''.join(ch for ch in needle_lower if not _is_ignorable_format_char(ch))
+    if not compact_needle:
+        return None
+    idx = compact_haystack.find(compact_needle)
+    if idx < 0:
+        return None
+    start = index_map[idx]
+    end = index_map[idx + len(compact_needle) - 1] + 1
+    return start, end
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context: Any) -> dict:
@@ -133,6 +163,13 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     if idx >= 0:
         return [{"text": raw_text[idx: idx + len(ci_s)], "start": idx, "end": idx + len(ci_s)}]
 
+    # Strategy 1b — whole phrase, exact match but ignoring whitespace
+    # differences ("n=62" vs "n = 62").
+    span_ws = _find_ignoring_whitespace(ci_lower, raw_lower)
+    if span_ws is not None:
+        start, end = span_ws
+        return [{"text": raw_text[start:end], "start": start, "end": end}]
+
     # Strategy 2 — whole phrase, longest common substring. Absorbs any kind of
     # decoration mismatch (markers, quotes, labels, punctuation, initials...)
     # without needing to enumerate what the decoration looks like, and also
@@ -154,6 +191,11 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
             if idx >= 0:
                 matches.append({"text": raw_text[idx: idx + len(phrase)],
                                 "start": idx, "end": idx + len(phrase)})
+                continue
+            span_ws = _find_ignoring_whitespace(phrase_lower, raw_lower)
+            if span_ws is not None:
+                start, end = span_ws
+                matches.append({"text": raw_text[start:end], "start": start, "end": end})
                 continue
             span = _longest_common_span(phrase_lower, raw_lower)
             min_len = max(_MIN_PARTIAL_CHARS, int(len(phrase_lower) * _MIN_PARTIAL_RATIO))
