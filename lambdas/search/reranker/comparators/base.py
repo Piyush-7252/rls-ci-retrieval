@@ -7,6 +7,8 @@ needs to import from the parent — no circular imports possible.
 """
 from __future__ import annotations
 
+import re
+
 # ─── Severity levels ──────────────────────────────────────────────────────────
 # Single source of truth for severity strings used across the validation engine.
 _SEV_NONE   = "NONE"
@@ -261,8 +263,12 @@ def _ep_family(val: str) -> str:
     norm = val.lower().strip()
     if norm in _ENDPOINT_FAMILY:
         return _ENDPOINT_FAMILY[norm]
+    # Word-boundary containment only — a plain substring check lets short
+    # abbreviation keys like "cr" or "os" spuriously match inside unrelated
+    # words ("criteria" contains "cr"), silently mis-tagging CIs with an
+    # endpoint identity they don't have.
     for key, family in _ENDPOINT_FAMILY.items():
-        if key in norm or norm in key:
+        if re.search(rf'\b{re.escape(key)}\b', norm) or re.search(rf'\b{re.escape(norm)}\b', key):
             return family
     return norm
 

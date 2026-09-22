@@ -208,6 +208,18 @@ _DOSE_CONCEPT_RE = re.compile(
     re.I,
 )
 
+# Generic/meta phrases GLiNER sometimes mislabels CLINICAL_ENDPOINT that are
+# NOT actual named endpoints (ORR, PFS, OS, DOR, …) — they describe structure
+# ("clinical criteria", "primary endpoint") rather than a measurable outcome.
+# Left unfiltered, these give a CI a spurious endpoint identity that then
+# fires the aggregator's zero-identity gate against every real candidate.
+_GENERIC_ENDPOINT_PHRASES: frozenset[str] = frozenset({
+    "clinical criteria", "criteria", "endpoint", "endpoints",
+    "objective", "objectives", "primary endpoint", "secondary endpoint",
+    "exploratory endpoint", "response criteria", "eligibility criteria",
+    "inclusion criteria", "exclusion criteria",
+})
+
 # Clinical endpoint abbreviations that GLiNER occasionally mislabels as BIOMARKER.
 # ORR, PFS, OS, DOR etc. are endpoints — they belong in facts["endpoint"] so
 # the endpoint comparator handles them.  Checked post-slot-fill in enrich_object().
@@ -474,6 +486,11 @@ def enrich_object(
             # sub_type="ROUTE" from the clinical dictionary.  They must not
             # pollute facts["drug"], companion_drugs, or the drug comparator.
             if ent.get("label") == "MEDICATION" and ent.get("sub_type") == "ROUTE":
+                continue
+            # FIX-4: Generic/meta CLINICAL_ENDPOINT phrases ("clinical criteria",
+            # "primary endpoint") are structural, not a named endpoint — block them
+            # so they don't give the CI a fake endpoint identity.
+            if ent.get("label") == "CLINICAL_ENDPOINT" and ent["text"].strip().lower() in _GENERIC_ENDPOINT_PHRASES:
                 continue
             # FIX-3: CLINICAL_RESPONSE entities are only valid response_criterion
             # facts when their canonical form is a recognised IMWG criterion.
