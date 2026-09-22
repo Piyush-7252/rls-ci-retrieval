@@ -18,6 +18,7 @@ import difflib
 import logging
 import os
 import re
+import unicodedata
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,44 @@ def _fold_quotes(text: str) -> str:
     return text.translate(_QUOTE_FOLD)
 
 
+# Same idea for dash variants — a CI authored with a plain hyphen should
+# still match raw_text rendered with a typographic en/em-dash or minus sign.
+# Also 1:1, offsets stay valid.
+_DASH_FOLD = str.maketrans({
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2015": "-", "\u2212": "-",
+})
+
+
+def _fold_dashes(text: str) -> str:
+    return text.translate(_DASH_FOLD)
+
+
+# Unicode allows the same visible character to be encoded as one precomposed
+# codepoint (NFC, e.g. "é") or a base letter plus a combining mark (NFD, e.g.
+# "e" + U+0301). Two textually-identical strings can differ this way, which
+# would silently defeat substring matching. Unlike quote/dash folding this is
+# NOT length-preserving (NFD forms are longer), so we can't just re-use
+# raw_text offsets directly — instead build an explicit map from each
+# character in the normalized string back to its origin offset in raw_text,
+# so every strategy below can keep returning correct spans into the ORIGINAL
+# raw_text no matter how normalization reshuffled character counts.
+def _build_normalized_map(text: str) -> tuple[str, list[int]]:
+    normalized = unicodedata.normalize('NFC', text)
+    if normalized == text:
+        return normalized, list(range(len(text)))
+    index_map = [0] * len(normalized)
+    matcher = difflib.SequenceMatcher(None, text, normalized, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for k in range(j2 - j1):
+                index_map[j1 + k] = i1 + k
+        else:
+            for k in range(j1, j2):
+                index_map[k] = i1
+    return normalized, index_map
+
+
 # Rather than special-casing every possible decoration ci_text can carry
 # (numbering, bullets, quotes, trailing punctuation, section labels, name
 # initials, ...), find the longest contiguous span shared between ci_text and
@@ -76,13 +115,19 @@ def _is_ignorable_format_char(ch: str) -> bool:
     return ch.isspace() or ch in '()[]{}'
 
 
-def _find_ignoring_whitespace(needle_lower: str, haystack_lower: str) -> tuple[int, int] | None:
+def _find_ignoring_whitespace(
+    needle_lower: str,
+    haystack_lower: str,
+    haystack_index_map: list[int] | None = None,
+) -> tuple[int, int] | None:
+    if haystack_index_map is None:
+        haystack_index_map = list(range(len(haystack_lower)))
     compact_chars: list[str] = []
     index_map: list[int] = []
     for i, ch in enumerate(haystack_lower):
         if not _is_ignorable_format_char(ch):
             compact_chars.append(ch)
-            index_map.append(i)
+            index_map.append(haystack_index_map[i])
     compact_haystack = ''.join(compact_chars)
     compact_needle = ''.join(ch for ch in needle_lower if not _is_ignorable_format_char(ch))
     if not compact_needle:
@@ -92,6 +137,15 @@ def _find_ignoring_whitespace(needle_lower: str, haystack_lower: str) -> tuple[i
         return None
     start = index_map[idx]
     end = index_map[idx + len(compact_needle) - 1] + 1
+    return start, end
+
+
+# Every strategy locates a match as a (start, size) pair in raw_lower's own
+# index space; this maps that back to real offsets in the original raw_text
+# via the index map produced by _build_normalized_map.
+def _map_span(index_map: list[int], b_start: int, size: int) -> tuple[int, int]:
+    start = index_map[b_start]
+    end = index_map[b_start + size - 1] + 1
     return start, end
 
 
@@ -149,23 +203,33 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     if not ci_text.strip() or not raw_text:
         return matches
 
-    # Fold quote variants before comparing so "Alzheimer's" (straight) still
-    # matches "Alzheimer's" (curly) — OpenSearch's match_phrase already treats
-    # them as equivalent, so the extractor must too or it silently returns no
-    # literal_matches for a hit it just found.
-    raw_folded = _fold_quotes(raw_text)
+    # Normalize Unicode form (NFD -> NFC) before comparing, so an accented
+    # character encoded differently in ci_text vs raw_text still matches.
+    # This can change raw_text's effective length, so raw_index_map maps
+    # every position below back to the real raw_text offset it came from.
+    raw_normalized, raw_index_map = _build_normalized_map(raw_text)
+
+    # Fold quote/dash variants before comparing so "Alzheimer's" (straight)
+    # still matches "Alzheimer's" (curly), and a hyphen still matches an
+    # en-/em-dash — OpenSearch's match_phrase already treats these as
+    # equivalent, so the extractor must too or it silently returns no
+    # literal_matches for a hit it just found. Both folds are 1:1, so
+    # raw_index_map stays valid.
+    raw_folded = _fold_dashes(_fold_quotes(raw_normalized))
     raw_lower  = raw_folded.lower()
 
-    # Strategy 1 — whole phrase, exact substring
-    ci_s = _fold_quotes(ci_text.strip())
+    ci_s = _fold_dashes(_fold_quotes(unicodedata.normalize('NFC', ci_text.strip())))
     ci_lower = ci_s.lower()
+
+    # Strategy 1 — whole phrase, exact substring
     idx  = raw_lower.find(ci_lower)
     if idx >= 0:
-        return [{"text": raw_text[idx: idx + len(ci_s)], "start": idx, "end": idx + len(ci_s)}]
+        start, end = _map_span(raw_index_map, idx, len(ci_lower))
+        return [{"text": raw_text[start:end], "start": start, "end": end}]
 
     # Strategy 1b — whole phrase, exact match but ignoring whitespace
-    # differences ("n=62" vs "n = 62").
-    span_ws = _find_ignoring_whitespace(ci_lower, raw_lower)
+    # differences ("n=62" vs "n = 62") and wrapping punctuation.
+    span_ws = _find_ignoring_whitespace(ci_lower, raw_lower, raw_index_map)
     if span_ws is not None:
         start, end = span_ws
         return [{"text": raw_text[start:end], "start": start, "end": end}]
@@ -177,7 +241,7 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     span = _longest_common_span(ci_lower, raw_lower)
     min_len = max(_MIN_PARTIAL_CHARS, int(len(ci_lower) * _MIN_PARTIAL_RATIO))
     if span.size >= min_len:
-        start, end = span.b, span.b + span.size
+        start, end = _map_span(raw_index_map, span.b, span.size)
         matches.append({"text": raw_text[start:end], "start": start, "end": end})
 
     # Strategy 3 — significant sub-phrases, exact then fuzzy. Only meaningful
@@ -189,10 +253,10 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
             phrase_lower = phrase.lower()
             idx = raw_lower.find(phrase_lower)
             if idx >= 0:
-                matches.append({"text": raw_text[idx: idx + len(phrase)],
-                                "start": idx, "end": idx + len(phrase)})
+                start, end = _map_span(raw_index_map, idx, len(phrase_lower))
+                matches.append({"text": raw_text[start:end], "start": start, "end": end})
                 continue
-            span_ws = _find_ignoring_whitespace(phrase_lower, raw_lower)
+            span_ws = _find_ignoring_whitespace(phrase_lower, raw_lower, raw_index_map)
             if span_ws is not None:
                 start, end = span_ws
                 matches.append({"text": raw_text[start:end], "start": start, "end": end})
@@ -200,7 +264,7 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
             span = _longest_common_span(phrase_lower, raw_lower)
             min_len = max(_MIN_PARTIAL_CHARS, int(len(phrase_lower) * _MIN_PARTIAL_RATIO))
             if span.size >= min_len:
-                start, end = span.b, span.b + span.size
+                start, end = _map_span(raw_index_map, span.b, span.size)
                 matches.append({"text": raw_text[start:end], "start": start, "end": end})
 
     # Deduplicate overlapping spans, keep leftmost
