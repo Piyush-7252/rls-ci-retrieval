@@ -230,72 +230,11 @@ _EVIDENCE_RANK: dict[str, int] = {
     "BACKGROUND": 4, "UNRELATED": 9,
 }
 
-_NUMERIC_GATE_TYPES: frozenset[str] = frozenset({
-    "NUMERIC_SAMPLE_SIZE", "CONFIDENCE_INTERVAL", "P_VALUE",
-    "HAZARD_RATIO", "ODDS_RATIO", "NUMERIC_PERCENTAGE", "MEDIAN",
-    "NUMERIC", "STATISTICAL",
-})
-
 _CONF_THRESHOLD = 0.2
 
 
 def _is_related(ev: str) -> bool:
     return ev.startswith("SAME_") or ev.startswith("RELATED_") or ev == "BACKGROUND"
-
-
-def _numeric_gate_pattern(ci: dict):
-    """
-    Return a pattern whose .search(text) must be truthy for a candidate to pass
-    the numeric gate.  Returns None when no meaningful constraint can be derived
-    (in which case the gate is skipped and all candidates pass through).
-
-    Uses statistical_identity.type + value when available; falls back to a
-    direct regex on the CI text for common forms like "n = 8".
-    """
-    import re as _re
-
-    si      = ci.get("statistical_identity") or {}
-    si_type = si.get("type")
-    ci_text = ci.get("knownCI", "")
-
-    def _tok(v) -> str:
-        try:
-            return str(int(v)) if float(v) == int(float(v)) else str(v)
-        except (TypeError, ValueError):
-            return str(v)
-
-    if si_type == "sample_size" and si.get("sample_size") is not None:
-        n = _tok(si["sample_size"])
-        # Match N=X regardless of whether the CI used =, ≥, >, ≤, < —
-        # the document will always express the measured value as N=X.
-        return _re.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{_re.escape(n)}\b')
-
-    if si_type == "confidence_interval":
-        lo = si.get("lower_ci")
-        hi = si.get("upper_ci")
-        if lo is not None and hi is not None:
-            lo_p = _re.compile(rf'\b{_re.escape(_tok(lo))}\b')
-            hi_p = _re.compile(rf'\b{_re.escape(_tok(hi))}\b')
-            class _Both:
-                def search(self, t): return lo_p.search(t) and hi_p.search(t)
-            return _Both()
-
-    if si_type == "p_value" and si.get("p_value") is not None:
-        return _re.compile(rf'\b{_re.escape(str(si["p_value"]))}\b')
-
-    if si_type == "hazard_ratio" and si.get("hazard_ratio") is not None:
-        return _re.compile(rf'\b{_re.escape(_tok(si["hazard_ratio"]))}\b')
-
-    if si_type == "odds_ratio" and si.get("odds_ratio") is not None:
-        return _re.compile(rf'\b{_re.escape(_tok(si["odds_ratio"]))}\b')
-
-    # Fallback: "n = 8" / "N>=8" / "N≥8" style CI text
-    import re as _re2
-    m = _re2.match(r'[Nn]\s*[=\u2265\u2264><]=?\s*(\d+)', ci_text.strip())
-    if m:
-        return _re2.compile(rf'[Nn]\s*[=\u2265\u2264><]=?\s*{m.group(1)}\b')
-
-    return None   # no constraint determinable → don't filter
 
 
 def _candidate_confidence(c: dict) -> float:
@@ -459,6 +398,51 @@ def _s4_context_expand(req: dict) -> dict:
     return req
 
 
+def _dedupe_by_object_id(candidates: list[dict]) -> list[dict]:
+    """Merge candidates that resolve to the same semantic object.
+
+    S3 (aggregator) clusters purely on `matched_object` as seen at retrieval
+    time, so a literal/regex hit with no `matched_object` yet gets its own
+    `chunk:<chunk_id>` cluster. S4 (context_expander) later resolves that
+    hit's containing object from `literal_matches`, which can make it equal
+    to an object-level bm25/vector candidate that S3 already clustered
+    separately under `obj:<object_id>`. Re-group here, now that every
+    candidate's object identity is known, and combine their sources/proof.
+    """
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for c in candidates:
+        key = (c.get("matched_object") or {}).get("object_id") or c.get("chunk_id") or c.get("id") or ""
+        if key not in groups:
+            order.append(key)
+        groups.setdefault(key, []).append(c)
+
+    merged: list[dict] = []
+    for key in order:
+        group = groups[key]
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        # Prefer the candidate carrying literal proof as the base representation.
+        base = max(group, key=lambda c: (bool(c.get("literal_matches")), c.get("agg_score", 0)))
+        sources = sorted({s for c in group for s in (c.get("sources") or [])})
+        seen_starts, literal_matches = set(), []
+        for c in group:
+            for lm in c.get("literal_matches") or []:
+                start = lm.get("start")
+                if start in seen_starts:
+                    continue
+                seen_starts.add(start)
+                literal_matches.append(lm)
+        merged.append({
+            **base,
+            "sources": sources,
+            "literal_matches": literal_matches,
+            "agg_score": max(c.get("agg_score", 0) for c in group),
+        })
+    return merged
+
+
 def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
     """Reranking stage — currently always skips reranker for cold start reduction."""
     if req.get("_failed") or req.get("_early_exit"):
@@ -471,32 +455,10 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
         {**c, "cross_encoder_score": 10.0}
         for c in expanded
     ]
+    req["ranked_candidates"] = _dedupe_by_object_id(req["ranked_candidates"])
     req["_st"]["reranker"] = round(time.perf_counter() - t0, 3)
 
-    # 5.5 Numeric gate
-    ci_type = (req.get("classification") or {}).get("ci_type", "") or ""
-    if ci_type in _NUMERIC_GATE_TYPES:
-        pat = _numeric_gate_pattern(req["ci"])
-        if pat is not None:
-            passed, gated = [], []
-            for c in req.get("ranked_candidates", []):
-                # An exact literal match is stronger proof than the heuristic gate pattern.
-                if c.get("literal_matches"):
-                    passed.append(c)
-                    continue
-                txt = ((c.get("context") or {}).get("current_text", "") or c.get("snippet", ""))
-                (passed if pat.search(txt) else gated).append(c)
-            req["ranked_candidates"] = passed
-
-    # 5.6 Chunk dedup
-    by_chunk: dict[str, dict] = {}
-    for c in req.get("ranked_candidates", []):
-        cid = c.get("chunk_id") or c.get("id") or ""
-        if cid not in by_chunk or c.get("agg_score", 0) > by_chunk[cid].get("agg_score", 0):
-            by_chunk[cid] = c
-    req["ranked_candidates"] = list(by_chunk.values())
-
-    # 5.7 Confidence gate
+    # 5.6 Confidence gate
     passed, gated = [], []
     for c in req.get("ranked_candidates", []):
         if _candidate_confidence(c) >= _CONF_THRESHOLD:
