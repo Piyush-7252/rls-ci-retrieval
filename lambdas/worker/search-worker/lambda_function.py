@@ -480,6 +480,10 @@ def _s5_rerank(req: dict, skip_rerank: bool = False) -> dict:
         if pat is not None:
             passed, gated = [], []
             for c in req.get("ranked_candidates", []):
+                # An exact literal match is stronger proof than the heuristic gate pattern.
+                if c.get("literal_matches"):
+                    passed.append(c)
+                    continue
                 txt = ((c.get("context") or {}).get("current_text", "") or c.get("snippet", ""))
                 (passed if pat.search(txt) else gated).append(c)
             req["ranked_candidates"] = passed
