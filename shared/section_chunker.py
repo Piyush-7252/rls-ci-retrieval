@@ -24,6 +24,11 @@ from collections import defaultdict
 from dataclasses import dataclass, replace as _dc_replace
 from typing import Callable, Optional
 
+# Backstop against dense numeric/tabular text, which tokenizes far more richly
+# than a whitespace word count implies (e.g. "62.5%" is 1 "word" but several
+# BPE tokens) — keeps chunks comfortably under Titan Embed's 8,192-token limit.
+_MAX_CHUNK_CHARS = 10_000
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Heading filters
@@ -286,6 +291,7 @@ def build_section_chunks(
     pages:                list[dict],
     min_words:            int = 40,
     max_words:            int = 400,
+    max_chars:            int = _MAX_CHUNK_CHARS,
     similarity_fn:        Optional[Callable[[str, str], float]] = None,
     similarity_threshold: float = 0.60,
     total_pages:          int   = 0,
@@ -420,8 +426,11 @@ def build_section_chunks(
                 cur_objects.append((pg_num, obj))
                 cur_pg_end = pg_num
 
-                # Force-split when chunk is growing too large
-                if sum(len(o["text"].split()) for _, o in cur_objects if o.get("text")) > max_words:
+                # Force-split when chunk is growing too large — word count catches
+                # normal prose; char count catches dense numeric/tabular content
+                # that tokenizes far more richly than its word count suggests.
+                _texts = [o["text"] for _, o in cur_objects if o.get("text")]
+                if sum(len(t.split()) for t in _texts) > max_words or sum(len(t) for t in _texts) > max_chars:
                     _flush(next_pg=pg_num)
 
     _flush()  # flush anything remaining after the last page

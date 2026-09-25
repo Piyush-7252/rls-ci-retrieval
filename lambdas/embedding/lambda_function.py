@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from collections import Counter
@@ -51,6 +52,11 @@ _THROTTLE_CODES = frozenset({
     "ServiceUnavailableException", "RequestLimitExceeded",
     "ModelErrorException",   # Bedrock transient 500 — retry recommended by AWS
 })
+
+# Parses Titan's "Max input tokens: 8192, request input token count: 9795" message
+# so an oversized payload can be shrunk proportionally instead of failing the chunk.
+_TOKEN_LIMIT_RE = re.compile(r"Max input tokens:\s*(\d+),\s*request input token count:\s*(\d+)")
+
 
 # Cold-start flag — True only for the first invocation in this execution environment.
 # Reset to False after the first handler() call so subsequent warm invocations are
@@ -313,7 +319,8 @@ def _generate_dense_embedding(
     lambda_ctx: Any = None,
 ) -> list[float]:
     import botocore.exceptions
-    payload    = json.dumps({"inputText": text[:_MAX_INPUT_CHARS]}).encode()
+    current_text = text[:_MAX_INPUT_CHARS]
+    payload    = json.dumps({"inputText": current_text}).encode()
     last_exc: Exception | None = None
     request_id = getattr(lambda_ctx, "aws_request_id", "") or os.environ.get("AWS_LAMBDA_LOG_STREAM_NAME", "")
 
@@ -351,6 +358,25 @@ def _generate_dense_embedding(
                 stats.exit_active()
             code = exc.response.get("Error", {}).get("Code", "")
             msg  = exc.response.get("Error", {}).get("Message", "")
+            token_match = _TOKEN_LIMIT_RE.search(msg) if code == "ValidationException" else None
+            if token_match:
+                max_tokens, actual_tokens = int(token_match.group(1)), int(token_match.group(2))
+                # Shrink proportionally with a 10% safety margin and retry immediately (no backoff needed).
+                shrink_ratio = (max_tokens / actual_tokens) * 0.9
+                new_len      = max(1, int(len(current_text) * shrink_ratio))
+                if new_len >= len(current_text):
+                    new_len = len(current_text) // 2
+                current_text = current_text[:new_len]
+                payload      = json.dumps({"inputText": current_text}).encode()
+                logger.warning(
+                    "[BedrockEmbedding] ts=%s doc=%s chunk=%s request_id=%s attempt=%d/%d "
+                    "status=TOKEN_LIMIT_EXCEEDED max_tokens=%d actual_tokens=%d "
+                    "shrunk_chars=%d retrying",
+                    ts, doc_id, chunk_id, request_id, attempt + 1, _EMBED_MAX_RETRIES,
+                    max_tokens, actual_tokens, new_len,
+                )
+                last_exc = exc
+                continue
             if code not in _THROTTLE_CODES:
                 if stats is not None:
                     stats.record_call_failure(attempt)
