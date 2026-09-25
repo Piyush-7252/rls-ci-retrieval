@@ -105,6 +105,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Check secret visibility
+        run: |
+          if [ -n "$TOKEN" ]; then echo "AWS_SESSION_TOKEN: SET (len=${#TOKEN})"; else echo "AWS_SESSION_TOKEN: NOT SET / EMPTY"; fi
+          if [ -n "$AKID" ]; then echo "AWS_ACCESS_KEY_ID: SET (len=${#AKID})"; else echo "AWS_ACCESS_KEY_ID: NOT SET / EMPTY"; fi
+        env:
+          TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AKID:  ${{ secrets.AWS_ACCESS_KEY_ID }}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
