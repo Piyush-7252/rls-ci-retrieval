@@ -529,15 +529,23 @@ def build_section_chunks(
     # ── Phase 2: merge tiny consecutive chunks ────────────────────────────────
     # A tiny chunk (< min_words) gets absorbed into the preceding chunk when
     # they share the same section category.  This avoids single-sentence stubs.
+    # Skipped when the combined size would breach max_words/max_chars, so a
+    # merge can never re-introduce an oversized (token-overflow-risk) chunk.
     merged: list[SectionChunk] = [raw_chunks[0]]
     for chunk in raw_chunks[1:]:
         prev = merged[-1]
-        if chunk.word_count < min_words and prev.section_category == chunk.section_category:
+        combined_words = prev.word_count + chunk.word_count
+        combined_chars = sum(len(o["text"]) for _, o in prev.objects if o.get("text")) \
+                        + sum(len(o["text"]) for _, o in chunk.objects if o.get("text"))
+        if (chunk.word_count < min_words
+                and prev.section_category == chunk.section_category
+                and combined_words <= max_words
+                and combined_chars <= max_chars):
             merged[-1] = _dc_replace(
                 prev,
                 page_end   = chunk.page_end,
                 objects    = prev.objects + chunk.objects,
-                word_count = prev.word_count + chunk.word_count,
+                word_count = combined_words,
             )
         else:
             merged.append(chunk)
