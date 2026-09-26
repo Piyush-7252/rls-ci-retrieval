@@ -10,22 +10,84 @@ on:
       - ".github/workflows/deploy-nlp-sentence-builder.yml"
 
   workflow_dispatch:
+    inputs:
+      deployment:
+        description: "Deployment environment"
+        required: false
+        default: dev
+        type: choice
+        options:
+          - dev
+          - qa
+          - cqa
+          - prod
 
 env:
-  AWS_REGION:      ${{ secrets.AWS_REGION }}
-  CALLBACK_URL:    ${{ secrets.CALLBACK_URL }}
-  OPENSEARCH_ENDPOINT: ${{ secrets.OPENSEARCH_ENDPOINT }}
   ECR_REPOSITORY: rls-ci-retrieval-nlp-sentence-builder
   ECS_TASK_DEFINITION: rls-ci-retrieval-nlp-sentence-builder
   ECS_CONTAINER_NAME: rls-ci-retrieval-nlp-sentence-builder
 
 jobs:
+  config:
+    name: Resolve deployment config (${{ github.event.inputs.deployment || 'dev' }})
+    runs-on: ubuntu-latest
+    outputs:
+      deployment:          ${{ steps.set.outputs.deployment }}
+      aws_region:          ${{ steps.set.outputs.aws_region }}
+      callback_url:        ${{ steps.set.outputs.callback_url }}
+      opensearch_endpoint: ${{ steps.set.outputs.opensearch_endpoint }}
+    steps:
+      - name: Set config for deployment
+        id: set
+        run: |
+          DEPLOYMENT="${{ github.event.inputs.deployment || 'dev' }}"
+
+          case "$DEPLOYMENT" in
+            dev)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app-dev.rlsciences.com"
+              OPENSEARCH_ENDPOINT="search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com"
+              ;;
+            qa)
+              AWS_REGION="us-east-1"
+              CALLBACK_URL="https://api.app-qa.rlsciences.com"
+              OPENSEARCH_ENDPOINT="search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com"
+              ;;
+            cqa)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app-cqa.rlsciences.com"
+              OPENSEARCH_ENDPOINT="search-rls-cqa-7sgyfh75bof4w5raojeqrtpwue.eu-west-1.es.amazonaws.com"
+              ;;
+            prod)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app.rlsciences.com"
+              OPENSEARCH_ENDPOINT="search-rls-prod-uswe3hhrfhtfq7feh3wnowy7tq.eu-west-1.es.amazonaws.com"
+              ;;
+            *)
+              echo "Unknown deployment: $DEPLOYMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "deployment=$DEPLOYMENT"
+            echo "aws_region=$AWS_REGION"
+            echo "callback_url=$CALLBACK_URL"
+            echo "opensearch_endpoint=$OPENSEARCH_ENDPOINT"
+          } >> "$GITHUB_OUTPUT"
+
   build-and-push:
     name: Build and push NLP Sentence Builder image
+    needs: config
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+
+    env:
+      AWS_REGION:          ${{ needs.config.outputs.aws_region }}
+      CALLBACK_URL:        ${{ needs.config.outputs.callback_url }}
+      OPENSEARCH_ENDPOINT: ${{ needs.config.outputs.opensearch_endpoint }}
 
     steps:
       - name: Checkout

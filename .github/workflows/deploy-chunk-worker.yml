@@ -32,15 +32,90 @@ on:
           - ci-worker
           - search-worker
           - search-orchestrator
-
-env:
-  AWS_REGION:           ${{ secrets.AWS_REGION }}
-  CALLBACK_URL:         ${{ secrets.CALLBACK_URL }}
-  OPENSEARCH_ENDPOINT:  ${{ secrets.OPENSEARCH_ENDPOINT }}
-  OPEN_SEARCH_REGION:   ${{ secrets.OPEN_SEARCH_REGION || secrets.AWS_REGION }}
-  SECRETS_MANAGER_REGION: ${{ secrets.SECRETS_MANAGER_REGION || secrets.AWS_REGION }}
+      deployment:
+        description: "Deployment environment"
+        required: false
+        default: dev
+        type: choice
+        options:
+          - dev
+          - qa
+          - cqa
+          - prod
 
 jobs:
+  config:
+    name: Resolve deployment config (${{ github.event.inputs.deployment || 'dev' }})
+    runs-on: ubuntu-latest
+    outputs:
+      deployment:              ${{ steps.set.outputs.deployment }}
+      aws_region:               ${{ steps.set.outputs.aws_region }}
+      callback_url:             ${{ steps.set.outputs.callback_url }}
+      role_arn:                 ${{ steps.set.outputs.role_arn }}
+      opensearch_endpoint:      ${{ steps.set.outputs.opensearch_endpoint }}
+      open_search_region:       ${{ steps.set.outputs.open_search_region }}
+      secrets_manager_region:   ${{ steps.set.outputs.secrets_manager_region }}
+      document_worker_regions:  ${{ steps.set.outputs.document_worker_regions }}
+    steps:
+      - name: Set config for deployment
+        id: set
+        run: |
+          DEPLOYMENT="${{ github.event.inputs.deployment || 'dev' }}"
+
+          case "$DEPLOYMENT" in
+            dev)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app-dev.rlsciences.com"
+              ROLE_ARN="arn:aws:iam::064051750322:role/rls-document-extraction-lambda-execution-role"
+              OPENSEARCH_ENDPOINT="search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com"
+              OPEN_SEARCH_REGION="eu-west-1"
+              SECRETS_MANAGER_REGION="eu-west-1"
+              DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
+              ;;
+            qa)
+              AWS_REGION="us-east-1"
+              CALLBACK_URL="https://api.app-qa.rlsciences.com"
+              ROLE_ARN="arn:aws:iam::166795844383:role/rls-document-extraction-lambda-execution-role"
+              OPENSEARCH_ENDPOINT="search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com"
+              OPEN_SEARCH_REGION="us-east-1"
+              SECRETS_MANAGER_REGION="us-east-1"
+              DOCUMENT_WORKER_REGIONS='["us-west-2","us-east-2","eu-central-1","ap-south-1"]'
+              ;;
+            cqa)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app-cqa.rlsciences.com"
+              ROLE_ARN="arn:aws:iam::166795844383:role/rls-document-extraction-lambda-execution-role"
+              OPENSEARCH_ENDPOINT="search-rls-cqa-7sgyfh75bof4w5raojeqrtpwue.eu-west-1.es.amazonaws.com"
+              OPEN_SEARCH_REGION="eu-west-1"
+              SECRETS_MANAGER_REGION="eu-west-1"
+              DOCUMENT_WORKER_REGIONS='["eu-west-1"]'
+              ;;
+            prod)
+              AWS_REGION="eu-west-1"
+              CALLBACK_URL="https://api.app.rlsciences.com"
+              ROLE_ARN="arn:aws:iam::027698832617:role/rls-document-extraction-lambda-execution-role"
+              OPENSEARCH_ENDPOINT="search-rls-prod-uswe3hhrfhtfq7feh3wnowy7tq.eu-west-1.es.amazonaws.com"
+              OPEN_SEARCH_REGION="eu-west-1"
+              SECRETS_MANAGER_REGION="eu-west-1"
+              DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
+              ;;
+            *)
+              echo "Unknown deployment: $DEPLOYMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "deployment=$DEPLOYMENT"
+            echo "aws_region=$AWS_REGION"
+            echo "callback_url=$CALLBACK_URL"
+            echo "role_arn=$ROLE_ARN"
+            echo "opensearch_endpoint=$OPENSEARCH_ENDPOINT"
+            echo "open_search_region=$OPEN_SEARCH_REGION"
+            echo "secrets_manager_region=$SECRETS_MANAGER_REGION"
+            echo "document_worker_regions=$DOCUMENT_WORKER_REGIONS"
+          } >> "$GITHUB_OUTPUT"
+
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
@@ -87,7 +162,7 @@ jobs:
   # ── document-chunk-worker ────────────────────────────────────────────────────────
   deploy-document-chunk-worker:
     name: Deploy document-chunk-worker to ${{ matrix.region }}
-    needs: changes
+    needs: [config, changes]
     if: |
       (github.event_name == 'push' && needs.changes.outputs.document_chunk_worker == 'true') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'document-chunk-worker'))
@@ -95,13 +170,17 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        region: ${{ fromJSON(vars.DOCUMENT_WORKER_REGIONS) }}
+        region: ${{ fromJSON(needs.config.outputs.document_worker_regions) }}
       max-parallel: 2
 
     env:
-      FUNCTION_NAME: rls-ci-retrieval-document-chunk-worker
-      ECR_REPO:      rls-ci-retrieval-document-chunk-worker
-      AWS_REGION:    ${{ matrix.region }}
+      FUNCTION_NAME:          rls-ci-retrieval-document-chunk-worker
+      ECR_REPO:               rls-ci-retrieval-document-chunk-worker
+      AWS_REGION:             ${{ matrix.region }}
+      CALLBACK_URL:           ${{ needs.config.outputs.callback_url }}
+      OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
+      OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
+      SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
 
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +202,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          ROLE_ARN: ${{ needs.config.outputs.role_arn }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_document_chunk_worker.sh
@@ -132,7 +211,7 @@ jobs:
   # ── ci-worker ─────────────────────────────────────────────────────────────────
   deploy-ci-worker:
     name: Deploy ci-worker (rls-ci-retrieval-ci-worker)
-    needs: changes
+    needs: [config, changes]
     if: |
       (github.event_name == 'push' && needs.changes.outputs.ci_worker == 'true') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'ci-worker'))
@@ -140,8 +219,13 @@ jobs:
     timeout-minutes: 45
 
     env:
-      FUNCTION_NAME: rls-ci-retrieval-ci-worker
-      ECR_REPO:      rls-ci-retrieval-ci-worker
+      FUNCTION_NAME:          rls-ci-retrieval-ci-worker
+      ECR_REPO:               rls-ci-retrieval-ci-worker
+      AWS_REGION:             ${{ needs.config.outputs.aws_region }}
+      CALLBACK_URL:           ${{ needs.config.outputs.callback_url }}
+      OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
+      OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
+      SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
 
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +240,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          ROLE_ARN: ${{ needs.config.outputs.role_arn }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_ci_worker.sh
@@ -165,7 +249,7 @@ jobs:
   # ── search-worker ─────────────────────────────────────────────────────────────────
   deploy-search-worker:
     name: Deploy search-worker (rls-ci-retrieval-search-worker)
-    needs: changes
+    needs: [config, changes]
     if: |
       (github.event_name == 'push' && needs.changes.outputs.search_worker == 'true') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search-worker'))
@@ -173,8 +257,13 @@ jobs:
     timeout-minutes: 45
 
     env:
-      FUNCTION_NAME: rls-ci-retrieval-search-worker
-      ECR_REPO:      rls-ci-retrieval-search-worker
+      FUNCTION_NAME:          rls-ci-retrieval-search-worker
+      ECR_REPO:               rls-ci-retrieval-search-worker
+      AWS_REGION:             ${{ needs.config.outputs.aws_region }}
+      CALLBACK_URL:           ${{ needs.config.outputs.callback_url }}
+      OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
+      OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
+      SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
 
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +278,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          ROLE_ARN: ${{ needs.config.outputs.role_arn }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_search_worker.sh
@@ -198,7 +287,7 @@ jobs:
   # ── search-orchestrator ────────────────────────────────────────────────────────────
   deploy-search-orchestrator:
     name: Deploy search-orchestrator (rls-ci-retrieval-search-orchestrator)
-    needs: changes
+    needs: [config, changes]
     if: |
       (github.event_name == 'push' && needs.changes.outputs.search_orchestrator == 'true') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'all' || github.event.inputs.target == 'search-orchestrator'))
@@ -206,8 +295,13 @@ jobs:
     timeout-minutes: 30
 
     env:
-      FUNCTION_NAME: rls-ci-retrieval-search-orchestrator
-      ECR_REPO:      rls-ci-retrieval-search-orchestrator
+      FUNCTION_NAME:          rls-ci-retrieval-search-orchestrator
+      ECR_REPO:               rls-ci-retrieval-search-orchestrator
+      AWS_REGION:             ${{ needs.config.outputs.aws_region }}
+      CALLBACK_URL:           ${{ needs.config.outputs.callback_url }}
+      OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
+      OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
+      SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
 
     steps:
       - uses: actions/checkout@v4
@@ -222,7 +316,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Deploy
         env:
-          ROLE_ARN: ${{ secrets.ROLE_ARN }}
+          ROLE_ARN: ${{ needs.config.outputs.role_arn }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x tools/deploy_search_orchestrator.sh
