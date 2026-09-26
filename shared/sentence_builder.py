@@ -418,6 +418,9 @@ def _make_display_spans_with_geometry(
             "page_distribution": sentence_page_distribution,
         }
 
+        # sentence_id is NOT assigned here: object_id is still None at this
+        # point (spans are built before the parent object's id exists). See
+        # _assign_sentence_ids(), called once the real object_id is known.
         return {
             "type": span_type,
             "text": span_text,
@@ -614,6 +617,7 @@ def _strip_display_span_geometry(spans: list[dict]) -> list[dict]:
             "text": span.get("text", ""),
         }
         if span.get("type") == "sentence":
+            item["sentence_id"] = span.get("sentence_id")
             geometry = span.get("geometry")
             if isinstance(geometry, dict):
                 item["geometry"] = copy.deepcopy(geometry)
@@ -626,6 +630,18 @@ def _make_display_spans(*args, **kwargs) -> list[dict]:
     return _strip_display_span_geometry(
         _make_display_spans_with_geometry(*args, **kwargs)
     )
+
+
+def _assign_sentence_ids(display_spans: list[dict], object_id: str) -> None:
+    """Stamp sentence_id on each sentence span, in place, once object_id exists.
+
+    idx is the span's position in the full display_spans list (matches the
+    index lambda's legacy fallback numbering) — object_id is already globally
+    unique, so idx only needs to disambiguate within this one object.
+    """
+    for idx, span in enumerate(display_spans or []):
+        if span.get("type") == "sentence" and not span.get("sentence_id"):
+            span["sentence_id"] = f"{object_id}_s{idx}"
 
 
 def _union_bbox(a: list | None, b: list | None) -> list:
@@ -1014,11 +1030,14 @@ def _build_objects(chunk_id: str, pages: list[dict], global_offset: int = 0) -> 
 
         stored_type = "metadata" if category == "document_metadata" and kind == "paragraph" else kind
         gpos = global_offset + pos
+        real_object_id = f"{chunk_id}_obj_{pos:04d}"
+
+        _assign_sentence_ids(obj.get("display_spans", []), real_object_id)
 
         obj.pop("_page_distribution", None)
         objects.append({
             **obj,
-            "object_id": f"{chunk_id}_obj_{pos:04d}",
+            "object_id": real_object_id,
             "position": pos,
             "global_position": gpos,
             "prev_object_pos": gpos - 1 if gpos > 0 else None,

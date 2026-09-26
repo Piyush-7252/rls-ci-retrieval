@@ -505,15 +505,15 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
         ]
 
         for list_pos, (idx, span) in enumerate(spans):
-            sentence_id = f"{object_id}_s{idx}"
+            sentence_id = span.get("sentence_id") or f"{object_id}_s{idx}"
             geometry = span.get("geometry") or {}
 
             prev_id = (
-                f"{object_id}_s{spans[list_pos - 1][0]}"
+                spans[list_pos - 1][1].get("sentence_id") or f"{object_id}_s{spans[list_pos - 1][0]}"
                 if list_pos > 0 else None
             )
             next_id = (
-                f"{object_id}_s{spans[list_pos + 1][0]}"
+                spans[list_pos + 1][1].get("sentence_id") or f"{object_id}_s{spans[list_pos + 1][0]}"
                 if list_pos < len(spans) - 1 else None
             )
             prev_text = (
