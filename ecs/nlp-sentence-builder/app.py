@@ -40,6 +40,7 @@ def _args() -> argparse.Namespace:
     p.add_argument("--queue-url", default=os.getenv("QUEUE_URL", ""))
     p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", ""))
     p.add_argument("--payload-prefix", default=os.getenv("PAYLOAD_PREFIX", "nlp-sentence-builder-payloads"))
+    p.add_argument("--extraction-path", default=os.getenv("EXTRACTION_PATH", "extractions/temp"))
     p.add_argument("--tenant-id", default=os.getenv("TENANT_ID", ""))
     p.add_argument("--tenant-name", default=os.getenv("TENANT_NAME", ""))
     p.add_argument("--tenant-schema", default=os.getenv("TENANT_SCHEMA", ""))
@@ -186,6 +187,61 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list
             idx + 1, len(sections), chunk_id, sec.page_start, sec.page_end, len(objects), time.perf_counter() - t_chunk,
         )
     return payloads
+
+
+def _build_document_geometry_map(payloads: list[dict]) -> dict[str, dict]:
+    """One flat {id: geometry} map for the whole document.
+
+    chunk_id, object_id, and sentence_id are disjoint ID namespaces, so a
+    single dict can hold all three without collision.
+    """
+    geometry: dict[str, dict] = {}
+
+    for payload in payloads:
+        geometry[payload["chunk_id"]] = {
+            "page_start": payload.get("page_start"),
+            "page_end": payload.get("page_end"),
+        }
+
+        for obj in payload.get("extraction", {}).get("objects", []):
+            object_id = obj.get("object_id")
+            if not object_id:
+                continue
+            geometry[object_id] = {
+                "page": obj.get("page"),
+                "page_start": obj.get("page_start"),
+                "page_end": obj.get("page_end"),
+                "bbox": obj.get("bbox", []),
+                "geometry": obj.get("geometry") or {},
+            }
+
+            for span in obj.get("display_spans", []):
+                if span.get("type") != "sentence":
+                    continue
+                sentence_id = span.get("sentence_id")
+                if not sentence_id:
+                    continue
+                span_geometry = span.get("geometry") or {}
+                geometry[sentence_id] = {
+                    "page": span_geometry.get("page", obj.get("page")),
+                    "bbox": span_geometry.get("bbox", []),
+                    "geometry": span_geometry,
+                }
+
+    return geometry
+
+
+def _upload_document_geometry(geometry: dict, args: argparse.Namespace, global_document_id: str) -> None:
+    if not geometry:
+        return
+    key = f"{args.extraction_path.rstrip('/')}/geometry/{global_document_id}.json"
+    body = json.dumps(geometry, separators=(",", ":")).encode("utf-8")
+    t0 = time.perf_counter()
+    s3.put_object(Bucket=args.input_bucket, Key=key, Body=body, ContentType="application/json")
+    logger.info(
+        "geometry uploaded document_id=%s ids=%d bytes=%d elapsed_s=%.3f bucket=%s key=%s",
+        global_document_id, len(geometry), len(body), time.perf_counter() - t0, args.input_bucket, key,
+    )
 
 
 def _send_batch(
@@ -341,6 +397,7 @@ def main() -> int:
         args.tenant_schema,
         args.project_id,
         args.attempt_id,
+        args.extraction_path
     )
 
     # Callback failures are deliberately non-fatal; the backend DB is the state system of record.
@@ -362,6 +419,16 @@ def main() -> int:
         payloads = _build_chunk_payloads(doc_structure, args)
         expected = len(payloads)
         logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
+
+        try:
+            global_document_id = get_global_document_id(
+                str(args.document_id), tenant_id=str(args.tenant_id), project_id=str(args.project_id),
+            )
+            geometry_map = _build_document_geometry_map(payloads)
+            _upload_document_geometry(geometry_map, args, "geometry")
+        except Exception:
+            # Geometry externalization is supplementary — never block dispatch on it.
+            logger.exception("geometry upload failed document_id=%s", args.document_id)
 
         if args.dry_run:
             logger.info("DRY RUN complete expected_chunks=%d", expected)
