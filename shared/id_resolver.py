@@ -22,3 +22,17 @@ def get_global_document_id(document_id: str, tenant_id: str | None = None, proje
         f"{document_id}"
     )
     return str(global_document_id)
+
+
+def get_rls_file_s3_extraction_prefix(tenant_name: str, project_id: str, file_name: str) -> str:
+    """
+    Python port of the frontend's getRLSFileS3ExtractionPrefix().
+
+    Top-level "extractions/" prefix so the BucketAV S3 event can be filtered
+    to skip this path. file_name may or may not carry an extension (e.g.
+    "temp.pdf" or "temp") — Path(...).stem handles both, mirroring Node's
+    path.parse(fileName).name.
+    """
+    from pathlib import PurePosixPath
+    file_base_name = PurePosixPath(file_name).stem
+    return f"extractions/{tenant_name}/{project_id}/{file_base_name}"
