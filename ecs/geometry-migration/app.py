@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 # app.py sits directly at /app/app.py in the container alongside /app/shared —
 # python already puts the script's own directory on sys.path, so no manual
@@ -630,8 +631,13 @@ def _download_manifest_from_s3(s3, bucket: str, key: str, path: Path) -> bool:
         s3.download_file(bucket, key, str(path))
         logger.info("resumed manifest from s3://%s/%s -> %s", bucket, key, path)
         return True
-    except Exception as exc:
-        if "404" in str(exc) or "Not Found" in str(exc) or "NoSuchKey" in str(exc):
+    except ClientError as exc:
+        # Only a real "object doesn't exist" response means start fresh — any
+        # other error (throttling, access denied, transient network) must NOT
+        # be swallowed here, or a blip would silently discard real S3 progress
+        # by falling through to fresh discovery + an overwrite on the next save.
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey"):
             logger.info("no manifest at s3://%s/%s yet — starting fresh", bucket, key)
             return False
         raise
