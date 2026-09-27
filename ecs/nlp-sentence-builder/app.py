@@ -10,7 +10,7 @@ from typing import Any
 
 import boto3
 
-from shared.id_resolver import get_global_document_id
+from shared.id_resolver import get_global_document_id, get_rls_file_s3_extraction_prefix
 from shared.section_chunker import build_section_chunks
 from shared.apryse_parser import parse_pages
 from shared.sentence_builder import _build_objects
@@ -40,7 +40,10 @@ def _args() -> argparse.Namespace:
     p.add_argument("--queue-url", default=os.getenv("QUEUE_URL", ""))
     p.add_argument("--payload-bucket", default=os.getenv("PAYLOAD_BUCKET", ""))
     p.add_argument("--payload-prefix", default=os.getenv("PAYLOAD_PREFIX", "nlp-sentence-builder-payloads"))
-    p.add_argument("--extraction-path", default=os.getenv("EXTRACTION_PATH", "extractions/temp"))
+    # Empty default (rather than a hardcoded fallback path) so main() can tell
+    # "not provided" apart from an explicit value and compute it via
+    # get_rls_file_s3_extraction_prefix() instead.
+    p.add_argument("--extraction-path", default=os.getenv("EXTRACTION_PATH", ""))
     p.add_argument("--tenant-id", default=os.getenv("TENANT_ID", ""))
     p.add_argument("--tenant-name", default=os.getenv("TENANT_NAME", ""))
     p.add_argument("--tenant-schema", default=os.getenv("TENANT_SCHEMA", ""))
@@ -389,15 +392,17 @@ def main() -> int:
     args = _args()
     tenant_schema = args.tenant_schema
 
+    if not args.extraction_path:
+        args.extraction_path = get_rls_file_s3_extraction_prefix(args.tenant_name, args.project_id, args.document_id)
 
     logger.info(
-        "START document_id=%s file_id=%s tenant_schema=%s project_id=%s attempt_id=%s",
+        "START document_id=%s file_id=%s tenant_schema=%s project_id=%s attempt_id=%s extraction_path=%s",
         args.document_id,
         args.file_id,
         args.tenant_schema,
         args.project_id,
         args.attempt_id,
-        args.extraction_path
+        args.extraction_path,
     )
 
     # Callback failures are deliberately non-fatal; the backend DB is the state system of record.
