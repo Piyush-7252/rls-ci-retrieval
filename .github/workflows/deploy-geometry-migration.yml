@@ -1,0 +1,178 @@
+name: Deploy Geometry Migration
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ecs/geometry-migration/**"
+      - "shared/**"
+      - ".github/workflows/deploy-geometry-migration.yml"
+
+  workflow_dispatch:
+    inputs:
+      deployment:
+        description: "Deployment environment"
+        required: false
+        default: dev
+        type: choice
+        options:
+          - dev
+          - qa
+          - cqa
+          - prod
+
+env:
+  ECR_REPOSITORY: rls-ci-retrieval-geometry-migration
+  ECS_TASK_DEFINITION: rls-ci-retrieval-geometry-migration
+  ECS_CONTAINER_NAME: rls-ci-retrieval-geometry-migration
+
+jobs:
+  config:
+    name: Resolve deployment config (${{ github.event.inputs.deployment || 'dev' }})
+    runs-on: ubuntu-latest
+    outputs:
+      deployment: ${{ steps.set.outputs.deployment }}
+      aws_region: ${{ steps.set.outputs.aws_region }}
+    steps:
+      - name: Set config for deployment
+        id: set
+        run: |
+          DEPLOYMENT="${{ github.event.inputs.deployment || 'dev' }}"
+
+          case "$DEPLOYMENT" in
+            dev)
+              AWS_REGION="eu-west-1"
+              ;;
+            qa)
+              AWS_REGION="us-east-1"
+              ;;
+            cqa)
+              AWS_REGION="eu-west-1"
+              ;;
+            prod)
+              AWS_REGION="eu-west-1"
+              ;;
+            *)
+              echo "Unknown deployment: $DEPLOYMENT" >&2
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "deployment=$DEPLOYMENT"
+            echo "aws_region=$AWS_REGION"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build and push Geometry Migration image
+    needs: config
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      AWS_REGION: ${{ needs.config.outputs.aws_region }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Debug AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "Building: ${IMAGE_URI}"
+
+          docker build \
+            -f ecs/geometry-migration/Dockerfile \
+            -t "${IMAGE_URI}" \
+            .
+
+          docker push "${IMAGE_URI}"
+
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+
+      - name: Register ECS task definition with new image
+        env:
+          IMAGE_URI: ${{ env.IMAGE_URI }}
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_DEFINITION}" \
+            --query 'taskDefinition' \
+            --output json > task-definition.json
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          path = "task-definition.json"
+          image = os.environ["IMAGE_URI"]
+          container_name = os.environ["ECS_CONTAINER_NAME"]
+
+          with open(path) as f:
+              task = json.load(f)
+
+          found = False
+
+          for container in task["containerDefinitions"]:
+              if container["name"] == container_name:
+                  container["image"] = image
+                  found = True
+
+          if not found:
+              raise RuntimeError(
+                  f"Container '{container_name}' not found in task definition"
+              )
+
+          for key in (
+              "taskDefinitionArn",
+              "revision",
+              "status",
+              "requiresAttributes",
+              "compatibilities",
+              "registeredAt",
+              "registeredBy",
+          ):
+              task.pop(key, None)
+
+          with open(path, "w") as f:
+              json.dump(task, f)
+
+          PY
+
+          aws ecs register-task-definition \
+            --cli-input-json file://task-definition.json
+
+          echo "Registered new ${ECS_TASK_DEFINITION} revision."
+
+      - name: Deployment summary
+        run: |
+          echo "=============================================="
+          echo "GEOMETRY MIGRATION IMAGE DEPLOYED"
+          echo "=============================================="
+          echo "ECR repository : ${ECR_REPOSITORY}"
+          echo "Image tag      : ${GITHUB_SHA}"
+          echo "Task definition: ${ECS_TASK_DEFINITION}"
+          echo ""
+          echo "This workflow does NOT start an ECS task."
+          echo "Run it manually via: tools/run_geometry_migration_ecs.sh"
