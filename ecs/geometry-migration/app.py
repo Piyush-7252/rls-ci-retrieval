@@ -62,6 +62,7 @@ import logging
 import os
 import resource
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -337,27 +338,43 @@ def _scan_with_semaphore(client, index: str, document_id: str, tenant_id: str, p
         semaphore.release()
 
 
+def _append_geometry_record(fh, key: str, value: dict) -> None:
+    """One record per line, as a [key, value] JSON array — cheap to append and
+    to stream back out later without ever holding more than one line at a time."""
+    fh.write(json.dumps([key, value], separators=(",", ":")))
+    fh.write("\n")
+
+
 def _collect_chunk_geometry(
-    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, cancel_event: threading.Event, abort_event: threading.Event,
-) -> tuple[dict[str, dict], int]:
-    geometry: dict[str, dict] = {}
+    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, cancel_event: threading.Event, abort_event: threading.Event, out_path: Path,
+) -> int:
+    """Streams each chunk's geometry straight to out_path (a local NDJSON file
+    on ephemeral disk) instead of accumulating an in-memory dict. For documents
+    with 1M+ records, the per-record payload (bbox/polygon coordinates) is what
+    actually exhausts container RAM, not the record count — writing each record
+    out immediately keeps this function's own memory footprint bounded by one
+    record plus a compact id set (kept only for duplicate detection; ids alone
+    are cheap, the geometry payloads are not)."""
+    seen_ids: set[str] = set()
     count = 0
     try:
-        for doc in _scan_with_semaphore(client, OPENSEARCH_INDEX, document_id, tenant_id, project_id, CHUNK_SOURCE_FIELDS, semaphore, abort_event):
-            if abort_event.is_set():
-                raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
-            if cancel_event.is_set():
-                raise GeometryValidationError("chunk scan cancelled: sibling object scan failed", fetched_count=count, is_cancellation=True)
-            count += 1
-            chunk_id = doc.get("chunk_id")
-            if not chunk_id:
-                raise GeometryValidationError(f"chunk doc missing chunk_id (record #{count})", fetched_count=count)
-            if chunk_id in geometry:
-                raise GeometryValidationError(f"duplicate chunk_id={chunk_id}", fetched_count=count)
-            geometry[chunk_id] = {
-                "page_start": doc.get("page_start"),
-                "page_end":   doc.get("page_end"),
-            }
+        with out_path.open("w") as fh:
+            for doc in _scan_with_semaphore(client, OPENSEARCH_INDEX, document_id, tenant_id, project_id, CHUNK_SOURCE_FIELDS, semaphore, abort_event):
+                if abort_event.is_set():
+                    raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
+                if cancel_event.is_set():
+                    raise GeometryValidationError("chunk scan cancelled: sibling object scan failed", fetched_count=count, is_cancellation=True)
+                count += 1
+                chunk_id = doc.get("chunk_id")
+                if not chunk_id:
+                    raise GeometryValidationError(f"chunk doc missing chunk_id (record #{count})", fetched_count=count)
+                if chunk_id in seen_ids:
+                    raise GeometryValidationError(f"duplicate chunk_id={chunk_id}", fetched_count=count)
+                seen_ids.add(chunk_id)
+                _append_geometry_record(fh, chunk_id, {
+                    "page_start": doc.get("page_start"),
+                    "page_end":   doc.get("page_end"),
+                })
     except GeometryValidationError:
         cancel_event.set()
         raise
@@ -366,42 +383,47 @@ def _collect_chunk_geometry(
             abort_event.set()
         cancel_event.set()
         raise GeometryValidationError(f"chunk scroll failed after {count} records: {exc!r}", fetched_count=count) from exc
-    return geometry, count
+    return count
 
 
 def _collect_object_geometry(
-    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, cancel_event: threading.Event, abort_event: threading.Event,
-) -> tuple[dict[str, dict], int]:
-    geometry: dict[str, dict] = {}
+    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, cancel_event: threading.Event, abort_event: threading.Event, out_path: Path,
+) -> int:
+    """Same streaming-to-disk approach as _collect_chunk_geometry, for the
+    semantic-objects index."""
+    seen_ids: set[str] = set()
     count = 0
     try:
-        for doc in _scan_with_semaphore(client, SEMANTIC_OBJECTS_INDEX, document_id, tenant_id, project_id, OBJECT_SOURCE_FIELDS, semaphore, abort_event):
-            if abort_event.is_set():
-                raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
-            if cancel_event.is_set():
-                raise GeometryValidationError("object scan cancelled: sibling chunk scan failed", fetched_count=count, is_cancellation=True)
-            count += 1
-            object_id = doc.get("object_id")
-            if not object_id:
-                raise GeometryValidationError(f"object/sentence doc missing object_id (record #{count})", fetched_count=count)
-            if object_id in geometry:
-                raise GeometryValidationError(f"duplicate object_id={object_id}", fetched_count=count)
-            doc_geometry = doc.get("geometry") or {}
-            if doc.get("type") == "sentence":
-                geometry[object_id] = {
-                    "page": doc.get("page"),
-                    "bbox": doc.get("bbox", []),
-                    "geometry": doc_geometry,
-                }
-            else:
-                geometry[object_id] = {
-                    "page":       doc.get("page"),
-                    # page_start/page_end for objects live only inside geometry (see note above).
-                    "page_start": doc_geometry.get("page_start", doc.get("page")),
-                    "page_end":   doc_geometry.get("page_end", doc.get("page")),
-                    "bbox":       doc.get("bbox", []),
-                    "geometry":   doc_geometry,
-                }
+        with out_path.open("w") as fh:
+            for doc in _scan_with_semaphore(client, SEMANTIC_OBJECTS_INDEX, document_id, tenant_id, project_id, OBJECT_SOURCE_FIELDS, semaphore, abort_event):
+                if abort_event.is_set():
+                    raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
+                if cancel_event.is_set():
+                    raise GeometryValidationError("object scan cancelled: sibling chunk scan failed", fetched_count=count, is_cancellation=True)
+                count += 1
+                object_id = doc.get("object_id")
+                if not object_id:
+                    raise GeometryValidationError(f"object/sentence doc missing object_id (record #{count})", fetched_count=count)
+                if object_id in seen_ids:
+                    raise GeometryValidationError(f"duplicate object_id={object_id}", fetched_count=count)
+                seen_ids.add(object_id)
+                doc_geometry = doc.get("geometry") or {}
+                if doc.get("type") == "sentence":
+                    value = {
+                        "page": doc.get("page"),
+                        "bbox": doc.get("bbox", []),
+                        "geometry": doc_geometry,
+                    }
+                else:
+                    value = {
+                        "page":       doc.get("page"),
+                        # page_start/page_end for objects live only inside geometry (see note above).
+                        "page_start": doc_geometry.get("page_start", doc.get("page")),
+                        "page_end":   doc_geometry.get("page_end", doc.get("page")),
+                        "bbox":       doc.get("bbox", []),
+                        "geometry":   doc_geometry,
+                    }
+                _append_geometry_record(fh, object_id, value)
     except GeometryValidationError:
         cancel_event.set()
         raise
@@ -410,45 +432,47 @@ def _collect_object_geometry(
             abort_event.set()
         cancel_event.set()
         raise GeometryValidationError(f"object scroll failed after {count} records: {exc!r}", fetched_count=count) from exc
-    return geometry, count
+    return count
 
 
 def _build_geometry_map_for_document(
-    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, abort_event: threading.Event,
-) -> tuple[dict[str, dict], int, int, Exception | None]:
-    """Returns (geometry_map, chunk_count, object_and_sentence_count, error).
-    The two index streams run concurrently (each still bound by the shared
-    global semaphore) instead of sequentially. A shared cancel_event means
-    that if either stream hard-fails (missing/duplicate id, scroll exception),
-    the sibling stream stops at its next record instead of scanning to
-    completion for no reason. abort_event is the PROCESS-WIDE credentials-expiry
-    signal: a collector sets it itself the instant it detects a credentials-expired
-    exception (not only after _process_document returns), and every stream of
-    every document checks it on every record, so an in-flight scroll stops within
-    one record of the failure being detected anywhere in the process. Both
-    futures are always awaited so neither leaks a scroll context. Failures are
-    returned (not raised) so the caller still gets the real partial counts
-    instead of them collapsing to 0."""
+    client, document_id: str, tenant_id: str, project_id: str, semaphore: threading.Semaphore, abort_event: threading.Event, chunk_path: Path, object_path: Path,
+) -> tuple[int, int, Exception | None]:
+    """Returns (chunk_count, object_and_sentence_count, error). Each stream now
+    writes its records straight to its own NDJSON file (chunk_path / object_path,
+    both on ephemeral disk) instead of building an in-memory dict — see
+    _collect_chunk_geometry's docstring for why. The two index streams still
+    run concurrently (each still bound by the shared global semaphore) instead
+    of sequentially. A shared cancel_event means that if either stream
+    hard-fails (missing/duplicate id, scroll exception), the sibling stream
+    stops at its next record instead of scanning to completion for no reason.
+    abort_event is the PROCESS-WIDE credentials-expiry signal: a collector sets
+    it itself the instant it detects a credentials-expired exception (not only
+    after _process_document returns), and every stream of every document
+    checks it on every record, so an in-flight scroll stops within one record
+    of the failure being detected anywhere in the process. Both futures are
+    always awaited so neither leaks a scroll context. Failures are returned
+    (not raised) so the caller still gets the real partial counts instead of
+    them collapsing to 0."""
     cancel_event = threading.Event()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        chunk_future  = pool.submit(_collect_chunk_geometry, client, document_id, tenant_id, project_id, semaphore, cancel_event, abort_event)
-        object_future = pool.submit(_collect_object_geometry, client, document_id, tenant_id, project_id, semaphore, cancel_event, abort_event)
+        chunk_future  = pool.submit(_collect_chunk_geometry, client, document_id, tenant_id, project_id, semaphore, cancel_event, abort_event, chunk_path)
+        object_future = pool.submit(_collect_object_geometry, client, document_id, tenant_id, project_id, semaphore, cancel_event, abort_event, object_path)
 
-        chunk_geometry, chunk_count, chunk_error = {}, 0, None
+        chunk_count, chunk_error = 0, None
         try:
-            chunk_geometry, chunk_count = chunk_future.result()
+            chunk_count = chunk_future.result()
         except Exception as exc:
             chunk_error = exc
             chunk_count = getattr(exc, "fetched_count", 0)
 
-        object_geometry, object_count, object_error = {}, 0, None
+        object_count, object_error = 0, None
         try:
-            object_geometry, object_count = object_future.result()
+            object_count = object_future.result()
         except Exception as exc:
             object_error = exc
             object_count = getattr(exc, "fetched_count", 0)
 
-    geometry = {**chunk_geometry, **object_geometry}
     root_error = None
     for err in (chunk_error, object_error):
         if err is not None and not getattr(err, "is_cancellation", False):
@@ -456,31 +480,57 @@ def _build_geometry_map_for_document(
             break
     else:
         root_error = chunk_error or object_error
-    return geometry, chunk_count, object_count, root_error
+    return chunk_count, object_count, root_error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # S3 upload + verification
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _upload_to_s3(s3, bucket: str, key: str, geometry: dict, dry_run: bool) -> tuple[int, float, float]:
-    """Plain JSON, single put_object to the final deterministic key — S3 PUT is
-    atomic (no partial object from one PUT call), and put_object raises on any
-    failure, which is enough to hard-fail the document. No read-back/HEAD
-    verification: S3 durability is trusted, not re-checked.
-    Returns (byte_size, serialize_seconds, s3_put_seconds)."""
-    t0 = time.perf_counter()
-    body = json.dumps(geometry, separators=(",", ":")).encode("utf-8")
-    serialize_seconds = time.perf_counter() - t0
+def _assemble_and_upload(s3, bucket: str, key: str, chunk_path: Path, object_path: Path, dry_run: bool) -> tuple[int, float, float]:
+    """Streams the two NDJSON temp files (chunk_path/object_path, on ephemeral
+    disk) directly into the final geometry.json on disk — one record at a
+    time, never holding the whole geometry structure in RAM — then uploads the
+    assembled file straight from disk via upload_file (which streams/multiparts
+    internally), instead of building the full serialized body in memory first
+    like a plain put_object(Body=...) would. S3 durability is trusted, not
+    re-checked with a read-back. Returns (byte_size, serialize_seconds, s3_put_seconds)."""
+    out_path = chunk_path.with_name(chunk_path.name + ".geometry.json")
+    try:
+        t0 = time.perf_counter()
+        with out_path.open("w") as out:
+            out.write("{")
+            first = True
+            for path in (chunk_path, object_path):
+                with path.open("r") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        record_id, value = json.loads(line)
+                        if not first:
+                            out.write(",")
+                        first = False
+                        out.write(json.dumps(record_id))
+                        out.write(":")
+                        out.write(json.dumps(value, separators=(",", ":")))
+            out.write("}")
+        serialize_seconds = time.perf_counter() - t0
+        byte_size = out_path.stat().st_size
 
-    if dry_run:
-        logger.info("[DRY RUN] would upload bucket=%s key=%s ids=%d bytes=%d", bucket, key, len(geometry), len(body))
-        return len(body), serialize_seconds, 0.0
+        if dry_run:
+            logger.info("[DRY RUN] would upload bucket=%s key=%s bytes=%d", bucket, key, byte_size)
+            return byte_size, serialize_seconds, 0.0
 
-    t1 = time.perf_counter()
-    s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
-    put_seconds = time.perf_counter() - t1
-    return len(body), serialize_seconds, put_seconds
+        t1 = time.perf_counter()
+        s3.upload_file(str(out_path), bucket, key)
+        put_seconds = time.perf_counter() - t1
+        return byte_size, serialize_seconds, put_seconds
+    finally:
+        # Covers a failure at ANY stage above (assembly write or upload), not
+        # just the upload — otherwise an assembly-time error would leak this
+        # file on ephemeral disk instead of being cleaned up.
+        out_path.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -712,9 +762,23 @@ def _process_document(
     key = f"{prefix}/geometry/geometry.json"
 
     chunk_count = object_count = 0
+    # Both streams write to local ephemeral-disk files (never an in-memory dict) —
+    # this is what actually bounds container memory for documents with 1M+ records.
+    # chunk_path/object_path start as None so the finally block below is safe even
+    # if the second mkstemp raises right after the first one already created a file.
+    chunk_path = object_path = None
     try:
+        chunk_fd, chunk_tmp = tempfile.mkstemp(prefix="geom_chunks_", suffix=".ndjson")
+        os.close(chunk_fd)
+        chunk_path = Path(chunk_tmp)
+        object_fd, object_tmp = tempfile.mkstemp(prefix="geom_objects_", suffix=".ndjson")
+        os.close(object_fd)
+        object_path = Path(object_tmp)
+
         t_scan = time.perf_counter()
-        geometry, chunk_count, object_count, scan_error = _build_geometry_map_for_document(client, document_id, tenant_id, project_id, semaphore, abort_event)
+        chunk_count, object_count, scan_error = _build_geometry_map_for_document(
+            client, document_id, tenant_id, project_id, semaphore, abort_event, chunk_path, object_path,
+        )
         scan_seconds = time.perf_counter() - t_scan
 
         if scan_error is not None:
@@ -723,14 +787,12 @@ def _process_document(
             return _failed(f"chunk count mismatch: expected={expected_chunks} fetched={chunk_count}", chunk_count, object_count, scan_seconds=scan_seconds)
         if object_count != expected_objects:
             return _failed(f"object count mismatch: expected={expected_objects} fetched={object_count}", chunk_count, object_count, scan_seconds=scan_seconds)
-        if len(geometry) != chunk_count + object_count:
-            return _failed(f"geometry id count mismatch: ids={len(geometry)} fetched_total={chunk_count + object_count}", chunk_count, object_count, scan_seconds=scan_seconds)
-        if not geometry:
+        if chunk_count + object_count == 0:
             return _failed("empty_geometry", chunk_count, object_count, scan_seconds=scan_seconds)
         if abort_event.is_set():
             return _failed(ABORTED_MESSAGE, chunk_count, object_count, scan_seconds=scan_seconds)
 
-        geometry_bytes, serialize_seconds, s3_put_seconds = _upload_to_s3(s3, bucket, key, geometry, dry_run)
+        geometry_bytes, serialize_seconds, s3_put_seconds = _assemble_and_upload(s3, bucket, key, chunk_path, object_path, dry_run)
         elapsed_seconds = time.perf_counter() - t_start
         peak_rss_mb = _peak_rss_mb()
 
@@ -742,9 +804,9 @@ def _process_document(
             return _failed(ABORTED_MESSAGE, chunk_count, object_count, key=key, scan_seconds=scan_seconds)
 
         logger.info(
-            "done global_id=%s document_id=%s key=%s chunks=%d objects_and_sentences=%d ids=%d "
+            "done global_id=%s document_id=%s key=%s chunks=%d objects_and_sentences=%d "
             "geometry_bytes=%d scan_s=%.2f serialize_s=%.3f s3_put_s=%.2f elapsed_s=%.2f peak_rss_mb=%.1f",
-            entry.get("id"), document_id, key, chunk_count, object_count, len(geometry),
+            entry.get("id"), document_id, key, chunk_count, object_count,
             geometry_bytes, scan_seconds, serialize_seconds, s3_put_seconds, elapsed_seconds, peak_rss_mb,
         )
         return {
@@ -757,6 +819,11 @@ def _process_document(
     except Exception as exc:
         logger.exception("failed document_id=%s", document_id)
         return _failed(repr(exc)[:500], chunk_count, object_count, key=key)
+    finally:
+        if chunk_path is not None:
+            chunk_path.unlink(missing_ok=True)
+        if object_path is not None:
+            object_path.unlink(missing_ok=True)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
