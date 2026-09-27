@@ -71,7 +71,13 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
+
+try:
+    import orjson
+except ImportError:
+    orjson = None
 
 # app.py sits directly at /app/app.py in the container alongside /app/shared —
 # python already puts the script's own directory on sys.path, so no manual
@@ -85,6 +91,28 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [GeometryMigration] %(message)s",
 )
 logger = logging.getLogger("GeometryMigration")
+
+
+def _dumps(obj: Any) -> bytes:
+    """orjson (if installed) is substantially faster than the stdlib json for
+    the ~1M+ dumps() calls a giant document does; falls back to json so this
+    still runs without orjson as a hard dependency."""
+    if orjson is not None:
+        return orjson.dumps(obj)
+    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
+# Bounds the memory a single document's upload can hold at once: at most
+# max_concurrency parts of multipart_chunksize bytes each are buffered (here,
+# 2 x 8MB = 16MB/document), regardless of how large the final JSON is —
+# instead of the default TransferConfig's max_concurrency=10, which could
+# buffer up to 80MB per document and add up fast across concurrent workers.
+_UPLOAD_TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=8 * 1024 * 1024,
+    multipart_chunksize=8 * 1024 * 1024,
+    max_concurrency=2,
+    use_threads=True,
+)
 
 # opensearchpy logs one line per HTTP call (every scroll page) at INFO, which
 # drowns out the per-document progress lines below with no document identity
@@ -120,10 +148,27 @@ class GeometryValidationError(Exception):
 def _peak_rss_mb() -> float:
     """Process-level peak resident set size, in MB. Note this is a PROCESS peak,
     not memory attributable to any one document — useful as a coarse signal,
-    not a per-document measurement. ru_maxrss is bytes on macOS, KB on Linux."""
+    not a per-document measurement. ru_maxrss is bytes on macOS, KB on Linux.
+    Unlike _current_rss_mb below, this NEVER decreases for the process lifetime."""
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
     return rss / divisor
+
+
+def _current_rss_mb() -> float:
+    """Live resident set size right now, in MB — unlike _peak_rss_mb (a
+    lifetime high-water mark that only ever goes up), this can go down,
+    showing whether memory is actually being reclaimed between documents.
+    Reads /proc/self/status directly (Linux/Fargate) to avoid a psutil
+    dependency; returns 0.0 where /proc doesn't exist (e.g. local macOS dev)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
 
 
 # Substrings (lowercased) that mean the AWS session/temporary credentials used
@@ -338,11 +383,17 @@ def _scan_with_semaphore(client, index: str, document_id: str, tenant_id: str, p
         semaphore.release()
 
 
-def _append_geometry_record(fh, key: str, value: dict) -> None:
-    """One record per line, as a [key, value] JSON array — cheap to append and
-    to stream back out later without ever holding more than one line at a time."""
-    fh.write(json.dumps([key, value], separators=(",", ":")))
-    fh.write("\n")
+def _append_geometry_record(fh, key: str, value: dict, first: bool) -> None:
+    """Writes the exact `"key":value` fragment the final geometry.json needs,
+    comma-joined (not newline-delimited) so the whole file's raw bytes can be
+    concatenated directly into the final JSON object with zero re-parsing or
+    re-encoding (see _assemble_and_upload/_ConcatFileStream) — the leading
+    comma is skipped for the first record in a file."""
+    if not first:
+        fh.write(b",")
+    fh.write(_dumps(key))
+    fh.write(b":")
+    fh.write(_dumps(value))
 
 
 def _collect_chunk_geometry(
@@ -358,7 +409,7 @@ def _collect_chunk_geometry(
     seen_ids: set[str] = set()
     count = 0
     try:
-        with out_path.open("w") as fh:
+        with out_path.open("wb") as fh:
             for doc in _scan_with_semaphore(client, OPENSEARCH_INDEX, document_id, tenant_id, project_id, CHUNK_SOURCE_FIELDS, semaphore, abort_event):
                 if abort_event.is_set():
                     raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
@@ -374,7 +425,7 @@ def _collect_chunk_geometry(
                 _append_geometry_record(fh, chunk_id, {
                     "page_start": doc.get("page_start"),
                     "page_end":   doc.get("page_end"),
-                })
+                }, first=(count == 1))
     except GeometryValidationError:
         cancel_event.set()
         raise
@@ -394,7 +445,7 @@ def _collect_object_geometry(
     seen_ids: set[str] = set()
     count = 0
     try:
-        with out_path.open("w") as fh:
+        with out_path.open("wb") as fh:
             for doc in _scan_with_semaphore(client, SEMANTIC_OBJECTS_INDEX, document_id, tenant_id, project_id, OBJECT_SOURCE_FIELDS, semaphore, abort_event):
                 if abort_event.is_set():
                     raise GeometryValidationError(ABORTED_MESSAGE, fetched_count=count)
@@ -423,7 +474,7 @@ def _collect_object_geometry(
                         "bbox":       doc.get("bbox", []),
                         "geometry":   doc_geometry,
                     }
-                _append_geometry_record(fh, object_id, value)
+                _append_geometry_record(fh, object_id, value, first=(count == 1))
     except GeometryValidationError:
         cancel_event.set()
         raise
@@ -487,50 +538,83 @@ def _build_geometry_map_for_document(
 # S3 upload + verification
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _ConcatFileStream:
+    """Read()-only file-like object that lazily yields
+    b"{" + chunk_path's raw bytes + ("," iff both files are non-empty) + object_path's
+    raw bytes + b"}" — i.e. the exact bytes of the final geometry.json — without
+    ever writing that combined document to disk or holding it whole in memory.
+    Each NDJSON line in chunk_path/object_path is already the final "key":value
+    fragment (see _append_geometry_record), so this is pure byte concatenation,
+    no JSON parse/re-encode. Compatible with boto3's upload_fileobj, which
+    multiparts non-seekable streams like this automatically."""
+
+    _READ_SIZE = 1024 * 1024
+
+    def __init__(self, chunk_path: Path, object_path: Path):
+        self.bytes_read = 0
+        self._buffer = b""
+        self._gen = self._iter_chunks(chunk_path, object_path)
+
+    @classmethod
+    def _iter_chunks(cls, chunk_path: Path, object_path: Path):
+        yield b"{"
+        chunk_has_content = chunk_path.stat().st_size > 0
+        object_has_content = object_path.stat().st_size > 0
+        with chunk_path.open("rb") as fh:
+            while True:
+                data = fh.read(cls._READ_SIZE)
+                if not data:
+                    break
+                yield data
+        if chunk_has_content and object_has_content:
+            yield b","
+        with object_path.open("rb") as fh:
+            while True:
+                data = fh.read(cls._READ_SIZE)
+                if not data:
+                    break
+                yield data
+        yield b"}"
+
+    def read(self, size: int = -1) -> bytes:
+        # upload_fileobj always calls read(amt) with a bounded amt; refuse
+        # read-everything calls instead of silently buffering the whole
+        # multi-hundred-MB document in RAM to satisfy them.
+        if size is None or size < 0:
+            raise ValueError("_ConcatFileStream.read() requires a bounded size; unbounded reads defeat its memory guarantee")
+        while len(self._buffer) < size:
+            try:
+                self._buffer += next(self._gen)
+            except StopIteration:
+                break
+        result, self._buffer = self._buffer[:size], self._buffer[size:]
+        self.bytes_read += len(result)
+        return result
+
+
 def _assemble_and_upload(s3, bucket: str, key: str, chunk_path: Path, object_path: Path, dry_run: bool) -> tuple[int, float, float]:
     """Streams the two NDJSON temp files (chunk_path/object_path, on ephemeral
-    disk) directly into the final geometry.json on disk — one record at a
-    time, never holding the whole geometry structure in RAM — then uploads the
-    assembled file straight from disk via upload_file (which streams/multiparts
-    internally), instead of building the full serialized body in memory first
-    like a plain put_object(Body=...) would. S3 durability is trusted, not
-    re-checked with a read-back. Returns (byte_size, serialize_seconds, s3_put_seconds)."""
-    out_path = chunk_path.with_name(chunk_path.name + ".geometry.json")
-    try:
-        t0 = time.perf_counter()
-        with out_path.open("w") as out:
-            out.write("{")
-            first = True
-            for path in (chunk_path, object_path):
-                with path.open("r") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        record_id, value = json.loads(line)
-                        if not first:
-                            out.write(",")
-                        first = False
-                        out.write(json.dumps(record_id))
-                        out.write(":")
-                        out.write(json.dumps(value, separators=(",", ":")))
-            out.write("}")
-        serialize_seconds = time.perf_counter() - t0
-        byte_size = out_path.stat().st_size
+    disk) straight into S3 via a single multipart upload — no intermediate
+    geometry.json is ever written to disk (removing the extra full-document
+    disk read+write pass that used to dominate this step) and no full-document
+    bytes are ever held in RAM at once (only one multipart part, bounded by
+    _UPLOAD_TRANSFER_CONFIG, is buffered at a time). S3 durability is trusted,
+    not re-checked with a read-back. serialize_seconds is now folded into
+    s3_put_seconds since assembly and upload happen in the same streaming pass.
+    Returns (byte_size, serialize_seconds, s3_put_seconds)."""
+    if dry_run:
+        chunk_size = chunk_path.stat().st_size
+        object_size = object_path.stat().st_size
+        comma = 1 if (chunk_size and object_size) else 0
+        byte_size = 2 + comma + chunk_size + object_size  # "{" + "}" + optional ","
+        logger.info("[DRY RUN] would upload bucket=%s key=%s bytes=%d", bucket, key, byte_size)
+        return byte_size, 0.0, 0.0
 
-        if dry_run:
-            logger.info("[DRY RUN] would upload bucket=%s key=%s bytes=%d", bucket, key, byte_size)
-            return byte_size, serialize_seconds, 0.0
-
-        t1 = time.perf_counter()
-        s3.upload_file(str(out_path), bucket, key)
-        put_seconds = time.perf_counter() - t1
-        return byte_size, serialize_seconds, put_seconds
-    finally:
-        # Covers a failure at ANY stage above (assembly write or upload), not
-        # just the upload — otherwise an assembly-time error would leak this
-        # file on ephemeral disk instead of being cleaned up.
-        out_path.unlink(missing_ok=True)
+    stream = _ConcatFileStream(chunk_path, object_path)
+    t0 = time.perf_counter()
+    s3.upload_fileobj(stream, bucket, key, Config=_UPLOAD_TRANSFER_CONFIG)
+    put_seconds = time.perf_counter() - t0
+    return stream.bytes_read, 0.0, put_seconds
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -564,6 +648,7 @@ def _init_manifest(documents: dict[str, dict[str, Any]]) -> dict:
             "s3PutSeconds": 0.0,
             "elapsedSeconds": 0.0,
             "peakRssMb": 0.0,
+            "currentRssMb": 0.0,
         }
         for global_id, meta in documents.items()
     ]
@@ -749,7 +834,7 @@ def _process_document(
             "status": "FAILED", "s3Key": key, "error": error,
             "fetchedChunks": chunk_count, "fetchedObjects": object_count, "fetchedTotal": chunk_count + object_count,
             "geometryBytes": 0, "scanSeconds": scan_seconds, "serializeSeconds": 0.0, "s3PutSeconds": 0.0,
-            "elapsedSeconds": time.perf_counter() - t_start, "peakRssMb": _peak_rss_mb(),
+            "elapsedSeconds": time.perf_counter() - t_start, "peakRssMb": _peak_rss_mb(), "currentRssMb": _current_rss_mb(),
             "fatal": _is_credentials_expired_error(error),
         }
 
@@ -795,6 +880,7 @@ def _process_document(
         geometry_bytes, serialize_seconds, s3_put_seconds = _assemble_and_upload(s3, bucket, key, chunk_path, object_path, dry_run)
         elapsed_seconds = time.perf_counter() - t_start
         peak_rss_mb = _peak_rss_mb()
+        current_rss_mb = _current_rss_mb()
 
         if abort_event.is_set():
             # Upload itself succeeded, but another document's credentials-expiry
@@ -805,15 +891,15 @@ def _process_document(
 
         logger.info(
             "done global_id=%s document_id=%s key=%s chunks=%d objects_and_sentences=%d "
-            "geometry_bytes=%d scan_s=%.2f serialize_s=%.3f s3_put_s=%.2f elapsed_s=%.2f peak_rss_mb=%.1f",
+            "geometry_bytes=%d scan_s=%.2f serialize_s=%.3f s3_put_s=%.2f elapsed_s=%.2f peak_rss_mb=%.1f current_rss_mb=%.1f",
             entry.get("id"), document_id, key, chunk_count, object_count,
-            geometry_bytes, scan_seconds, serialize_seconds, s3_put_seconds, elapsed_seconds, peak_rss_mb,
+            geometry_bytes, scan_seconds, serialize_seconds, s3_put_seconds, elapsed_seconds, peak_rss_mb, current_rss_mb,
         )
         return {
             "status": "SUCCESS", "s3Key": key, "error": None,
             "fetchedChunks": chunk_count, "fetchedObjects": object_count, "fetchedTotal": chunk_count + object_count,
             "geometryBytes": geometry_bytes, "scanSeconds": scan_seconds, "serializeSeconds": serialize_seconds,
-            "s3PutSeconds": s3_put_seconds, "elapsedSeconds": elapsed_seconds, "peakRssMb": peak_rss_mb,
+            "s3PutSeconds": s3_put_seconds, "elapsedSeconds": elapsed_seconds, "peakRssMb": peak_rss_mb, "currentRssMb": current_rss_mb,
             "fatal": False,
         }
     except Exception as exc:
@@ -1010,6 +1096,7 @@ def main() -> int:
                 entry["s3PutSeconds"] = result["s3PutSeconds"]
                 entry["elapsedSeconds"] = result["elapsedSeconds"]
                 entry["peakRssMb"] = result["peakRssMb"]
+                entry["currentRssMb"] = result["currentRssMb"]
                 totals[result["status"]] = totals.get(result["status"], 0) + 1
                 if result["status"] == "SUCCESS":
                     total_geometry_bytes += result["geometryBytes"]
@@ -1032,10 +1119,10 @@ def main() -> int:
                 eta_seconds = avg_so_far * remaining / args.document_workers if avg_so_far else 0.0
                 logger.info(
                     "progress %d/%d remaining=%d (skipped_pending=%d success=%d failed=%d) last=%s document_id=%s tenant=%s "
-                    "fetched=%d/%d eta_min=%.1f",
+                    "fetched=%d/%d current_rss_mb=%.1f eta_min=%.1f",
                     completed, len(todo), remaining, skipped_pending, totals.get("SUCCESS", 0), totals.get("FAILED", 0),
                     global_id, entry.get("documentId"), entry.get("tenantName"),
-                    result["fetchedTotal"], entry.get("expectedTotal", 0), eta_seconds / 60,
+                    result["fetchedTotal"], entry.get("expectedTotal", 0), result["currentRssMb"], eta_seconds / 60,
                 )
 
     _persist_manifest()
