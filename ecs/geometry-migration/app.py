@@ -577,17 +577,24 @@ class _ConcatFileStream:
         yield b"}"
 
     def read(self, size: int = -1) -> bytes:
-        # upload_fileobj always calls read(amt) with a bounded amt; refuse
-        # read-everything calls instead of silently buffering the whole
-        # multi-hundred-MB document in RAM to satisfy them.
+        # s3transfer calls read() with NO argument for any upload that lands
+        # below multipart_threshold — it needs the whole body to do a single
+        # PutObject. This is safe to fully materialize: bodies that take this
+        # path are, by definition, under _UPLOAD_TRANSFER_CONFIG's threshold
+        # (8MB); anything larger always goes through the true multipart path
+        # below, which only ever calls read(amt) with a bounded amt.
         if size is None or size < 0:
-            raise ValueError("_ConcatFileStream.read() requires a bounded size; unbounded reads defeat its memory guarantee")
-        while len(self._buffer) < size:
-            try:
-                self._buffer += next(self._gen)
-            except StopIteration:
-                break
-        result, self._buffer = self._buffer[:size], self._buffer[size:]
+            chunks = [self._buffer]
+            self._buffer = b""
+            chunks.extend(self._gen)
+            result = b"".join(chunks)
+        else:
+            while len(self._buffer) < size:
+                try:
+                    self._buffer += next(self._gen)
+                except StopIteration:
+                    break
+            result, self._buffer = self._buffer[:size], self._buffer[size:]
         self.bytes_read += len(result)
         return result
 
