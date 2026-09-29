@@ -464,8 +464,9 @@ def _build_object_docs(chunk: dict) -> list[dict]:
             # ── Display (never embedded) ──────────────────────────────────────
             "page":          obj.get("page", page_start),
             "bbox":          [float(v) for v in obj.get("bbox", [])],
-            # geometry and display_spans intentionally omitted: never queried (no retriever
-            # issues a query against these paths); sentence docs already carry the real text/vector.
+            "geometry": obj.get("geometry") or {},
+            # display_spans intentionally omitted: never queried (no retriever issues a
+            # nested query against this path); sentence docs already carry the real text/vector.
             "tenant_id":    tenant_id,
             "tenant_name":  tenant_name,
             "tenant_schema": tenant_schema,
@@ -563,7 +564,7 @@ def _build_sentence_docs(chunk: dict) -> list[dict]:
                 "next_sentence_id": next_id,
                 "page": geometry.get("page", obj.get("page", 0)),
                 "bbox": [float(v) for v in (geometry.get("bbox") or [])],
-                # geometry dict intentionally omitted: page/bbox above already cover display needs
+                "geometry": geometry,
                 "tenant_id": tenant_id,
                 "tenant_name": tenant_name,
                 "tenant_schema": tenant_schema,
