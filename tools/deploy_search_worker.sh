@@ -24,8 +24,10 @@ ECR_REPO="${ECR_REPO:-rls-ci-retrieval-search-worker}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
 LATEST_TAG="${LATEST_TAG:-latest}"
 ROLE_ARN="${ROLE_ARN:-}"
-TIMEOUT="${TIMEOUT:-300}"
-MEMORY_SIZE="${MEMORY_SIZE:-4096}"
+# 800s: near AWS Lambda's 900s hard max, leaving margin below the orchestrator's
+# own 900s timeout for CI lookups / response formatting around the worker invoke.
+TIMEOUT="${TIMEOUT:-800}"
+MEMORY_SIZE="${MEMORY_SIZE:-10240}"
 
 CALLBACK_URL="${CALLBACK_URL:-}"
 OPEN_SEARCH_REGION="${OPEN_SEARCH_REGION:-${AWS_REGION}}"

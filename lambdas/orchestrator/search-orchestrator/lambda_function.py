@@ -168,9 +168,12 @@ def _get(service: str, region: str | None = None):
         import boto3
         from botocore.config import Config
         
-        # For Lambda invocations, set longer read timeout (workers can take 100+ seconds)
+        # For Lambda invocations, set read timeout above the worker Lambda's own
+        # timeout (800s) so the orchestrator never gives up client-side before the
+        # worker itself would have finished/timed out.
         config = Config(
-            read_timeout=180,  # 3 minutes for worker Lambda responses
+            read_timeout=850,  # must stay > search-worker Lambda TIMEOUT (800s)
+            connect_timeout=10,
             retries={'max_attempts': 1}  # Don't retry on timeout
         ) if service == "lambda" else None
         
