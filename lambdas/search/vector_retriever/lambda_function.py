@@ -42,6 +42,9 @@ _raw_exclude = os.environ.get("VECTOR_EXCLUDE_TYPES", "")
 VECTOR_EXCLUDE_TYPES: list[str] = [
     t.strip() for t in _raw_exclude.split(",") if t.strip()
 ]
+# Extra candidates pulled from the on_disk-quantized (32x) index before
+# rescoring against full-precision vectors, to offset quantization recall loss.
+VECTOR_OVERSAMPLE_FACTOR = float(os.environ.get("VECTOR_OVERSAMPLE_FACTOR", "5.0"))
 
 from shared.opensearch_client import get_opensearch_client
 
@@ -189,6 +192,7 @@ def _vector_search_objects(ci_embedding: list[float], document_id: str | None, t
                 "dense_vector": {
                     "vector": ci_embedding,
                     "k":      k + TIE_BUFFER,
+                    "rescore": {"oversample_factor": VECTOR_OVERSAMPLE_FACTOR},
                     **({
                         "filter": {
                             "bool": {
@@ -303,6 +307,7 @@ def _vector_search_objects_heading(ci_embedding: list[float], document_id: str |
                 "heading_dense_vector": {
                     "vector": ci_embedding,
                     "k":      k + TIE_BUFFER,
+                    "rescore": {"oversample_factor": VECTOR_OVERSAMPLE_FACTOR},
                     **({"filter": {"bool": {
                         "filter": filter_clause,
                         **({"must_not": must_not_clause} if must_not_clause else {}),
