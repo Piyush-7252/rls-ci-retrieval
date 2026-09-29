@@ -60,7 +60,7 @@ def _get_os(endpoint: str, region: str):
 
 # ── Mappings (single source of truth — mirrors the create_*_index.py scripts) ─
 
-def _chunks_mapping(n_shards: int = 5) -> dict:
+def _chunks_mapping(n_shards: int = 40) -> dict:
     return {
         "settings": {
             "number_of_shards":   n_shards,
@@ -123,111 +123,16 @@ def _chunks_mapping(n_shards: int = 5) -> dict:
                 "sparse_vector_json":   {"type": "keyword", "index": False},
                 # Metadata
                 "embedding_model":      {"type": "keyword"},
-                "geometry":             {
-                    "type": "object",
-                    "properties": {
-                        "geometry_source":    {"type": "keyword"},
-                        "geometry_precision": {"type": "keyword"},
-                        "is_authoritative":   {"type": "boolean"},
-                        "rects":              {"type": "float", "index": False},
-                        "bbox":               {"type": "float", "index": False},
-                        "object_type":        {"type": "keyword"},
-                        "source_object_id":   {"type": "keyword"},
-                        "page":               {"type": "integer"},
-
-                        "page_distribution": {
-                            "type": "nested",
-                            "properties": {
-                                "page": {
-                                    "type": "integer"
-                                },
-
-                                # Exact portion of the semantic candidate
-                                # belonging to this page. This is the source
-                                # text used by the text-search highlight mode.
-                                "text": {
-                                    "type": "text",
-                                    "analyzer": "english",
-                                    "fields": {
-                                        "keyword": {
-                                            "type": "keyword",
-                                            "ignore_above": 512
-                                        }
-                                    }
-                                },
-
-                                "rects": {
-                                    "type": "float",
-                                    "index": False
-                                },
-                                "paragraph_bbox": {
-                                    "type": "float",
-                                    "index": False,
-                                },
-                                "bbox": {
-                                    "type": "float",
-                                    "index": False
-                                },
-                                "geometry_source": {
-                                    "type": "keyword"
-                                },
-                                "geometry_precision": {
-                                    "type": "keyword"
-                                },
-                                "is_authoritative": {
-                                    "type": "boolean"
-                                },
-                                "source_object_id": {
-                                    "type": "keyword"
-                                },
-                                "source_span_ids": {
-                                    "type": "keyword"
-                                },
-
-                                # Native Apryse spans contributing to the
-                                # semantic sentence/object on this page.
-                                # For containing geometry we intentionally keep
-                                # the complete native span text + rect even when
-                                # only part of the span belongs to the sentence.
-                                "contributing_spans": {
-                                    "type": "nested",
-                                    "properties": {
-                                        "text": {
-                                            "type": "text",
-                                            "analyzer": "english",
-                                            "fields": {
-                                                "keyword": {
-                                                    "type": "keyword",
-                                                    "ignore_above": 512
-                                                }
-                                            }
-                                        },
-                                        "rect": {
-                                            "type": "float",
-                                            "index": False
-                                        },
-                                        "span_id": {
-                                            "type": "keyword"
-                                        },
-                                        "page": {
-                                            "type": "integer"
-                                        },
-                                        "source_object_id": {
-                                            "type": "keyword"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
+                # UI-highlight-only payload, never queried — enabled:False stores it
+                # verbatim in _source with zero Lucene fields/nested child docs.
+                "geometry":             {"type": "object", "enabled": False},
             }
         },
     }
 
 
-def _knn_field(dim: int) -> dict:
-    return {
+def _knn_field(dim: int, on_disk: bool = False) -> dict:
+    field = {
         "type":      "knn_vector",
         "dimension": dim,
         "method": {
@@ -237,14 +142,22 @@ def _knn_field(dim: int) -> dict:
             "parameters": {"ef_construction": 128, "m": 16},
         },
     }
+    if on_disk:
+        # memory-pressure mitigation for large documents (see drop_geometry_fields.py)
+        field["mode"] = "on_disk"
+        field["compression_level"] = "32x"
+    return field
 
 
 def _objects_mapping() -> dict:
+    OBJECTS_SHARDS = 32
+    OBJECTS_EF_SEARCH = 100
     return {
         "settings": {
-            "number_of_shards":   5,
+            "number_of_shards":   OBJECTS_SHARDS,
             "number_of_replicas": 0,
             "index.knn":          True,
+            "knn.algo_param.ef_search": str(OBJECTS_EF_SEARCH),
             "refresh_interval":   "30s",
             "index.mapping.total_fields.limit": 2000,
         },
@@ -295,9 +208,10 @@ def _objects_mapping() -> dict:
                 "parent_heading":    {"type": "keyword"},
                 "prev_object_pos":   {"type": "integer"},
                 "next_object_pos":   {"type": "integer"},
-                # Vectors — both fields are knn-searched in vector_retriever
-                "dense_vector":         _knn_field(1024),
-                "heading_dense_vector": _knn_field(1024),
+                # Vectors — both fields are knn-searched in vector_retriever;
+                # on_disk/32x quantization mitigates memory pressure for large documents.
+                "dense_vector":         _knn_field(1024, on_disk=True),
+                "heading_dense_vector": _knn_field(1024, on_disk=True),
                 # NER entities
                 "entities": {
                     "type": "nested",
@@ -332,120 +246,9 @@ def _objects_mapping() -> dict:
                 "temporal_context":    {"type": "object"},
                 "clinical_signature":  {"type": "object"},
                 "statistical_identity": {"type": "object"},
-                # Canonical candidate geometry — produced upstream during
-                # extraction/chunk construction. Indexing stores it verbatim;
-                # it does not infer or reinterpret geometry.
-                #
-                # Geometry supports three downstream highlight modes:
-                #
-                #   1. paragraph:
-                #        geometry.page_distribution[].bbox
-                #
-                #   2. span:
-                #        geometry.page_distribution[].contributing_spans[].rect
-                #
-                #   3. text_search:
-                #        geometry.page_distribution[].text
-                #        (search the text on each page independently; do not
-                #         use stored geometry for the actual highlight)
-                #
-                # page_distribution is nested because page-local text and
-                # contributing spans must remain associated with their page.
-                "geometry": {
-                    "type": "object",
-                    "properties": {
-                        "geometry_source":    {"type": "keyword"},
-                        "geometry_precision": {"type": "keyword"},
-                        "is_authoritative":   {"type": "boolean"},
-                        "rects":              {"type": "float", "index": False},
-                        "paragraph_bbox":     {"type": "float", "index": False},
-                        "bbox":               {"type": "float", "index": False},
-                        "object_type":        {"type": "keyword"},
-                        "source_object_id":   {"type": "keyword"},
-                        "page":               {"type": "integer"},
-
-                        "page_distribution": {
-                            "type": "nested",
-                            "properties": {
-                                "page": {
-                                    "type": "integer"
-                                },
-
-                                # Exact portion of the semantic candidate
-                                # belonging to this page. This is the source
-                                # text used by the text-search highlight mode.
-                                "text": {
-                                    "type": "text",
-                                    "analyzer": "english",
-                                    "fields": {
-                                        "keyword": {
-                                            "type": "keyword",
-                                            "ignore_above": 512
-                                        }
-                                    }
-                                },
-
-                                "rects": {
-                                    "type": "float",
-                                    "index": False
-                                },
-                                "bbox": {
-                                    "type": "float",
-                                    "index": False
-                                },
-                                "geometry_source": {
-                                    "type": "keyword"
-                                },
-                                "geometry_precision": {
-                                    "type": "keyword"
-                                },
-                                "is_authoritative": {
-                                    "type": "boolean"
-                                },
-                                "source_object_id": {
-                                    "type": "keyword"
-                                },
-                                "source_span_ids": {
-                                    "type": "keyword"
-                                },
-
-                                # Native Apryse spans contributing to the
-                                # semantic sentence/object on this page.
-                                # For containing geometry we intentionally keep
-                                # the complete native span text + rect even when
-                                # only part of the span belongs to the sentence.
-                                "contributing_spans": {
-                                    "type": "nested",
-                                    "properties": {
-                                        "text": {
-                                            "type": "text",
-                                            "analyzer": "english",
-                                            "fields": {
-                                                "keyword": {
-                                                    "type": "keyword",
-                                                    "ignore_above": 512
-                                                }
-                                            }
-                                        },
-                                        "rect": {
-                                            "type": "float",
-                                            "index": False
-                                        },
-                                        "span_id": {
-                                            "type": "keyword"
-                                        },
-                                        "page": {
-                                            "type": "integer"
-                                        },
-                                        "source_object_id": {
-                                            "type": "keyword"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                },
+                # UI-highlight-only payload, never queried — enabled:False stores it
+                # verbatim in _source with zero Lucene fields/nested child docs.
+                "geometry": {"type": "object", "enabled": False},
                 # Sentence-specific fields
                 "parent_object_id":    {"type": "keyword"},
                 "prev_sentence_id":    {"type": "keyword"},
@@ -453,7 +256,8 @@ def _objects_mapping() -> dict:
                 "paragraph_text":      {"type": "text", "analyzer": "english"},
                 "prev_sentence_text":  {"type": "text", "analyzer": "english"},
                 "next_sentence_text":  {"type": "text", "analyzer": "english"},
-                # Display-only / embedding units. Geometry is deliberately absent.
+                # Display-only fields. display_spans intentionally omitted:
+                # never queried, sentence docs already carry the real text/vector.
                 "page":                {"type": "integer"},
                 "bbox":                {"type": "float", "index": False},
                 "list_id":             {"type": "keyword"},
@@ -468,57 +272,6 @@ def _objects_mapping() -> dict:
                 "col_start":           {"type": "integer"},
                 "row_span":            {"type": "integer"},
                 "col_span":            {"type": "integer"},
-                "display_spans": {
-                    "type": "nested",
-                    "properties": {
-                        "type":      {"type": "keyword"},
-                        "text":      {"type": "text", "analyzer": "english"},
-                        "geometry": {
-                            "type": "object",
-                            "properties": {
-                                "geometry_source": {"type": "keyword"},
-                                "geometry_precision": {"type": "keyword"},
-                                "is_authoritative": {"type": "boolean"},
-                                "rects": {"type": "float", "index": False},
-                                "bbox": {"type": "float", "index": False},
-                                "object_type": {"type": "keyword"},
-                                "source_object_id": {"type": "keyword"},
-                                "page": {"type": "integer"},
-                                "page_distribution": {
-                                    "type": "nested",
-                                    "properties": {
-                                        "page": {"type": "integer"},
-                                        "text": {"type": "text", "analyzer": "english"},
-                                        "rects": {"type": "float", "index": False},
-                                        "bbox": {"type": "float", "index": False},
-                                        "geometry_source": {"type": "keyword"},
-                                        "geometry_precision": {"type": "keyword"},
-                                        "is_authoritative": {"type": "boolean"},
-                                        "source_object_id": {"type": "keyword"},
-                                        "source_span_ids": {"type": "keyword"},
-                                        "contributing_spans": {
-                                            "type": "nested",
-                                            "properties": {
-                                                "text": {"type": "text", "analyzer": "english"},
-                                                "rect": {"type": "float", "index": False},
-                                                "span_id": {"type": "keyword"},
-                                                "page": {"type": "integer"},
-                                                "source_object_id": {"type": "keyword"},
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                        "embedding": {
-                            "type": "knn_vector",
-                            "dimension": 1024,
-                            "index": True,
-                            "space_type": "cosinesimil",
-                            "method": {"name": "hnsw", "engine": "faiss"}
-                        }
-                    }
-                },
             }
         },
     }
@@ -801,67 +554,18 @@ def main(
         )
         props = mapping[idx]["mappings"].get("properties", {})
         geometry = props.get("geometry", {})
-        geometry_props = (
-            geometry.get("properties", {})
-            if geometry.get("type") == "object"
-            else {}
-        )
-        required_geometry = {
-            "geometry_source",
-            "geometry_precision",
-            "is_authoritative",
-            "rects",
-            "bbox",
-            "object_type",
-            "page_distribution",
-        }
-
-        page_distribution = geometry_props.get("page_distribution", {})
-        page_distribution_props = (
-            page_distribution.get("properties", {})
-            if page_distribution.get("type") == "nested"
-            else {}
-        )
-
-        required_page_distribution = {
-            "page",
-            "text",
-            "rects",
-            "bbox",
-            "paragraph_bbox",
-            "geometry_source",
-            "geometry_precision",
-            "is_authoritative",
-            "source_object_id",
-            "contributing_spans",
-        }
-
-        contributing_spans = page_distribution_props.get("contributing_spans", {})
-        contributing_span_props = (
-            contributing_spans.get("properties", {})
-            if contributing_spans.get("type") == "nested"
-            else {}
-        )
-
-        required_contributing_spans = {
-            "text",
-            "rect",
-            "span_id",
-        }
-
+        # geometry is stored opaque (enabled:False) — UI-highlight-only, never
+        # queried, so we just confirm it's excluded from indexing/mapping.
         has_geometry = (
-            required_geometry.issubset(geometry_props)
-            and page_distribution.get("type") == "nested"
-            and required_page_distribution.issubset(page_distribution_props)
-            and contributing_spans.get("type") == "nested"
-            and required_contributing_spans.issubset(contributing_span_props)
+            geometry.get("type") == "object" and geometry.get("enabled") is False
         )
+        has_no_display_spans = "display_spans" not in props
 
         status = (
             "✓"
             if doc_id_type == "keyword"
             and has_template
-            and (idx != objects_index or has_geometry)
+            and (idx != objects_index or (has_geometry and has_no_display_spans))
             else "✗"
         )
         geometry_status = (
@@ -872,7 +576,8 @@ def main(
         print(
             f"  [{status}] {idx}  document_id={doc_id_type}  "
             f"dynamic_template={'keyword' if has_template else 'MISSING'}  "
-            f"geometry={geometry_status}"
+            f"geometry={geometry_status}  "
+            f"display_spans={'absent' if has_no_display_spans else 'PRESENT'}"
         )
 
     # ── 6. Print re-dispatch commands ─────────────────────────────────────────
@@ -892,17 +597,12 @@ def main(
             )
 
     print("\nDone. Indexes are empty and ready for fresh indexing.")
-    print("Canonical candidate geometry mapping:")
-    print("  geometry.{geometry_source,geometry_precision,is_authoritative,rects,bbox,object_type}")
-    print("  geometry.page_distribution[]")
-    print("  geometry.page_distribution[].text")
-    print("  geometry.page_distribution[].contributing_spans[]")
-    print("Geometry is produced upstream by extraction/chunk construction;")
-    print("the indexer should only copy those fields and must not infer geometry.")
-    print("Highlight modes:")
-    print("  paragraph  -> page_distribution[].bbox")
-    print("  span       -> page_distribution[].contributing_spans[].rect")
-    print("  text_search -> page_distribution[].text, searched per page")
+    print("geometry is stored as an opaque, unindexed object (enabled:False):")
+    print("  full page_distribution/contributing_spans structure lives in")
+    print("  _source verbatim for UI highlighting only — zero Lucene fields,")
+    print("  not searchable/aggregatable, and cannot be used in queries.")
+    print("display_spans is dropped entirely from semantic-objects — never")
+    print("queried, sentence docs already carry the real text/vector.")
 
 
 if __name__ == "__main__":
@@ -914,8 +614,8 @@ if __name__ == "__main__":
         help="Skip the confirmation prompt",
     )
     parser.add_argument(
-        "--region", default="us-east-1",
-        help="AWS region (default: us-east-1)",
+        "--region", default="eu-west-1",
+        help="AWS region (default: eu-west-1)",
     )
     parser.add_argument(
         "--chunks-index", default="document-chunks",
@@ -947,7 +647,7 @@ if __name__ == "__main__":
 
     endpoint = os.environ.get(
         "OPENSEARCH_ENDPOINT",
-        "search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com",
+        "search-rls-prod-uswe3hhrfhtfq7feh3wnowy7tq.eu-west-1.es.amazonaws.com",
     )
     if not endpoint:
         print("ERROR: OPENSEARCH_ENDPOINT env var not set", file=sys.stderr)
