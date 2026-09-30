@@ -425,16 +425,6 @@ def main() -> int:
         expected = len(payloads)
         logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
 
-        try:
-            global_document_id = get_global_document_id(
-                str(args.document_id), tenant_id=str(args.tenant_id), project_id=str(args.project_id),
-            )
-            geometry_map = _build_document_geometry_map(payloads)
-            _upload_document_geometry(geometry_map, args, "geometry")
-        except Exception:
-            # Geometry externalization is supplementary — never block dispatch on it.
-            logger.exception("geometry upload failed document_id=%s", args.document_id)
-
         if args.dry_run:
             logger.info("DRY RUN complete expected_chunks=%d", expected)
             return 0

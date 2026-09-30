@@ -70,6 +70,7 @@ jobs:
               OPENSEARCH_ENDPOINT="search-rls-dev-rhitzxwnctmuyq2l4kny5kwelu.eu-west-1.es.amazonaws.com"
               OPEN_SEARCH_REGION="eu-west-1"
               SECRETS_MANAGER_REGION="eu-west-1"
+              SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
               ;;
             qa)
@@ -79,6 +80,7 @@ jobs:
               OPENSEARCH_ENDPOINT="search-rls-qa-u7jwn3q2hr3hxp7y2ydab34tfq.us-east-1.es.amazonaws.com"
               OPEN_SEARCH_REGION="us-east-1"
               SECRETS_MANAGER_REGION="us-east-1"
+              SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["us-east-1","us-east-2","eu-central-1","ap-south-1"]'
               ;;
             cqa)
@@ -88,6 +90,7 @@ jobs:
               OPENSEARCH_ENDPOINT="search-rls-cqa-7sgyfh75bof4w5raojeqrtpwue.eu-west-1.es.amazonaws.com"
               OPEN_SEARCH_REGION="eu-west-1"
               SECRETS_MANAGER_REGION="eu-west-1"
+              SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1"]'
               ;;
             prod)
@@ -97,6 +100,7 @@ jobs:
               OPENSEARCH_ENDPOINT="search-rls-prod-uswe3hhrfhtfq7feh3wnowy7tq.eu-west-1.es.amazonaws.com"
               OPEN_SEARCH_REGION="eu-west-1"
               SECRETS_MANAGER_REGION="eu-west-1"
+              SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
               ;;
             *)
@@ -113,6 +117,7 @@ jobs:
             echo "opensearch_endpoint=$OPENSEARCH_ENDPOINT"
             echo "open_search_region=$OPEN_SEARCH_REGION"
             echo "secrets_manager_region=$SECRETS_MANAGER_REGION"
+            echo "semantic_objects_index=$SEMANTIC_OBJECTS_INDEX"
             echo "document_worker_regions=$DOCUMENT_WORKER_REGIONS"
           } >> "$GITHUB_OUTPUT"
 
