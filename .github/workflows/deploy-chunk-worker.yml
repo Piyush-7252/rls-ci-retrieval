@@ -55,6 +55,7 @@ jobs:
       opensearch_endpoint:      ${{ steps.set.outputs.opensearch_endpoint }}
       open_search_region:       ${{ steps.set.outputs.open_search_region }}
       secrets_manager_region:   ${{ steps.set.outputs.secrets_manager_region }}
+      semantic_objects_index:   ${{ steps.set.outputs.semantic_objects_index }}
       document_worker_regions:  ${{ steps.set.outputs.document_worker_regions }}
     steps:
       - name: Set config for deployment
@@ -186,6 +187,7 @@ jobs:
       OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
+      SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
 
     steps:
       - uses: actions/checkout@v4
@@ -231,6 +233,7 @@ jobs:
       OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
+      SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
 
     steps:
       - uses: actions/checkout@v4
@@ -269,6 +272,7 @@ jobs:
       OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
+      SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
 
     steps:
       - uses: actions/checkout@v4
@@ -307,6 +311,7 @@ jobs:
       OPENSEARCH_ENDPOINT:    ${{ needs.config.outputs.opensearch_endpoint }}
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
+      SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
 
     steps:
       - uses: actions/checkout@v4
