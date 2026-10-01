@@ -57,11 +57,15 @@ jobs:
       secrets_manager_region:   ${{ steps.set.outputs.secrets_manager_region }}
       semantic_objects_index:   ${{ steps.set.outputs.semantic_objects_index }}
       document_worker_regions:  ${{ steps.set.outputs.document_worker_regions }}
+      search_results_debug_bucket: ${{ steps.set.outputs.search_results_debug_bucket }}
+      verifier_model:           ${{ steps.set.outputs.verifier_model }}
+      results_debug_prefix:     ${{ steps.set.outputs.results_debug_prefix }}
     steps:
       - name: Set config for deployment
         id: set
         run: |
           DEPLOYMENT="${{ github.event.inputs.deployment || 'dev' }}"
+          RESULTS_DEBUG_PREFIX="rls-ci-retrieval-search-results/debug"
 
           case "$DEPLOYMENT" in
             dev)
@@ -73,6 +77,8 @@ jobs:
               SECRETS_MANAGER_REGION="eu-west-1"
               SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
+              SEARCH_RESULTS_DEBUG_BUCKET="rls-file-bucket-eu"
+              VERIFIER_MODEL="eu.anthropic.claude-haiku-4-5-20251001-v1:0"
               ;;
             qa)
               AWS_REGION="us-east-1"
@@ -83,6 +89,8 @@ jobs:
               SECRETS_MANAGER_REGION="us-east-1"
               SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["us-east-1","us-west-2","us-east-2","eu-central-1","ap-south-1"]'
+              SEARCH_RESULTS_DEBUG_BUCKET="rls-file-bucket-qa"
+              VERIFIER_MODEL="us.anthropic.claude-haiku-4-5-20251001-v1:0"
               ;;
             cqa)
               AWS_REGION="eu-west-1"
@@ -93,6 +101,8 @@ jobs:
               SECRETS_MANAGER_REGION="eu-west-1"
               SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1"]'
+              SEARCH_RESULTS_DEBUG_BUCKET="rls-file-bucket-cqa"
+              VERIFIER_MODEL="eu.anthropic.claude-haiku-4-5-20251001-v1:0"
               ;;
             prod)
               AWS_REGION="eu-west-1"
@@ -103,6 +113,8 @@ jobs:
               SECRETS_MANAGER_REGION="eu-west-1"
               SEMANTIC_OBJECTS_INDEX="semantic-objects-v3"
               DOCUMENT_WORKER_REGIONS='["eu-west-1","us-east-1","us-west-2","eu-central-1","ap-south-1"]'
+              SEARCH_RESULTS_DEBUG_BUCKET="rls-file-bucket-internal"
+              VERIFIER_MODEL="eu.anthropic.claude-haiku-4-5-20251001-v1:0"
               ;;
             *)
               echo "Unknown deployment: $DEPLOYMENT" >&2
@@ -120,6 +132,9 @@ jobs:
             echo "secrets_manager_region=$SECRETS_MANAGER_REGION"
             echo "semantic_objects_index=$SEMANTIC_OBJECTS_INDEX"
             echo "document_worker_regions=$DOCUMENT_WORKER_REGIONS"
+            echo "search_results_debug_bucket=$SEARCH_RESULTS_DEBUG_BUCKET"
+            echo "verifier_model=$VERIFIER_MODEL"
+            echo "results_debug_prefix=$RESULTS_DEBUG_PREFIX"
           } >> "$GITHUB_OUTPUT"
 
   changes:
@@ -273,6 +288,9 @@ jobs:
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
       SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
+      SEARCH_RESULTS_DEBUG_BUCKET: ${{ needs.config.outputs.search_results_debug_bucket }}
+      VERIFIER_MODEL:         ${{ needs.config.outputs.verifier_model }}
+      RESULTS_DEBUG_PREFIX:   ${{ needs.config.outputs.results_debug_prefix }}
 
     steps:
       - uses: actions/checkout@v4
@@ -312,6 +330,9 @@ jobs:
       OPEN_SEARCH_REGION:     ${{ needs.config.outputs.open_search_region }}
       SECRETS_MANAGER_REGION: ${{ needs.config.outputs.secrets_manager_region }}
       SEMANTIC_OBJECTS_INDEX: ${{ needs.config.outputs.semantic_objects_index }}
+      SEARCH_RESULTS_DEBUG_BUCKET: ${{ needs.config.outputs.search_results_debug_bucket }}
+      VERIFIER_MODEL:         ${{ needs.config.outputs.verifier_model }}
+      RESULTS_DEBUG_PREFIX:   ${{ needs.config.outputs.results_debug_prefix }}
 
     steps:
       - uses: actions/checkout@v4
