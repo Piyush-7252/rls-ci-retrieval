@@ -64,6 +64,15 @@ def _fold_dashes(text: str) -> str:
     return text.translate(_DASH_FOLD)
 
 
+# str.lower() is NOT always length-preserving (e.g. "İ".lower() == "i̇", 2
+# chars) — used on raw_folded this would desync raw_lower from raw_index_map
+# (sized off raw_folded) and later index_map[b_start] lookups raise
+# IndexError. Lower char-by-char and keep only the first resulting char so
+# length always matches the 1:1 index map built upstream.
+def _lower_preserve_len(text: str) -> str:
+    return ''.join((ch.lower() or ch)[:1] for ch in text)
+
+
 # Unicode allows the same visible character to be encoded as one precomposed
 # codepoint (NFC, e.g. "é") or a base letter plus a combining mark (NFD, e.g.
 # "e" + U+0301). Two textually-identical strings can differ this way, which
@@ -216,7 +225,7 @@ def _extract_literal_matches(ci_text: str, raw_text: str) -> list[dict]:
     # literal_matches for a hit it just found. Both folds are 1:1, so
     # raw_index_map stays valid.
     raw_folded = _fold_dashes(_fold_quotes(raw_normalized))
-    raw_lower  = raw_folded.lower()
+    raw_lower  = _lower_preserve_len(raw_folded)
 
     ci_s = _fold_dashes(_fold_quotes(unicodedata.normalize('NFC', ci_text.strip())))
     ci_lower = ci_s.lower()
