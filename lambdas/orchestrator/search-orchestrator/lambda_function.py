@@ -343,7 +343,21 @@ def _invoke_worker(batch_payload: dict) -> dict:
             f"Worker batch_idx={batch_payload['batch_idx']} failed: "
             f"{result.get('errorType')}: {result.get('errorMessage')}"
         )
+    if result.get("results_offloaded"):
+        result["results"] = _download_results_from_s3(result.get("results_s3_url", ""))
     return result
+
+
+def _download_results_from_s3(s3_url: str) -> list:
+    """Fetch results offloaded by the worker when its inline response would exceed the 6MB sync-invoke limit."""
+    if not s3_url.startswith("s3://"):
+        logger.error("[Orchestrator] invalid results_s3_url=%r", s3_url)
+        return []
+    bucket, _, key = s3_url[len("s3://"):].partition("/")
+    body = _get("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+    results = json.loads(body)
+    logger.info("[Orchestrator] downloaded offloaded results from %s (%d bytes, %d results)", s3_url, len(body), len(results))
+    return results
 
 
 # ── Result merge ───────────────────────────────────────────────────────────────

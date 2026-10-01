@@ -151,6 +151,8 @@ RETRIEVER_WORKERS      = int(os.environ.get("RETRIEVER_WORKERS", "4"))
 SEARCH_FLOW_DEBUG      = os.environ.get("SEARCH_FLOW_DEBUG", "true").lower() == "true"      # Retrievers per CI
 SEARCH_RESULTS_DEBUG_BUCKET = os.environ.get("SEARCH_RESULTS_DEBUG_BUCKET", "rls-file-bucket-eu")
 RESULTS_DEBUG_PREFIX   = os.environ.get("RESULTS_DEBUG_PREFIX", "search-results")
+# Leaves headroom under the hard 6,291,556 byte Lambda sync-invoke response cap.
+WORKER_RESPONSE_INLINE_LIMIT_BYTES = int(os.environ.get("WORKER_RESPONSE_INLINE_LIMIT_BYTES", "5000000"))
 # ── Lazy singletons ────────────────────────────────────────────────────────────
 _loaded: dict[str, types.ModuleType] = {}
 _evidence_classifier = None  # Lazy load for evidence classification
@@ -896,7 +898,7 @@ def _base_object_id(object_id: str | None) -> str:
     return _re.sub(r"_s\d+$", "", oid)
 
 
-def _hit_with_provenance(hit: dict) -> dict:
+def _hit_with_provenance(hit: dict, debug: bool = False) -> dict:
     """Add retrieval provenance fields to a final hit; strip the raw matched_object."""
     obj            = hit.get("matched_object") or {}
     obj_type       = obj.get("type") or "unknown"
@@ -937,7 +939,6 @@ def _hit_with_provenance(hit: dict) -> dict:
         "retrieval_object_id_base": _base_object_id(object_id),
         "retrieval_parent_chunk_id": parent_chunk_id,
         "retrieval_chunk_id": retrieval_chunk_id,
-        "retrieval_heading_path": obj.get("heading_path"),
         "retrieval_section":     obj.get("section_category") or obj.get("section"),
         "retrieval_origin":      origin_str,
         "selection_reason":      hit.get("selection_reason"),
@@ -949,8 +950,12 @@ def _hit_with_provenance(hit: dict) -> dict:
         "agg_score":             hit.get("agg_score"),
         "score_breakdown":       hit.get("score_breakdown"),
         "agg_score_breakdown":   hit.get("agg_score_breakdown"),
-        "indexed_object":        _indexed_object(hit),
+        # Full detail in debug mode (S3 debug.json); trimmed for the orchestrator's
+        # inline response since the UI only reads geometry/ids (see createHighlight.ts).
+        "indexed_object":        _indexed_object(hit) if debug else _indexed_object_minimal(hit),
     }
+    if debug:
+        extra["retrieval_heading_path"] = obj.get("heading_path")
     # Remove embedding vectors and other unnecessary large fields
     vectors_to_exclude = {
         "matched_object",  # Already handled separately
@@ -961,8 +966,24 @@ def _hit_with_provenance(hit: dict) -> dict:
         "dense_embedding",
         "context",  # Context expanded separately in indexed_object
     }
+    if not debug:
+        vectors_to_exclude |= {"retrieval_heading_path", "context_sentence"}
     base = {k: v for k, v in hit.items() if k not in vectors_to_exclude}
     return {**base, **extra}
+
+
+def _indexed_object_minimal(v: dict) -> dict | None:
+    """Geometry + identity only - all the UI reads from indexed_object (see createHighlight.ts)."""
+    obj = v.get("matched_object")
+    if not obj:
+        return None
+    return {
+        "object_id":       obj.get("object_id"),
+        "parent_chunk_id": obj.get("parent_chunk_id"),
+        "geometry":        obj.get("geometry") or {},
+        "type" :           obj.get("type"),
+        "bbox":            obj.get("bbox"),
+    }
 
 
 def _indexed_object(v: dict) -> dict | None:
@@ -1273,7 +1294,7 @@ def _clean_result(result: dict,debug: bool = False) -> dict:
         # granularity for the CSV exporter and for manual review.
         # Replaces the separate rejected_hits / skipped_hits split for
         # downstream tools; both are kept below for backward compatibility.
-        "final_hits":       [_hit_with_provenance(h) for h in result.get("final_hits", [])],
+        "final_hits":       [_hit_with_provenance(h,debug) for h in result.get("final_hits", [])],
         **({"candidates": [_full_candidate_record(v) for v in result.get("verified_candidates", [])],
             "rejected_hits":    rejected_hits,
             "skipped_hits":     skipped_hits,
@@ -1368,6 +1389,27 @@ def _upload_debug_json_to_s3(debug_json: dict, search_id: str, batch_idx: int, d
     except Exception as exc:
         logger.warning("[S3] failed to upload debug JSON: %s", exc)
         return ""
+
+
+def _upload_results_to_s3(results: list, search_id: str, batch_idx: int, document_id: str, tenant_name: str) -> str:
+    """Upload the full per-CI results list to S3 and return the S3 URL.
+
+    Used as an overflow path when the inline Lambda response would exceed the
+    6MB sync-invoke limit - the orchestrator downloads and merges this instead.
+    """
+    import boto3
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    bucket = SEARCH_RESULTS_DEBUG_BUCKET
+    s3_key = f"{RESULTS_DEBUG_PREFIX}/{tenant_name}/{search_id}/{document_id}/batch/{batch_idx}/results.json"
+    s3.put_object(
+        Bucket=bucket,
+        Key=s3_key,
+        Body=json.dumps(results, default=str, ensure_ascii=False).encode(),
+        ContentType="application/json",
+    )
+    s3_url = f"s3://{bucket}/{s3_key}"
+    logger.info("[S3] overflow results uploaded to %s", s3_url)
+    return s3_url
 
 
 # ── Lambda handler ─────────────────────────────────────────────────────────────
@@ -1487,5 +1529,21 @@ def handler(event: dict, context: Any) -> dict:
         len(enriched_cis), len(completed_cis), len(failed_cis), total_hits,
         pre_strip_size, post_strip_size, reduction_pct
     )
+
+    # Stripping alone doesn't bound total size (many CIs x many final_hits with
+    # full indexed_object text/entities/facts can still exceed the 6MB sync-invoke
+    # cap) - only offload to S3 when actually needed, so the common case stays inline.
+    if post_strip_size > WORKER_RESPONSE_INLINE_LIMIT_BYTES:
+        results_s3_url = _upload_results_to_s3(
+            response["results"], search_id, batch_idx, document_id, tenant_name
+        )
+        logger.warning(
+            "[SearchWorker] response %d bytes exceeds inline limit %d bytes - "
+            "offloaded results to %s",
+            post_strip_size, WORKER_RESPONSE_INLINE_LIMIT_BYTES, results_s3_url,
+        )
+        response["results"] = []
+        response["results_offloaded"] = True
+        response["results_s3_url"] = results_s3_url
 
     return response
