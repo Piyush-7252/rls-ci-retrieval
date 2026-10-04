@@ -115,7 +115,7 @@ def _merge_doc_structure(raw: dict) -> dict:
     return {"properties": props, "pages": pages}
 
 
-def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list[dict]:
+def _prepare_sections(doc_structure: dict, args: argparse.Namespace) -> list:
     total_pages = len(doc_structure.get("pages", []))
     pages = parse_pages(doc_structure, 1, total_pages)
     logger.info("parsed pages=%d", len(pages))
@@ -125,7 +125,12 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list
     t0 = time.perf_counter()
     sections = build_section_chunks(pages, total_pages=total_pages)
     logger.info("section chunking complete sections=%d elapsed_s=%.3f", len(sections), time.perf_counter() - t0)
+    return sections
 
+
+def _iter_chunk_payloads(sections: list, args: argparse.Namespace):
+    """Yield one payload at a time instead of materializing all of them, since each
+    payload embeds the full raw_text/pages/objects for its chunk."""
     global_document_id = get_global_document_id(
         str(args.document_id),
         tenant_id=str(args.tenant_id),
@@ -133,7 +138,6 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list
     )
     attempt_id = args.attempt_id
 
-    payloads: list[dict] = []
     global_obj_counter = 0
     for idx, sec in enumerate(sections):
         chunk_id = f"{global_document_id}_chunk_{idx:04d}"
@@ -151,7 +155,7 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list
             obj["next_chunk_idx"] = sec.next_chunk_idx
         global_obj_counter += len(objects)
 
-        payloads.append({
+        payload = {
             "source_type": "document",
             "document_id": str(args.document_id),
             "tenant_id": str(args.tenant_id),
@@ -184,67 +188,12 @@ def _build_chunk_payloads(doc_structure: dict, args: argparse.Namespace) -> list
                 "pages": sec.virtual_pages,
                 "objects": objects,
             },
-        })
+        }
         logger.info(
             "chunk built index=%d/%d chunk_id=%s pages=%d-%d objects=%d elapsed_s=%.3f",
             idx + 1, len(sections), chunk_id, sec.page_start, sec.page_end, len(objects), time.perf_counter() - t_chunk,
         )
-    return payloads
-
-
-def _build_document_geometry_map(payloads: list[dict]) -> dict[str, dict]:
-    """One flat {id: geometry} map for the whole document.
-
-    chunk_id, object_id, and sentence_id are disjoint ID namespaces, so a
-    single dict can hold all three without collision.
-    """
-    geometry: dict[str, dict] = {}
-
-    for payload in payloads:
-        geometry[payload["chunk_id"]] = {
-            "page_start": payload.get("page_start"),
-            "page_end": payload.get("page_end"),
-        }
-
-        for obj in payload.get("extraction", {}).get("objects", []):
-            object_id = obj.get("object_id")
-            if not object_id:
-                continue
-            geometry[object_id] = {
-                "page": obj.get("page"),
-                "page_start": obj.get("page_start"),
-                "page_end": obj.get("page_end"),
-                "bbox": obj.get("bbox", []),
-                "geometry": obj.get("geometry") or {},
-            }
-
-            for span in obj.get("display_spans", []):
-                if span.get("type") != "sentence":
-                    continue
-                sentence_id = span.get("sentence_id")
-                if not sentence_id:
-                    continue
-                span_geometry = span.get("geometry") or {}
-                geometry[sentence_id] = {
-                    "page": span_geometry.get("page", obj.get("page")),
-                    "bbox": span_geometry.get("bbox", []),
-                    "geometry": span_geometry,
-                }
-
-    return geometry
-
-
-def _upload_document_geometry(geometry: dict, args: argparse.Namespace, global_document_id: str) -> None:
-    if not geometry:
-        return
-    key = f"{args.extraction_path.rstrip('/')}/geometry/{global_document_id}.json"
-    body = json.dumps(geometry, separators=(",", ":")).encode("utf-8")
-    t0 = time.perf_counter()
-    s3.put_object(Bucket=args.input_bucket, Key=key, Body=body, ContentType="application/json")
-    logger.info(
-        "geometry uploaded document_id=%s ids=%d bytes=%d elapsed_s=%.3f bucket=%s key=%s",
-        global_document_id, len(geometry), len(body), time.perf_counter() - t0, args.input_bucket, key,
-    )
+        yield payload
 
 
 def _send_batch(
@@ -307,20 +256,47 @@ def _send_batch(
 _CURRENT_QUEUE_URL = ""
 
 
-def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int, int]:
+def _dispatch(payload_iter, args: argparse.Namespace, expected_hint: int | None = None) -> tuple[int, int, int]:
+    """Stream payloads straight into SQS batches of <=10, sending (and discarding)
+    each batch as soon as it fills, instead of materializing every chunk's
+    extraction payload and its serialized body for the whole document at once."""
     global _CURRENT_QUEUE_URL
     _CURRENT_QUEUE_URL = args.queue_url
     payload_bucket = args.payload_bucket or args.input_bucket
     global_document_id = get_global_document_id(str(args.document_id), tenant_id=str(args.tenant_id), project_id=str(args.project_id))
-    tenant_name = args.tenant_name 
+    tenant_name = args.tenant_name
     project_id = args.project_id
+    total_batches_hint = -(-expected_hint // SQS_MAX_ENTRIES) if expected_hint else None
 
-    batches: list[list[dict]] = []
+    sent = 0
+    offloaded = 0
+    failed_dispatch = 0
+    batch_number = 0
     current: list[dict] = []
     current_bytes = 0
-    offloaded = 0
 
-    for payload in payloads:
+    def _flush() -> None:
+        nonlocal current, current_bytes, batch_number, sent, failed_dispatch
+        if not current:
+            return
+        batch_number += 1
+        batch_sent, batch_failed = _send_batch(current, batch_number, total_batches_hint)
+        sent += batch_sent
+        failed_dispatch += batch_failed
+        logger.info(
+            "dispatch batch accounted batch=%d%s sent=%d failed=%d "
+            "running_sent=%d running_failed=%d",
+            batch_number,
+            f"/{total_batches_hint}" if total_batches_hint else "",
+            batch_sent,
+            batch_failed,
+            sent,
+            failed_dispatch,
+        )
+        current = []
+        current_bytes = 0
+
+    for payload in payload_iter:
         body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         if len(body_bytes) > SQS_MAX_MESSAGE_BYTES:
             key = f"{args.payload_prefix.rstrip('/')}/{tenant_name}/{project_id}/{global_document_id}/{payload['chunk_id']}.json"
@@ -343,46 +319,22 @@ def _dispatch(payloads: list[dict], args: argparse.Namespace) -> tuple[int, int,
             })
         else:
             body = body_bytes.decode("utf-8")
+        del body_bytes, payload  # drop the large extraction payload now that only its serialized body is needed
 
         entry_bytes = len(body.encode("utf-8")) + 512
         if current and (len(current) >= SQS_MAX_ENTRIES or current_bytes + entry_bytes > SQS_MAX_BATCH_BYTES):
-            batches.append(current)
-            current = []
-            current_bytes = 0
-        current.append({"Id": f"m{len(batches):04d}_{len(current):02d}", "MessageBody": body})
+            _flush()
+        current.append({"Id": f"m{batch_number:04d}_{len(current):02d}", "MessageBody": body})
         current_bytes += entry_bytes
-    if current:
-        batches.append(current)
 
-    logger.info("dispatch prepared chunks=%d sqs_batches=%d offloaded=%d", len(payloads), len(batches), offloaded)
-    sent = 0
-    failed_dispatch = 0
-
-    for number, entries in enumerate(batches, 1):
-        batch_sent, batch_failed = _send_batch(
-            entries,
-            number,
-            len(batches),
-        )
-        sent += batch_sent
-        failed_dispatch += batch_failed
-
-        logger.info(
-            "dispatch batch accounted batch=%d/%d sent=%d failed=%d "
-            "running_sent=%d running_failed=%d",
-            number,
-            len(batches),
-            batch_sent,
-            batch_failed,
-            sent,
-            failed_dispatch,
-        )
+    _flush()
 
     logger.info(
-        "dispatch totals expected=%d dispatched=%d failed_dispatch=%d",
-        len(payloads),
+        "dispatch totals expected=%s dispatched=%d failed_dispatch=%d offloaded=%d",
+        expected_hint if expected_hint is not None else "unknown",
         sent,
         failed_dispatch,
+        offloaded,
     )
 
     return sent, offloaded, failed_dispatch
@@ -421,15 +373,17 @@ def main() -> int:
         del raw
         logger.info("document structure merged pages=%d elapsed_s=%.3f", len(doc_structure.get("pages", [])), time.perf_counter() - t0)
 
-        payloads = _build_chunk_payloads(doc_structure, args)
-        expected = len(payloads)
-        logger.info("object build complete document_id=%s expected_chunks=%d", args.document_id, expected)
+        payload_bucket = args.payload_bucket or args.input_bucket  # noqa: F841 (kept for readability near _dispatch call)
+        sections = _prepare_sections(doc_structure, args)
+        del doc_structure
+        expected = len(sections)
+        logger.info("section chunking complete document_id=%s expected_chunks=%d", args.document_id, expected)
 
         if args.dry_run:
             logger.info("DRY RUN complete expected_chunks=%d", expected)
             return 0
 
-        sent, offloaded, failed_dispatch = _dispatch(payloads, args)
+        sent, offloaded, failed_dispatch = _dispatch(_iter_chunk_payloads(sections, args), args, expected_hint=expected)
 
         status = "DISPATCHED" if failed_dispatch == 0 else "DISPATCH_PARTIAL"
 
